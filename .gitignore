@@ -10,8 +10,8 @@ TCAD_Selftest_Output_*/
 tcad_simulator_split/
 
 # Downloaded WebUI/docsite vendor
-OrbitControls.js
-STLLoader.js
-three.js
-three.min.js
+/OrbitControls.js
+/STLLoader.js
+/three.js
+/three.min.js
 tools/html_vendor/

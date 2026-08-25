@@ -36,10 +36,10 @@ TCAD_Selftest_Output_*/
 tcad_simulator_split/
 
 # Downloaded WebUI/docsite vendor
-OrbitControls.js
-STLLoader.js
-three.js
-three.min.js
+/OrbitControls.js
+/STLLoader.js
+/three.js
+/three.min.js
 tools/html_vendor/
 ```
 
@@ -47,7 +47,7 @@ tools/html_vendor/
 
 运行：`git check-ignore -v OrbitControls.js STLLoader.js TCAD_Web_Data/ tcad_simulator_split/ three.js three.min.js tools/html_vendor/`
 
-预期：每个路径都显示 `.gitignore` 中的匹配行；`git check-ignore README.md tcad_simulator.py` 仍退出 1。
+预期：每个路径都显示 `.gitignore` 中的匹配行；`git check-ignore README.md tcad_simulator.py` 仍退出 1；反向检查 `git check-ignore src/OrbitControls.js frontend/STLLoader.js web/three.js docs/three.min.js` 退出 1。
 
 - [ ] **步骤 4：Commit**
 
