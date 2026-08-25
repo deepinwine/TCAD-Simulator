@@ -6352,7 +6352,10 @@ class MaterialDatabase:
 
         def clamp01(value: Any, default: float) -> float:
             try:
-                return float(np.clip(float(value), 0.0, 1.0))
+                number = float(value)
+                if not math.isfinite(number):
+                    return float(default)
+                return float(np.clip(number, 0.0, 1.0))
             except Exception:
                 return float(default)
 
