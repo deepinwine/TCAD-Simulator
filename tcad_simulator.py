@@ -5608,6 +5608,41 @@ class MaterialVisual:
     roughness: float = 0.72
     visible: bool = True
 
+    def __post_init__(self) -> None:
+        try:
+            material_id = int(self.material_id)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("material_id must be convertible to int") from None
+        if not isinstance(self.display_name, str) or not self.display_name.strip():
+            raise ValueError("display_name must be a non-empty string")
+        if isinstance(self.color, (str, bytes)):
+            raise ValueError("color must contain exactly three finite values")
+        try:
+            color = tuple(float(value) for value in self.color)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("color must contain exactly three finite values") from None
+        if len(color) != 3 or any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in color):
+            raise ValueError("color must contain exactly three finite values in [0, 1]")
+
+        def normalized_scalar(name: str, value: Any) -> float:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(f"{name} must be a finite value in [0, 1]") from None
+            if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+                raise ValueError(f"{name} must be a finite value in [0, 1]")
+            return number
+
+        if not isinstance(self.visible, bool):
+            raise ValueError("visible must be a bool")
+        object.__setattr__(self, "material_id", material_id)
+        object.__setattr__(self, "display_name", str(self.display_name))
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "opacity", normalized_scalar("opacity", self.opacity))
+        object.__setattr__(self, "metallic", normalized_scalar("metallic", self.metallic))
+        object.__setattr__(self, "roughness", normalized_scalar("roughness", self.roughness))
+        object.__setattr__(self, "visible", bool(self.visible))
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "material_id": int(self.material_id),
@@ -6360,18 +6395,24 @@ class MaterialDatabase:
                 return float(default)
 
         source_color = raw.get("color", material.color)
-        try:
+        if isinstance(source_color, (list, tuple)) and len(source_color) == 3:
             color = tuple(clamp01(source_color[i], material.color[i]) for i in range(3))
-        except Exception:
+        else:
             color = tuple(float(v) for v in material.color)
+        display_name = raw.get("display_name", material.name)
+        if not isinstance(display_name, str) or not display_name.strip():
+            display_name = material.name
+        visible = raw.get("visible", True)
+        if not isinstance(visible, bool):
+            visible = True
         return MaterialVisual(
             material_id=int(material_id),
-            display_name=str(raw.get("display_name") or material.name),
+            display_name=display_name,
             color=(float(color[0]), float(color[1]), float(color[2])),
             opacity=clamp01(raw.get("opacity", 1.0), 1.0),
             metallic=clamp01(raw.get("metallic", 0.0), 0.0),
             roughness=clamp01(raw.get("roughness", 0.72), 0.72),
-            visible=bool(raw.get("visible", True)),
+            visible=visible,
         )
 
     def palette(self) -> np.ndarray:
