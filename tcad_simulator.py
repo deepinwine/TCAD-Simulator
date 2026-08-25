@@ -5598,6 +5598,28 @@ class Material:
         return (*self.color, 0.92)
 
 
+@dataclass(frozen=True)
+class MaterialVisual:
+    material_id: int
+    display_name: str
+    color: Tuple[float, float, float]
+    opacity: float = 1.0
+    metallic: float = 0.0
+    roughness: float = 0.72
+    visible: bool = True
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "material_id": int(self.material_id),
+            "display_name": str(self.display_name),
+            "color": [float(v) for v in self.color],
+            "opacity": float(self.opacity),
+            "metallic": float(self.metallic),
+            "roughness": float(self.roughness),
+            "visible": bool(self.visible),
+        }
+
+
 @dataclass
 class ParameterSpec:
     key: str
@@ -6323,6 +6345,31 @@ class MaterialDatabase:
 
     def material(self, mat_id: int) -> Material:
         return self._id_to_material[mat_id]
+
+    def material_visual(self, material_id: int, override: Optional[Dict[str, Any]] = None) -> MaterialVisual:
+        material = self.material(int(material_id))
+        raw = override if isinstance(override, dict) else {}
+
+        def clamp01(value: Any, default: float) -> float:
+            try:
+                return float(np.clip(float(value), 0.0, 1.0))
+            except Exception:
+                return float(default)
+
+        source_color = raw.get("color", material.color)
+        try:
+            color = tuple(clamp01(source_color[i], material.color[i]) for i in range(3))
+        except Exception:
+            color = tuple(float(v) for v in material.color)
+        return MaterialVisual(
+            material_id=int(material_id),
+            display_name=str(raw.get("display_name") or material.name),
+            color=(float(color[0]), float(color[1]), float(color[2])),
+            opacity=clamp01(raw.get("opacity", 1.0), 1.0),
+            metallic=clamp01(raw.get("metallic", 0.0), 0.0),
+            roughness=clamp01(raw.get("roughness", 0.72), 0.72),
+            visible=bool(raw.get("visible", True)),
+        )
 
     def palette(self) -> np.ndarray:
         palette = np.zeros((len(self._id_to_material), 4), dtype=float)
