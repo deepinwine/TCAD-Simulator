@@ -31162,6 +31162,33 @@ def _normalize_step_instance_name(value: Any, fallback: str) -> str:
     return (normalized or fallback_name)[:80]
 
 
+_STEP_RUNTIME_STATES = frozenset({"ready", "dirty", "running", "done", "error"})
+
+
+def _step_runtime_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
+def _normalize_step_statuses(statuses: Any, recipe_length: int) -> List[str]:
+    source = list(statuses) if isinstance(statuses, (list, tuple)) else []
+    out: List[str] = []
+    for index in range(max(0, _step_runtime_int(recipe_length))):
+        raw = str(source[index]).lower() if index < len(source) else "ready"
+        out.append(raw if raw in _STEP_RUNTIME_STATES else "ready")
+    return out
+
+
+def _invalidate_step_statuses(statuses: Any, start_index: int, recipe_length: int) -> List[str]:
+    out = _normalize_step_statuses(statuses, recipe_length)
+    start = int(np.clip(_step_runtime_int(start_index), 0, len(out)))
+    for index in range(start, len(out)):
+        out[index] = "dirty"
+    return out
+
+
 def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "name": step.name,
@@ -35488,6 +35515,33 @@ def _webui_worker_main(
             _webui_apply_admin_step_defaults(st, admin_cfg)
     except Exception:
         pass
+    step_runtime_statuses = _normalize_step_statuses([], len(steps))
+
+    def _serialize_recipe_for_client() -> List[Dict[str, Any]]:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        result: List[Dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            blob = _webui_serialize_step(step)
+            blob["runtime_status"] = step_runtime_statuses[index]
+            result.append(blob)
+        return result
+
+    def _serialize_step_for_client(index: int) -> Dict[str, Any]:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        blob = _webui_serialize_step(steps[index])
+        blob["runtime_status"] = step_runtime_statuses[index]
+        return blob
+
+    def _reset_step_runtime_statuses() -> None:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses([], len(steps))
+
+    def _invalidate_step_runtime_statuses(start_index: int) -> None:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, start_index, len(steps))
+
     # Normalize any "material" role params to mat_id ints so recipes persist stably across renames.
     pending_warnings: List[str] = []
     try:
@@ -51790,6 +51844,7 @@ def _webui_worker_main(
             if not new_steps2:
                 raise RuntimeError("No valid steps after applying patches.")
             steps[:] = new_steps2
+            _invalidate_step_runtime_statuses(0)
             # Align meta length.
             meta2 = meta_blob if isinstance(meta_blob, list) else []
             if len(meta2) < len(new_steps2):
@@ -56190,6 +56245,7 @@ def _webui_worker_main(
             _write_session_state()
             model_revision += 1
             preview_ready.clear()
+            _reset_step_runtime_statuses()
             return True
         except Exception:
             return False
@@ -56339,6 +56395,7 @@ def _webui_worker_main(
                 pass
             model_revision += 1
             preview_ready.clear()
+            _reset_step_runtime_statuses()
             return True
         except Exception:
             return False
@@ -56440,6 +56497,7 @@ def _webui_worker_main(
                 _webui_apply_admin_step_defaults(st, admin_cfg)
         except Exception:
             pass
+        _reset_step_runtime_statuses()
         try:
             for st in steps:
                 msgs = _normalize_step_material_params(st, material_db, admin_cfg)
@@ -60262,7 +60320,7 @@ def _webui_worker_main(
                     "model": _webui_model_summary(model),
                     "materials": _webui_material_list(material_db),
                     "present_material_ids": _present_material_ids(),
-                    "recipe": [_webui_serialize_step(step) for step in steps],
+                    "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
                     "history": history_index,
                     "recipes": history_index,
@@ -62557,6 +62615,7 @@ def _webui_worker_main(
                                 warnings2.append(f"Variant inject: failed: {exc}")
 
                         steps[:] = new_steps
+                        _invalidate_step_runtime_statuses(0)
                         # Install step_meta for run-time logging.
                         meta2 = pending.get("step_meta")
                         if not isinstance(meta2, list):
@@ -62572,7 +62631,7 @@ def _webui_worker_main(
                             {
                                 "ok": True,
                                 "result": {
-                                    "recipe": [_webui_serialize_step(s) for s in steps],
+                                    "recipe": _serialize_recipe_for_client(),
                                     "model": _webui_model_summary(model),
                                     "ui_state": current_ui_state,
                                     "log": model.history[-250:],
@@ -63374,7 +63433,7 @@ def _webui_worker_main(
                             {
                                 "ok": True,
                                 "result": {
-                                    "recipe": [_webui_serialize_step(s) for s in steps],
+                                    "recipe": _serialize_recipe_for_client(),
                                     "model": _webui_model_summary(model),
                                     "ui_state": current_ui_state,
                                     "log": model.history[-250:],
@@ -64905,6 +64964,7 @@ def _webui_worker_main(
                             if not new_steps2:
                                 break
                             steps[:] = new_steps2
+                            _invalidate_step_runtime_statuses(0)
                             a["step_meta"] = meta_new if isinstance(meta_new, list) else [None] * len(new_steps2)
                             warnings_all.extend([str(w) for w in apply_warns if str(w).strip()])
                             _autosave(f"agent iterate loopwise apply {loop_label} {li + 1}/{per_loop_rounds}")
@@ -64991,7 +65051,7 @@ def _webui_worker_main(
                         {
                             "ok": True,
                             "result": {
-                                "recipe": [_webui_serialize_step(s) for s in steps],
+                                "recipe": _serialize_recipe_for_client(),
                                 "model": _webui_model_summary(model),
                                 "ui_state": current_ui_state,
                                 "log": model.history[-250:],
@@ -65474,6 +65534,7 @@ def _webui_worker_main(
                         except Exception as exc:
                             warnings2.append(f"Variant inject: failed: {exc}")
                     steps[:] = new_steps2
+                    _invalidate_step_runtime_statuses(0)
                     meta2 = pending.get("step_meta")
                     if not isinstance(meta2, list):
                         meta2 = [None] * len(new_steps2)
@@ -65626,7 +65687,7 @@ def _webui_worker_main(
                     {
                         "ok": True,
                         "result": {
-                            "recipe": [_webui_serialize_step(s) for s in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "model": _webui_model_summary(model),
                             "ui_state": current_ui_state,
                             "log": model.history[-250:],
@@ -65761,6 +65822,7 @@ def _webui_worker_main(
                         warnings2.append(f"Variant inject: failed: {exc}")
 
                 steps[:] = new_steps2
+                _invalidate_step_runtime_statuses(0)
                 meta2 = pending.get("step_meta")
                 if not isinstance(meta2, list):
                     meta2 = [None] * len(new_steps2)
@@ -65775,7 +65837,7 @@ def _webui_worker_main(
                     {
                         "ok": True,
                         "result": {
-                            "recipe": [_webui_serialize_step(s) for s in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "model": _webui_model_summary(model),
                             "ui_state": current_ui_state,
                             "log": model.history[-250:],
@@ -65935,6 +65997,7 @@ def _webui_worker_main(
                     except Exception as exc:
                         conn.send({"ok": False, "error": f"Apply mask failed: {exc}", "rid": rid})
                         continue
+                    _invalidate_step_runtime_statuses(idx)
                     try:
                         _autosave("mask ai")
                     except Exception:
@@ -68126,6 +68189,7 @@ def _webui_worker_main(
                 except Exception as exc:
                     conn.send({"ok": False, "error": f"Apply mask failed: {exc}", "rid": rid})
                     continue
+                _invalidate_step_runtime_statuses(idx)
                 try:
                     _autosave("mask ai")
                 except Exception:
@@ -68371,6 +68435,7 @@ def _webui_worker_main(
                         if st is not None:
                             rebuilt.append(st)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 # Ensure Mask Exposure mask_file paths are session-local/available for immediate preview/run.
                 try:
                     for st in steps:
@@ -68429,7 +68494,7 @@ def _webui_worker_main(
                         "result": {
                             "imported": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "ui_state": current_ui_state,
@@ -69089,7 +69154,7 @@ def _webui_worker_main(
                 continue
 
             if cmd == "get_recipe":
-                conn.send({"ok": True, "result": [_webui_serialize_step(step) for step in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "set_step":
@@ -69155,7 +69220,9 @@ def _webui_worker_main(
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave(f"edit step {idx}")
-                resp = {"ok": True, "result": _webui_serialize_step(step), "rid": rid}
+                if any(key in payload for key in ("enabled", "group", "loop", "params", "custom_mask")):
+                    _invalidate_step_runtime_statuses(idx)
+                resp = {"ok": True, "result": _serialize_step_for_client(idx), "rid": rid}
                 if step_warn:
                     resp["warnings"] = step_warn[:12]
                 conn.send(resp)
@@ -69264,6 +69331,7 @@ def _webui_worker_main(
 
                 if inserted_count <= 0:
                     raise ValueError("No steps inserted")
+                _invalidate_step_runtime_statuses(inserted_pos)
                 try:
                     _agent_shift_step_meta_insert(int(inserted_pos), int(inserted_count))
                 except Exception:
@@ -69274,7 +69342,7 @@ def _webui_worker_main(
                 conn.send(
                     {
                         "ok": True,
-                        "result": [_webui_serialize_step(s) for s in steps],
+                        "result": _serialize_recipe_for_client(),
                         "meta": {"inserted_at": int(inserted_pos), "inserted_count": int(inserted_count)},
                         "rid": rid,
                     }
@@ -69310,6 +69378,7 @@ def _webui_worker_main(
                     pass
                 if insert_index is None:
                     steps.append(step)
+                    pos = len(steps) - 1
                     try:
                         _agent_shift_step_meta_insert(len(steps) - 1, 1)
                     except Exception:
@@ -69322,10 +69391,11 @@ def _webui_worker_main(
                         _agent_shift_step_meta_insert(int(pos), 1)
                     except Exception:
                         pass
+                _invalidate_step_runtime_statuses(pos)
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave("add step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_remove":
@@ -69333,12 +69403,13 @@ def _webui_worker_main(
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
                 del steps[idx]
+                _invalidate_step_runtime_statuses(idx)
                 try:
                     _agent_shift_step_meta_remove(int(idx))
                 except Exception:
                     pass
                 _autosave("remove step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_duplicate":
@@ -69375,12 +69446,13 @@ def _webui_worker_main(
                     if getattr(original, "image_mask", None) is not None:
                         dup.image_mask = original.image_mask.copy()
                 steps.insert(idx + 1, dup)
+                _invalidate_step_runtime_statuses(idx + 1)
                 try:
                     _agent_shift_step_meta_duplicate(int(idx))
                 except Exception:
                     pass
                 _autosave("duplicate step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_move":
@@ -69388,20 +69460,25 @@ def _webui_worker_main(
                 direction = str(payload.get("direction", "")).strip().lower()
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
+                moved_to = idx
                 if direction == "up" and idx > 0:
                     steps[idx - 1], steps[idx] = steps[idx], steps[idx - 1]
+                    moved_to = idx - 1
                     try:
                         _agent_shift_step_meta_move(int(idx), int(idx - 1))
                     except Exception:
                         pass
                 elif direction == "down" and idx < len(steps) - 1:
                     steps[idx + 1], steps[idx] = steps[idx], steps[idx + 1]
+                    moved_to = idx + 1
                     try:
                         _agent_shift_step_meta_move(int(idx), int(idx + 1))
                     except Exception:
                         pass
+                if moved_to != idx:
+                    _invalidate_step_runtime_statuses(min(idx, moved_to))
                 _autosave("move step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "apply_domain":
@@ -69454,6 +69531,7 @@ def _webui_worker_main(
             if cmd == "reset":
                 _push_undo()
                 model.reset_state()
+                _reset_step_runtime_statuses()
                 try:
                     model._log("Model reset to substrate state.")
                 except Exception:
@@ -69674,13 +69752,18 @@ def _webui_worker_main(
                         idx = -1
                     if 0 <= idx < len(steps):
                         step_obj = steps[idx]
+                        step_edited = False
                         if "enabled" in step_blob:
                             step_obj.enabled = bool(step_blob.get("enabled"))
+                            step_edited = True
                         step_params = step_blob.get("params")
                         if isinstance(step_params, dict):
                             step_obj.params.update(step_params)
+                            step_edited = True
                             if isinstance(step_obj, ExposureStep) and "mask_file" in step_params:
                                 step_obj.image_mask = None
+                        if step_edited:
+                            _invalidate_step_runtime_statuses(idx)
                 _autosave(note or "save", immediate=True)
                 conn.send(
                     {
@@ -69724,7 +69807,7 @@ def _webui_worker_main(
                         "result": {
                             "loaded": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "history": history_index,
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
@@ -69881,6 +69964,7 @@ def _webui_worker_main(
                     if not current_recipe_id:
                         current_recipe_name = "Untitled"
                         steps = _webui_default_recipe(material_db)
+                        _reset_step_runtime_statuses()
                         _set_threads_quiet(default_domain_threads)
                         try:
                             model.configure_domain(default_domain_shape, default_domain_voxel_nm)
@@ -69918,6 +70002,7 @@ def _webui_worker_main(
                 # New recipe should start minimal: keep only "Initialize Wafer".
                 init_step = InitializeWaferStep(material_db)
                 steps = [init_step]
+                _reset_step_runtime_statuses()
                 try:
                     _invalidate_loop_cache()
                 except Exception:
@@ -69965,7 +70050,7 @@ def _webui_worker_main(
                         "ok": True,
                         "result": {
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
@@ -70023,6 +70108,7 @@ def _webui_worker_main(
                         if rebuilt_step is not None:
                             rebuilt.append(rebuilt_step)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 try:
                     _invalidate_loop_cache()
                 except Exception:
@@ -70074,7 +70160,7 @@ def _webui_worker_main(
                         "result": {
                             "loaded": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
@@ -70135,6 +70221,7 @@ def _webui_worker_main(
                         if rebuilt_step is not None:
                             rebuilt.append(rebuilt_step)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 if not rebuilt:
                     try:
                         for st in steps:
@@ -70213,7 +70300,7 @@ def _webui_worker_main(
                         "result": {
                             "imported": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
