@@ -35,6 +35,7 @@
 
 规范运行时修改集中在：
 
+- `.gitignore`：忽略 Python 缓存、WebUI 数据、self-test 输出、拆分视图和下载的前端 vendor。
 - `tcad_simulator.py`：材料视觉、工艺原语与步骤、Recipe 迁移、Worker 状态、WebUI、Viewer 和 demos。
 - `README.md`：Process CAD Shell 使用入口、三个 demo 和兼容说明。
 - `docs/ARCHITECTURE.md`：CAD Shell 数据流、快照失效和 Viewer 后端选择。

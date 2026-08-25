@@ -10,6 +10,53 @@
 
 ---
 
+### 任务 0：建立精确的生成物忽略规则
+
+**文件：**
+- 创建：`.gitignore`
+
+- [ ] **步骤 1：验证当前生成物没有被忽略**
+
+运行：`git check-ignore OrbitControls.js TCAD_Web_Data/ tcad_simulator_split/`
+
+预期：退出码 1，说明仓库当前没有对应规则。
+
+- [ ] **步骤 2：创建 `.gitignore`**
+
+```gitignore
+# Python runtime
+__pycache__/
+*.py[cod]
+
+# TCAD runtime and self-tests
+TCAD_Web_Data/
+TCAD_Selftest_Output_*/
+
+# Generated navigation view
+tcad_simulator_split/
+
+# Downloaded WebUI/docsite vendor
+OrbitControls.js
+STLLoader.js
+three.js
+three.min.js
+tools/html_vendor/
+```
+
+- [ ] **步骤 3：验证规则只匹配已知生成物**
+
+运行：`git check-ignore -v OrbitControls.js STLLoader.js TCAD_Web_Data/ tcad_simulator_split/ three.js three.min.js tools/html_vendor/`
+
+预期：每个路径都显示 `.gitignore` 中的匹配行；`git check-ignore README.md tcad_simulator.py` 仍退出 1。
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add .gitignore
+git commit -m "chore(仓库): 忽略运行与拆分生成物"
+git push backup HEAD:codex/process-cad-shell
+```
+
 ### 任务 1：建立标准库测试入口
 
 **文件：**
