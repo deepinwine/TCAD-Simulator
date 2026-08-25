@@ -60,8 +60,8 @@ git push backup HEAD:codex/process-cad-shell
 class StripTests(unittest.TestCase):
     def test_global_strip_removes_only_selected_material(self):
         db, model = make_model()
-        oxide = db.id("Silicon Dioxide")
-        resist = db.id("Photoresist")
+        oxide = db.id_for("Silicon Dioxide")
+        resist = db.id_for("Photoresist")
         model.grid[:, :, :4] = oxide
         model.grid[2:8, 2:8, 4:6] = resist
         removed = model.strip_materials(["Photoresist"], exposed_only=False)
@@ -71,8 +71,8 @@ class StripTests(unittest.TestCase):
 
     def test_exposed_strip_keeps_sealed_pocket(self):
         db, model = make_model()
-        oxide = db.id("Silicon Dioxide")
-        resist = db.id("Photoresist")
+        oxide = db.id_for("Silicon Dioxide")
+        resist = db.id_for("Photoresist")
         model.grid[1:9, 1:9, 1:9] = oxide
         model.grid[3:5, 3:5, 3:5] = resist
         model.grid[6:8, 6:8, 8:10] = resist
@@ -91,7 +91,7 @@ class StripTests(unittest.TestCase):
 
 ```python
 def strip_materials(self, materials: Sequence[Any], exposed_only: bool = False, direction: str = "top") -> int:
-    ids = {int(self.material_db.id(value)) for value in materials}
+    ids = {int(self.material_db.id_for(value)) for value in materials}
     target = np.isin(self.grid, np.fromiter(ids, dtype=np.uint16))
     if bool(exposed_only):
         void = self.grid == 0
@@ -138,8 +138,8 @@ git push backup HEAD:codex/process-cad-shell
 class FillTests(unittest.TestCase):
     def test_fill_open_trench_without_filling_sealed_void(self):
         db, model = make_model((12, 12, 18))
-        silicon = db.id("Silicon")
-        copper = db.id("Copper")
+        silicon = db.id_for("Silicon")
+        copper = db.id_for("Copper")
         model.grid[:, :, :10] = silicon
         model.grid[2:5, 2:5, 5:10] = 0
         model.grid[8:10, 8:10, 3:5] = 0
@@ -159,7 +159,7 @@ class FillTests(unittest.TestCase):
 
 ```python
 def fill_voids(self, material: Any, max_depth_nm: float, direction: str = "top", include_sealed: bool = False) -> int:
-    material_id = np.uint16(self.material_db.id(material))
+    material_id = np.uint16(self.material_db.id_for(material))
     depth_voxels = max(1, int(math.ceil(float(max_depth_nm) / float(self.voxel_size_nm))))
     void = self.grid == 0
     occupied_z = np.flatnonzero(np.any(self.grid != 0, axis=(0, 1)))
@@ -285,8 +285,8 @@ git push backup HEAD:codex/process-cad-shell
 class BondingTests(unittest.TestCase):
     def test_bonding_adds_interface_and_handle_on_active_side(self):
         db, model = make_model((6, 6, 20))
-        silicon = db.id("Silicon")
-        oxide = db.id("Silicon Dioxide")
+        silicon = db.id_for("Silicon")
+        oxide = db.id_for("Silicon Dioxide")
         model.grid[:, :, :4] = silicon
         result = model.bond_wafer(
             handle_material="Silicon",
@@ -351,7 +351,7 @@ git push backup HEAD:codex/process-cad-shell
 class ThinningTests(unittest.TestCase):
     def test_thinning_uses_backside_after_flip(self):
         db, model = make_model((5, 5, 16))
-        silicon = db.id("Silicon")
+        silicon = db.id_for("Silicon")
         model.grid[:, :, :10] = silicon
         model.flip_wafer()
         removed = model.thin_wafer(target_thickness_nm=50.0, material="Silicon")

@@ -80,7 +80,7 @@ import tcad_simulator as tcad
 class MaterialVisualTests(unittest.TestCase):
     def test_default_visual_inherits_physical_material(self):
         db = tcad.MaterialDatabase()
-        silicon_id = db.id("Silicon")
+        silicon_id = db.id_for("Silicon")
         visual = db.material_visual(silicon_id)
         self.assertEqual(visual.material_id, silicon_id)
         self.assertEqual(visual.display_name, "Silicon")
@@ -90,7 +90,7 @@ class MaterialVisualTests(unittest.TestCase):
 
     def test_visual_override_is_clamped_without_mutating_material(self):
         db = tcad.MaterialDatabase()
-        silicon_id = db.id("Silicon")
+        silicon_id = db.id_for("Silicon")
         original = tuple(db.material(silicon_id).color)
         visual = db.material_visual(
             silicon_id,

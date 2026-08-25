@@ -265,7 +265,7 @@ git push backup HEAD:codex/process-cad-shell
 class MaterialManifestTests(unittest.TestCase):
     def test_material_visual_payload_has_all_render_fields(self):
         db = tcad.MaterialDatabase()
-        visual = db.material_visual(db.id("Copper")).as_dict()
+        visual = db.material_visual(db.id_for("Copper")).as_dict()
         self.assertEqual(
             set(visual),
             {"material_id", "display_name", "color", "opacity", "metallic", "roughness", "visible"},
