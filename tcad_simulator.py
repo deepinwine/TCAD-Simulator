@@ -18126,6 +18126,7 @@ class ProcessStep:
         self.material_db = material_db
         self.enabled = True
         self.params: Dict[str, Any] = {}
+        self.instance_name = str(self.name)
         # Optional UI-only grouping label (used to cluster steps into "loops"/stations for caching).
         # This must not affect execution semantics.
         self.loop = ""
@@ -31153,9 +31154,18 @@ def _webui_serialize_parameter_spec(spec: ParameterSpec) -> Dict[str, Any]:
     }
 
 
+def _normalize_step_instance_name(value: Any, fallback: str) -> str:
+    fallback_name = str(fallback or "Process").strip() or "Process"
+    if not isinstance(value, str):
+        return fallback_name[:80]
+    normalized = value.strip()
+    return (normalized or fallback_name)[:80]
+
+
 def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "name": step.name,
+        "instance_name": _normalize_step_instance_name(getattr(step, "instance_name", None), step.name),
         "group": getattr(step, "group", ""),
         "loop": getattr(step, "loop", ""),
         "enabled": bool(step.enabled),
@@ -31176,6 +31186,11 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     if not name or name not in PROCESS_STEP_FACTORIES:
         return None
     step = PROCESS_STEP_FACTORIES[name](material_db)
+    instance_name = data.get("instance_name")
+    if not isinstance(instance_name, str) or not instance_name.strip():
+        legacy_label = data.get("label")
+        instance_name = legacy_label if isinstance(legacy_label, str) and legacy_label.strip() else None
+    step.instance_name = _normalize_step_instance_name(instance_name, step.name)
     # Preserve optional UI grouping labels when loading recipes from disk/library.
     try:
         grp = data.get("group", None)

@@ -86,3 +86,50 @@ class MaterialVisualTests(unittest.TestCase):
         self.assertEqual(visual.metallic, 0.0)
         self.assertEqual(visual.roughness, 1.0)
         self.assertFalse(visual.visible)
+
+
+class RecipeCompatibilityTests(unittest.TestCase):
+    def test_legacy_step_without_instance_name_keeps_factory_name(self):
+        db = tcad.MaterialDatabase()
+        step = tcad._webui_deserialize_step(
+            {"name": "Deposition", "enabled": True, "params": {"material": "Silicon Dioxide"}},
+            db,
+        )
+        self.assertIsNotNone(step)
+        self.assertEqual(step.name, "Deposition")
+        self.assertEqual(step.instance_name, "Deposition")
+
+    def test_legacy_label_is_used_when_instance_name_is_missing(self):
+        db = tcad.MaterialDatabase()
+        step = tcad._webui_deserialize_step(
+            {"name": "Deposition", "label": " Legacy label ", "params": {}},
+            db,
+        )
+        self.assertIsNotNone(step)
+        self.assertEqual(step.name, "Deposition")
+        self.assertEqual(step.instance_name, "Legacy label")
+
+    def test_instance_name_round_trip_does_not_change_factory_name(self):
+        db = tcad.MaterialDatabase()
+        step = tcad.PROCESS_STEP_FACTORIES["Etch"](db)
+        step.instance_name = "Gate trench etch"
+        restored = tcad._webui_deserialize_step(tcad._webui_serialize_step(step), db)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.name, "Etch")
+        self.assertEqual(restored.instance_name, "Gate trench etch")
+
+    def test_invalid_instance_names_fall_back_or_truncate_without_changing_factory_name(self):
+        db = tcad.MaterialDatabase()
+        for value, expected in (
+            (123, "Etch"),
+            ("   ", "Etch"),
+            ("x" * 100, "x" * 80),
+        ):
+            with self.subTest(value=value):
+                step = tcad._webui_deserialize_step(
+                    {"name": "Etch", "instance_name": value, "params": {}},
+                    db,
+                )
+                self.assertIsNotNone(step)
+                self.assertEqual(step.name, "Etch")
+                self.assertEqual(step.instance_name, expected)
