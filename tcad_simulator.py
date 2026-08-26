@@ -68660,10 +68660,7 @@ def _webui_worker_main(
                 video_pos = next_pos
                 step_index = int(video_plan[video_pos])
                 step = steps[step_index]
-                try:
-                    desc = step.describe()
-                except Exception:
-                    desc = _normalize_step_instance_name(getattr(step, "instance_name", None), step.name)
+                desc = step.describe()
                 try:
                     model._log(f"[Video] Running: {desc}")
                 except Exception:
