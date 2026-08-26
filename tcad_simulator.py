@@ -7811,6 +7811,7 @@ class ProcessModel:
         except Exception:
             self.resist_material_id = 0
         self.last_implant_species: Optional[str] = None
+        self.active_side = "top"
         self.current_time_s = 0.0
         self.history: List[str] = []
         self._mesh_cache.clear()
@@ -7910,6 +7911,92 @@ class ProcessModel:
             "defects_interstitial",
             "defects_vacancy",
         )
+
+    @staticmethod
+    def _normalize_active_side(value: Any) -> str:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"top", "bottom"}:
+                return normalized
+        return "top"
+
+    @staticmethod
+    def _state_field_names(state: Any) -> Tuple[str, ...]:
+        """Return stored field names without assuming the object supports vars()."""
+
+        names: Set[str] = set()
+        mapping = getattr(state, "__dict__", None)
+        if isinstance(mapping, dict):
+            names.update(str(name) for name in mapping)
+        dataclass_fields = getattr(state, "__dataclass_fields__", None)
+        if isinstance(dataclass_fields, dict):
+            names.update(str(name) for name in dataclass_fields)
+        for cls in getattr(type(state), "__mro__", ()):
+            slots = getattr(cls, "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            try:
+                names.update(str(name) for name in slots if name not in {"__dict__", "__weakref__"})
+            except TypeError:
+                continue
+        return tuple(sorted(names))
+
+    def flip_wafer(self) -> str:
+        """Reverse the wafer Z axis while keeping co-located volume fields aligned."""
+
+        shape = self.grid.shape
+        old_grid = self.grid
+        self.grid = np.flip(old_grid, axis=2).copy()
+        flipped_by_identity: Dict[int, np.ndarray] = {id(old_grid): self.grid}
+
+        def _flipped_volume(value: Any) -> Any:
+            if not isinstance(value, np.ndarray) or value.shape != shape:
+                return value
+            identity = id(value)
+            flipped = flipped_by_identity.get(identity)
+            if flipped is None:
+                flipped = np.flip(value, axis=2).copy()
+                flipped_by_identity[identity] = flipped
+            return flipped
+
+        for name in self._spatial_volume_field_names():
+            value = getattr(self, name, None)
+            flipped = _flipped_volume(value)
+            if flipped is not value:
+                setattr(self, name, flipped)
+
+        dopant_fields = getattr(self, "dopant_species_fields", None)
+        if isinstance(dopant_fields, dict):
+            for key, value in list(dopant_fields.items()):
+                flipped = _flipped_volume(value)
+                if flipped is not value:
+                    dopant_fields[key] = flipped
+
+        resist_state = getattr(self, "_resist_state", None)
+        if isinstance(resist_state, dict):
+            for key, value in list(resist_state.items()):
+                flipped = _flipped_volume(value)
+                if flipped is not value:
+                    resist_state[key] = flipped
+        elif resist_state is not None:
+            for name in self._state_field_names(resist_state):
+                try:
+                    value = getattr(resist_state, name)
+                except Exception:
+                    continue
+                flipped = _flipped_volume(value)
+                if flipped is value:
+                    continue
+                try:
+                    setattr(resist_state, name, flipped)
+                except Exception:
+                    continue
+
+        current_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        self.active_side = "bottom" if current_side == "top" else "top"
+        self._rebuild_height_map()
+        self._log(f"Wafer flipped: active side is now {self.active_side}")
+        return self.active_side
 
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -8595,6 +8682,7 @@ class ProcessModel:
             "resist_material_id": int(getattr(self, "resist_material_id", 0)),
             "resist_diffusion_length_nm": float(getattr(self, "resist_diffusion_length_nm", 0.0)),
             "last_implant_species": getattr(self, "last_implant_species", None),
+            "active_side": self._normalize_active_side(getattr(self, "active_side", "top")),
             "wafer_orientation": getattr(self, "wafer_orientation", None),
             "crystal_orientation": _pack_field(getattr(self, "crystal_orientation", None), "crystal_orientation"),
             "pending_interstitial_injection": _pack_field(
@@ -8830,6 +8918,7 @@ class ProcessModel:
             self.resist_diffusion_length_nm = 0.0
         species = state.get("last_implant_species")
         self.last_implant_species = None if species is None else str(species)
+        self.active_side = self._normalize_active_side(state.get("active_side", "top"))
         orientation = state.get("wafer_orientation")
         self.wafer_orientation = None if orientation is None else str(orientation)
         self.crystal_orientation = np.eye(3, dtype=np.float64)
@@ -19402,6 +19491,15 @@ class StripStep(ProcessStep):
         return f"Strip {', '.join(material_names)}: removed {removed} voxels"
 
 
+class WaferFlipStep(ProcessStep):
+    name = "Wafer Flip"
+    group = "Wafer"
+
+    def execute(self, model: ProcessModel) -> str:
+        active_side = model.flip_wafer()
+        return f"Wafer Flip: active side {active_side}"
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
@@ -19724,6 +19822,7 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Selective Epitaxy": SelectiveEpitaxyStep,
     "Fill": FillStep,
     "Strip": StripStep,
+    "Wafer Flip": WaferFlipStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,
     "Ion Implant": ImplantationStep,

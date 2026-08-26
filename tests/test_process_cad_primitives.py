@@ -560,3 +560,230 @@ class FillTests(unittest.TestCase):
         self.assertEqual([choice[0] for choice in specs["direction"].choices], ["top", "bottom"])
         self.assertEqual(specs["include_sealed"].type, "bool")
         self.assertNotIn("Fill", [item.name for item in tcad._webui_default_recipe(db)])
+
+
+class WaferFlipTests(unittest.TestCase):
+    @staticmethod
+    def _resist_state(shape, shared):
+        def volume(offset):
+            return np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + offset
+
+        return tcad.ResistChemistryState(
+            pac_fraction=volume(100.0),
+            acid_conc=shared,
+            base_conc=volume(200.0),
+            polymer_fraction=volume(300.0),
+            pag_fraction=volume(400.0),
+            dill_A=1.6,
+            dill_B=0.1,
+            dill_C=0.015,
+            acid_yield=0.85,
+            base_power_mw=150.0,
+            mack_rmax_nm_s=2.5,
+            mack_rmin_nm_s=0.05,
+            mack_n=4.0,
+            mack_mth=0.3,
+            resist_kind="positive",
+            intensity_profile=np.arange(shape[0] * shape[1], dtype=np.float32).reshape(shape[:2]),
+            exposure_time_s=12.0,
+            dose_map_mj_cm2=np.full(shape[:2], 42.0, dtype=np.float32),
+        )
+
+    def test_flip_reverses_all_volume_fields_and_preserves_cross_container_aliases(self):
+        db, model = make_model((2, 3, 4))
+        self.addCleanup(model.parallel.shutdown)
+        shape = model.grid.shape
+        model.grid[:] = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+        shared = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 10.0
+        model.doping = shared
+        model.active_dopants = shared
+        for offset, field_name in enumerate(
+            (
+                "interstitials",
+                "vacancies",
+                "cluster_interstitial",
+                "cluster_bic",
+                "damage_concentration",
+                "temperature",
+            ),
+            start=1,
+        ):
+            setattr(
+                model,
+                field_name,
+                np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 1000.0 * offset,
+            )
+        model.defects_interstitial = model.interstitials
+        model.defects_vacancy = model.vacancies
+        species_b = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 8000.0
+        model.dopant_species_fields = {"Shared": shared, "B": species_b, "metadata": "keep"}
+        model._resist_state = self._resist_state(shape, shared)
+        resist_intensity_before = model._resist_state.intensity_profile.copy()
+        resist_dose_before = model._resist_state.dose_map_mj_cm2.copy()
+
+        spatial_before = {
+            name: getattr(model, name)
+            for name in model._spatial_volume_field_names()
+        }
+        resist_before = {
+            name: getattr(model._resist_state, name)
+            for name in ("pac_fraction", "acid_conc", "base_conc", "polymer_fraction", "pag_fraction")
+        }
+        volume_bindings = [model.grid, *spatial_before.values(), shared, species_b, *resist_before.values()]
+        expected_by_identity = {
+            id(array): np.flip(array, axis=2).copy()
+            for array in volume_bindings
+            if isinstance(array, np.ndarray) and array.shape == shape
+        }
+
+        original_flip = np.flip
+        with mock.patch.object(tcad.np, "flip", wraps=original_flip) as flip:
+            model.flip_wafer()
+
+        np.testing.assert_array_equal(model.grid, expected_by_identity[id(volume_bindings[0])])
+        for field_name in model._spatial_volume_field_names():
+            field = getattr(model, field_name)
+            with self.subTest(field_name=field_name):
+                np.testing.assert_array_equal(field, expected_by_identity[id(spatial_before[field_name])])
+        np.testing.assert_array_equal(model.dopant_species_fields["B"], expected_by_identity[id(species_b)])
+        self.assertEqual(model.dopant_species_fields["metadata"], "keep")
+        for field_name in ("pac_fraction", "acid_conc", "base_conc", "polymer_fraction", "pag_fraction"):
+            with self.subTest(resist_field=field_name):
+                np.testing.assert_array_equal(
+                    getattr(model._resist_state, field_name),
+                    expected_by_identity[id(resist_before[field_name])],
+                )
+        np.testing.assert_array_equal(model._resist_state.intensity_profile, resist_intensity_before)
+        np.testing.assert_array_equal(model._resist_state.dose_map_mj_cm2, resist_dose_before)
+        self.assertIs(model.doping, model.active_dopants)
+        self.assertIs(model.doping, model.dopant_species_fields["Shared"])
+        self.assertIs(model.doping, model._resist_state.acid_conc)
+        self.assertIs(model.defects_interstitial, model.interstitials)
+        self.assertIs(model.defects_vacancy, model.vacancies)
+        self.assertEqual(sum(call.args[0] is shared for call in flip.call_args_list), 1)
+        self.assertEqual(model.active_side, "bottom")
+
+    def test_flip_preserves_2d_state_and_rebuilds_height_and_open_mask_from_grid(self):
+        db, model = make_model((3, 3, 5))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        resist_id = db.id_for("Photoresist")
+        model.grid.fill(np.uint16(0))
+        model.grid[:, :, 0] = np.uint16(silicon_id)
+        model.grid[1, 1, 0] = np.uint16(resist_id)
+        model.grid[1, 1, 1] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        self.assertTrue(model.open_mask[1, 1])
+
+        exposure = np.arange(9, dtype=np.float64).reshape(3, 3)
+        intensity = exposure + 100.0
+        fraction = exposure.astype(np.float32) + 200.0
+        pending = exposure + 300.0
+        model.resist_exposure = exposure
+        model.last_intensity = intensity
+        model._column_fraction = {"deposition": fraction}
+        model._pending_interstitial_injection = pending
+
+        model.flip_wafer()
+
+        np.testing.assert_array_equal(model.resist_exposure, exposure)
+        np.testing.assert_array_equal(model.last_intensity, intensity)
+        np.testing.assert_array_equal(model._column_fraction["deposition"], fraction)
+        np.testing.assert_array_equal(model._pending_interstitial_injection, pending)
+        self.assertEqual(int(model.height_map[1, 1]), 5)
+        self.assertFalse(model.open_mask[1, 1])
+        other_columns = np.ones((3, 3), dtype=bool)
+        other_columns[1, 1] = False
+        self.assertTrue(np.all(model.open_mask[other_columns]))
+
+    def test_double_flip_restores_volumes_side_and_reset_restores_top(self):
+        _db, model = make_model((2, 2, 5))
+        self.addCleanup(model.parallel.shutdown)
+        model.grid[:] = np.arange(model.grid.size, dtype=np.uint16).reshape(model.grid.shape)
+        model.interstitials = np.arange(model.grid.size, dtype=np.float32).reshape(model.grid.shape)
+        model.defects_interstitial = model.interstitials
+        before_grid = model.grid.copy()
+        before_interstitials = model.interstitials.copy()
+
+        model.flip_wafer()
+        model.flip_wafer()
+
+        np.testing.assert_array_equal(model.grid, before_grid)
+        np.testing.assert_array_equal(model.interstitials, before_interstitials)
+        self.assertIs(model.defects_interstitial, model.interstitials)
+        self.assertEqual(model.active_side, "top")
+        model.flip_wafer()
+        model.reset_state()
+        self.assertEqual(model.active_side, "top")
+
+    def test_snapshot_restore_legacy_and_transaction_preserve_active_side(self):
+        _db, model = make_model((2, 2, 4))
+        self.addCleanup(model.parallel.shutdown)
+        model.interstitials = np.arange(model.grid.size, dtype=np.float32).reshape(model.grid.shape)
+        model.vacancies = model.interstitials + 100.0
+        model.defects_interstitial = model.interstitials
+        model.defects_vacancy = model.vacancies
+        model.flip_wafer()
+        snapshot = model.snapshot_state(compression="dense")
+        self.assertEqual(snapshot["active_side"], "bottom")
+        model.active_side = "top"
+        model.restore_state(snapshot)
+        self.assertEqual(model.active_side, "bottom")
+        self.assertIsNotNone(model.interstitials)
+        self.assertIsNotNone(model.vacancies)
+        self.assertIs(model.defects_interstitial, model.interstitials)
+        self.assertIs(model.defects_vacancy, model.vacancies)
+
+        legacy = model.snapshot_state(compression="dense")
+        legacy.pop("active_side")
+        model.active_side = "bottom"
+        model.restore_state(legacy)
+        self.assertEqual(model.active_side, "top")
+        legacy["active_side"] = "sideways"
+        model.active_side = "bottom"
+        model.restore_state(legacy)
+        self.assertEqual(model.active_side, "top")
+
+        model.flip_wafer()
+
+        def flip_then_fail():
+            model.flip_wafer()
+            raise ValueError("controlled flip failure")
+
+        result = tcad._run_model_transaction(model, flip_then_fail)
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(model.active_side, "bottom")
+
+    def test_slots_resist_state_is_flipped_without_requiring_vars(self):
+        class SlotsState:
+            __slots__ = ("volume", "surface")
+
+        _db, model = make_model((2, 2, 3))
+        self.addCleanup(model.parallel.shutdown)
+        state = SlotsState()
+        state.volume = np.arange(model.grid.size, dtype=np.float32).reshape(model.grid.shape)
+        state.surface = np.arange(4, dtype=np.float32).reshape(model.grid.shape[:2])
+        before_volume = state.volume.copy()
+        before_surface = state.surface.copy()
+        model._resist_state = state
+
+        model.flip_wafer()
+
+        np.testing.assert_array_equal(state.volume, np.flip(before_volume, axis=2))
+        np.testing.assert_array_equal(state.surface, before_surface)
+
+    def test_step_factory_execute_roundtrip_and_default_recipe_exclusion(self):
+        db, model = make_model((2, 2, 4))
+        self.addCleanup(model.parallel.shutdown)
+        step = tcad.PROCESS_STEP_FACTORIES["Wafer Flip"](db)
+
+        result = step.execute(model)
+        blob = tcad._webui_serialize_step(step)
+        restored = tcad._webui_deserialize_step(blob, db)
+
+        self.assertIsInstance(step, tcad.WaferFlipStep)
+        self.assertEqual(step.params, {})
+        self.assertIn("bottom", result.lower())
+        self.assertIsInstance(restored, tcad.WaferFlipStep)
+        self.assertEqual(restored.params, {})
+        self.assertNotIn("Wafer Flip", [item.name for item in tcad._webui_default_recipe(db)])
