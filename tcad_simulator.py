@@ -7285,6 +7285,61 @@ def parse_selectivity(spec: str, material_db: MaterialDatabase) -> Dict[int, flo
     return result
 
 
+def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) -> Tuple[List[int], List[str]]:
+    """Resolve Strip material selectors without ever treating Void as removable."""
+
+    if isinstance(materials, (bool, np.bool_)) or materials is None:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+    if isinstance(materials, str):
+        raw_items: List[Any] = [part.strip() for part in re.split(r"[;,]", materials) if part.strip()]
+    elif isinstance(materials, (int, np.integer)):
+        raw_items = [materials]
+    elif isinstance(materials, (list, tuple, set, np.ndarray)):
+        raw_items = list(materials)
+    else:
+        raise ValueError("Strip materials must be material names or IDs.")
+    if not raw_items:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+
+    material_ids: List[int] = []
+    material_names: List[str] = []
+    for raw in raw_items:
+        if isinstance(raw, (bool, np.bool_)):
+            raise ValueError("Boolean values are not valid Strip material IDs.")
+        if isinstance(raw, str):
+            token = raw.strip()
+            if not token:
+                raise ValueError("Strip materials cannot contain empty names.")
+            if token.isdigit():
+                material_id = int(token)
+                try:
+                    material = material_db.material(material_id)
+                except Exception as exc:
+                    raise ValueError(f"Unknown Strip material ID: {material_id}") from exc
+            else:
+                try:
+                    material_id = int(material_db.id_for(token))
+                    material = material_db.material(material_id)
+                except Exception as exc:
+                    raise ValueError(f"Unknown Strip material: {token}") from exc
+        elif isinstance(raw, (int, np.integer)):
+            material_id = int(raw)
+            try:
+                material = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown Strip material ID: {material_id}") from exc
+        else:
+            raise ValueError(f"Invalid Strip material selector: {raw!r}")
+        if material_id == 0 or material.name == "Void":
+            raise ValueError("Void cannot be selected as a Strip material.")
+        if material_id not in material_ids:
+            material_ids.append(material_id)
+            material_names.append(str(material.name))
+    if not material_ids:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+    return material_ids, material_names
+
+
 def resample_mask(mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
     """Resize a boolean mask to `target_shape`.
 
@@ -12420,6 +12475,100 @@ class ProcessModel:
         )
         results = self.reconstruct_material_components(material_id, enforced)
         return [res.brep_solid for res in results if res.brep_solid is not None]
+
+    # -- strip ------------------------------------------------------------------
+
+    def strip_materials(
+        self,
+        materials: Any,
+        exposed_only: bool = False,
+        direction: str = "top",
+    ) -> int:
+        """Remove selected materials globally or only in exterior-connected components."""
+
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in {"top", "bottom"}:
+            raise ValueError("Strip direction must be 'top' or 'bottom'.")
+        if not isinstance(exposed_only, (bool, np.bool_)):
+            raise ValueError("Strip exposed_only must be a boolean.")
+        material_ids, material_names = _normalize_strip_materials(self.material_db, materials)
+        target_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
+        if not np.any(target_mask):
+            return 0
+
+        if bool(exposed_only):
+            void_mask = self.grid == 0
+            void_seeds = np.zeros_like(void_mask, dtype=bool)
+            boundary_z = -1 if direction_key == "top" else 0
+            void_seeds[:, :, boundary_z] = void_mask[:, :, boundary_z]
+            if np.any(void_seeds):
+                if _scipy_ndimage is not None:
+                    structure = _scipy_ndimage.generate_binary_structure(3, 1)
+                    accessible_void = _scipy_ndimage.binary_propagation(
+                        void_seeds,
+                        structure=structure,
+                        mask=void_mask,
+                    )
+                else:
+                    accessible_void = _binary_propagation_fallback_3d(void_seeds, void_mask)
+            else:
+                accessible_void = np.zeros_like(void_mask, dtype=bool)
+
+            adjacent_to_void = np.zeros_like(accessible_void, dtype=bool)
+            adjacent_to_void[1:, :, :] |= accessible_void[:-1, :, :]
+            adjacent_to_void[:-1, :, :] |= accessible_void[1:, :, :]
+            adjacent_to_void[:, 1:, :] |= accessible_void[:, :-1, :]
+            adjacent_to_void[:, :-1, :] |= accessible_void[:, 1:, :]
+            adjacent_to_void[:, :, 1:] |= accessible_void[:, :, :-1]
+            adjacent_to_void[:, :, :-1] |= accessible_void[:, :, 1:]
+            target_seeds = target_mask & adjacent_to_void
+            target_seeds[:, :, boundary_z] |= target_mask[:, :, boundary_z]
+            if not np.any(target_seeds):
+                return 0
+            if _scipy_ndimage is not None:
+                structure = _scipy_ndimage.generate_binary_structure(3, 1)
+                removal_mask = _scipy_ndimage.binary_propagation(
+                    target_seeds,
+                    structure=structure,
+                    mask=target_mask,
+                )
+            else:
+                removal_mask = _binary_propagation_fallback_3d(target_seeds, target_mask)
+        else:
+            removal_mask = target_mask
+
+        removed = int(np.count_nonzero(removal_mask))
+        if removed <= 0:
+            return 0
+        self.grid[removal_mask] = np.uint16(0)
+        for field_name in (
+            "doping",
+            "active_dopants",
+            "interstitials",
+            "vacancies",
+            "cluster_interstitial",
+            "cluster_bic",
+            "defects_interstitial",
+            "defects_vacancy",
+            "damage_concentration",
+        ):
+            field = getattr(self, field_name, None)
+            if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
+                field[removal_mask] = 0.0
+        try:
+            self._clear_dopant_species_mask((slice(None), slice(None), slice(None)), removal_mask)
+        except Exception:
+            pass
+        resist_state = getattr(self, "_resist_state", None)
+        if resist_state is not None:
+            for field_name in ("acid_conc", "base_conc", "polymer_fraction", "pag_fraction", "pac_fraction"):
+                field = getattr(resist_state, field_name, None)
+                if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
+                    field[removal_mask] = 0.0
+        self._rebuild_height_map(material_ids)
+        mode = "exposed" if bool(exposed_only) else "global"
+        self._log(f"Strip ({mode}, {direction_key}) removed {removed} voxels: {', '.join(material_names)}")
+        return removed
 
     # -- etch -------------------------------------------------------------------
 
@@ -18910,6 +19059,52 @@ class SelectiveEpitaxyStep(ProcessStep):
             model.last_implant_species = lattice_species
 
 
+class StripStep(ProcessStep):
+    name = "Strip"
+    group = "Clean"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        return (
+            ParameterSpec(
+                "materials",
+                "Materials",
+                "text",
+                "Photoresist",
+                tooltip="Material names or IDs separated by semicolons (commas are also accepted).",
+            ),
+            ParameterSpec(
+                "exposed_only",
+                "Exposed components only",
+                "bool",
+                False,
+                tooltip="Only remove selected components reachable from the chosen Z boundary.",
+            ),
+            ParameterSpec(
+                "direction",
+                "Access direction",
+                "enum",
+                "top",
+                choices=[("top", "Top"), ("bottom", "Bottom")],
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        raw_materials = self.params.get("materials", "")
+        material_ids, material_names = _normalize_strip_materials(model.material_db, raw_materials)
+        exposed_only = self.params.get("exposed_only", False)
+        if not isinstance(exposed_only, (bool, np.bool_)):
+            raise ValueError("Strip exposed_only must be a boolean.")
+        direction = str(self.params.get("direction", "") or "").strip().lower()
+        if direction not in {"top", "bottom"}:
+            raise ValueError("Strip direction must be 'top' or 'bottom'.")
+        removed = model.strip_materials(
+            material_ids,
+            exposed_only=bool(exposed_only),
+            direction=direction,
+        )
+        return f"Strip {', '.join(material_names)}: removed {removed} voxels"
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
@@ -19230,6 +19425,7 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Resist Develop": DevelopStep,
     "Deposition": DepositionStep,
     "Selective Epitaxy": SelectiveEpitaxyStep,
+    "Strip": StripStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,
     "Ion Implant": ImplantationStep,

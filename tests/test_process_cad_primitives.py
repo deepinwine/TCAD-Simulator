@@ -27,3 +27,143 @@ class PrimitiveFixtureTests(unittest.TestCase):
         self.assertEqual(model.voxel_size_nm, 10.0)
         self.assertFalse(np.any(model.grid))
         self.assertFalse(np.any(model.height_map))
+
+
+class StripTests(unittest.TestCase):
+    def test_global_strip_removes_only_requested_materials(self):
+        db, model = make_model((6, 6, 6))
+        self.addCleanup(model.parallel.shutdown)
+        oxide_id = db.id_for("Silicon Dioxide")
+        resist_id = db.id_for("Photoresist")
+        model.grid[:, :, 0] = np.uint16(oxide_id)
+        model.grid[:, :, 1:3] = np.uint16(resist_id)
+        model._rebuild_height_map()
+
+        removed = model.strip_materials(["Photoresist"], exposed_only=False, direction="top")
+
+        self.assertEqual(removed, 6 * 6 * 2)
+        self.assertFalse(np.any(model.grid == resist_id))
+        self.assertEqual(np.count_nonzero(model.grid == oxide_id), 6 * 6)
+        self.assertTrue(np.all(model.height_map == 1))
+        self.assertTrue(np.all(model.open_mask))
+
+    def test_exposed_only_top_preserves_sealed_target_pocket(self):
+        db, model = make_model((7, 7, 7))
+        self.addCleanup(model.parallel.shutdown)
+        oxide_id = db.id_for("Silicon Dioxide")
+        resist_id = db.id_for("Photoresist")
+        model.grid[1:6, 1:6, 1:6] = np.uint16(oxide_id)
+        model.grid[3, 3, 3] = np.uint16(resist_id)
+        model.grid[1, 1, 4:6] = np.uint16(resist_id)
+        model._rebuild_height_map()
+
+        removed = model.strip_materials("Photoresist", exposed_only=True, direction="top")
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(int(model.grid[3, 3, 3]), resist_id)
+        self.assertEqual(int(model.grid[1, 1, 4]), 0)
+        self.assertEqual(int(model.grid[1, 1, 5]), 0)
+
+    def test_exposed_only_top_seeds_target_on_fully_covered_boundary(self):
+        db, model = make_model((4, 4, 4))
+        self.addCleanup(model.parallel.shutdown)
+        resist_id = db.id_for("Photoresist")
+        model.grid[:, :, :] = np.uint16(resist_id)
+        model._rebuild_height_map()
+
+        removed = model.strip_materials([resist_id], exposed_only=True, direction="top")
+
+        self.assertEqual(removed, 4 * 4 * 4)
+        self.assertFalse(np.any(model.grid))
+
+    def test_exposed_only_bottom_is_directionally_symmetric(self):
+        db, model = make_model((5, 5, 5))
+        self.addCleanup(model.parallel.shutdown)
+        oxide_id = db.id_for("Silicon Dioxide")
+        resist_id = db.id_for("Photoresist")
+        model.grid[:, :, :] = np.uint16(oxide_id)
+        model.grid[2, 2, 0:2] = np.uint16(resist_id)
+        model.grid[2, 2, 3] = np.uint16(resist_id)
+        model._rebuild_height_map()
+
+        removed = model.strip_materials(resist_id, exposed_only=True, direction="bottom")
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(int(model.grid[2, 2, 0]), 0)
+        self.assertEqual(int(model.grid[2, 2, 1]), 0)
+        self.assertEqual(int(model.grid[2, 2, 3]), resist_id)
+
+    def test_model_rejects_empty_unknown_void_bool_and_bad_direction(self):
+        db, model = make_model((3, 3, 3))
+        self.addCleanup(model.parallel.shutdown)
+
+        for materials in ([], "", "Missingium", "Void", 0, True):
+            with self.subTest(materials=materials):
+                with self.assertRaises(ValueError):
+                    model.strip_materials(materials)
+        with self.assertRaises(ValueError):
+            model.strip_materials("Photoresist", direction="side")
+
+    def test_strip_step_parses_materials_executes_and_validates_like_model(self):
+        db, model = make_model((3, 3, 4))
+        self.addCleanup(model.parallel.shutdown)
+        resist_id = db.id_for("Photoresist")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[0, 0, 3] = np.uint16(resist_id)
+        model.grid[1, 1, 3] = np.uint16(oxide_id)
+        model._rebuild_height_map()
+        step = tcad.StripStep(db)
+        step.params.update(
+            {
+                "materials": "Photoresist; Silicon Dioxide",
+                "exposed_only": True,
+                "direction": "top",
+            }
+        )
+
+        result = step.execute(model)
+
+        self.assertEqual(np.count_nonzero(model.grid), 0)
+        self.assertIn("2", result)
+        self.assertIn("Photoresist", result)
+        self.assertIn("Silicon Dioxide", result)
+
+        for materials in ("", "Void", "Missingium"):
+            with self.subTest(materials=materials):
+                step.params["materials"] = materials
+                with self.assertRaises(ValueError):
+                    step.execute(model)
+        step.params["materials"] = "Photoresist"
+        step.params["direction"] = "side"
+        with self.assertRaises(ValueError):
+            step.execute(model)
+
+    def test_strip_step_accepts_comma_delimiters_and_recipe_roundtrips(self):
+        db, model = make_model((3, 3, 3))
+        self.addCleanup(model.parallel.shutdown)
+        resist_id = db.id_for("Photoresist")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[0, 0, 2] = np.uint16(resist_id)
+        model.grid[1, 1, 2] = np.uint16(oxide_id)
+        model._rebuild_height_map()
+        step = tcad.PROCESS_STEP_FACTORIES["Strip"](db)
+        step.params.update(
+            {
+                "materials": "Photoresist, Silicon Dioxide",
+                "exposed_only": False,
+                "direction": "bottom",
+            }
+        )
+
+        step.execute(model)
+        blob = tcad._webui_serialize_step(step)
+        restored = tcad._webui_deserialize_step(blob, db)
+
+        self.assertIsInstance(restored, tcad.StripStep)
+        self.assertEqual(restored.params["materials"], "Photoresist, Silicon Dioxide")
+        self.assertIs(restored.params["exposed_only"], False)
+        self.assertEqual(restored.params["direction"], "bottom")
+        specs = {spec.key: spec for spec in restored.parameter_specs()}
+        self.assertEqual(specs["materials"].type, "text")
+        self.assertEqual(specs["exposed_only"].type, "bool")
+        self.assertEqual([choice[0] for choice in specs["direction"].choices], ["top", "bottom"])
