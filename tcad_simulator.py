@@ -8366,12 +8366,22 @@ class ProcessModel:
             "cluster_interstitial": _pack_field(getattr(self, "cluster_interstitial", None), "cluster_interstitial"),
             "cluster_bic": _pack_field(getattr(self, "cluster_bic", None), "cluster_bic"),
             "damage_concentration": _pack_field(getattr(self, "damage_concentration", None), "damage_concentration"),
+            "temperature": _pack_field(getattr(self, "temperature", None), "temperature"),
             # Always pack 2D fields: big on large domains and used heavily by undo/time-travel caches.
             "height_map": _pack_field(getattr(self, "height_map", None), "height_map"),
             "open_mask": _pack_field(getattr(self, "open_mask", None), "open_mask"),
             "resist_exposure": _pack_field(getattr(self, "resist_exposure", None), "resist_exposure"),
             "last_intensity": _pack_field(getattr(self, "last_intensity", None), "last_intensity"),
             "resist_type": self.resist_type,
+            "resist_material_id": int(getattr(self, "resist_material_id", 0)),
+            "resist_diffusion_length_nm": float(getattr(self, "resist_diffusion_length_nm", 0.0)),
+            "last_implant_species": getattr(self, "last_implant_species", None),
+            "wafer_orientation": getattr(self, "wafer_orientation", None),
+            "crystal_orientation": _pack_field(getattr(self, "crystal_orientation", None), "crystal_orientation"),
+            "pending_interstitial_injection": _pack_field(
+                getattr(self, "_pending_interstitial_injection", None), "pending_interstitial_injection"
+            ),
+            "last_step_stats": copy.deepcopy(getattr(self, "_last_step_stats", {})),
             "voxel_size_nm": self.voxel_size_nm,
             "substrate_material": self.substrate_material,
             "substrate_thickness_nm": self.substrate_thickness_nm,
@@ -8387,6 +8397,16 @@ class ProcessModel:
                 packed[str(sym).strip()] = _pack_field(arr, f"dopant_{sym}")
             if packed:
                 state["dopant_species"] = packed
+        fraction_fields = getattr(self, "_column_fraction", None)
+        packed_fractions: Dict[str, Any] = {}
+        if isinstance(fraction_fields, dict):
+            for key, arr in fraction_fields.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                blob = _pack_field(arr, f"column_fraction_{key}")
+                if blob is not None:
+                    packed_fractions[key] = blob
+        state["column_fraction"] = packed_fractions
         if grid_blob["mode"] == "dense":
             state["grid"] = grid_blob["payload"]
         if self._resist_state is not None:
@@ -8575,6 +8595,31 @@ class ProcessModel:
         else:
             self.last_intensity = np.zeros(self.grid.shape[:2], dtype=np.float64)
         self.resist_type = state.get("resist_type", self.resist_type)
+        try:
+            default_resist_material_id = int(self.material_db.id_for("Photoresist"))
+        except Exception:
+            default_resist_material_id = 0
+        try:
+            self.resist_material_id = int(
+                state.get("resist_material_id", default_resist_material_id)
+            )
+        except (TypeError, ValueError, OverflowError):
+            self.resist_material_id = default_resist_material_id
+        try:
+            self.resist_diffusion_length_nm = float(state.get("resist_diffusion_length_nm", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            self.resist_diffusion_length_nm = 0.0
+        species = state.get("last_implant_species")
+        self.last_implant_species = None if species is None else str(species)
+        orientation = state.get("wafer_orientation")
+        self.wafer_orientation = None if orientation is None else str(orientation)
+        self.crystal_orientation = np.eye(3, dtype=np.float64)
+        if "crystal_orientation" in state:
+            crystal = _unpack_field(state.get("crystal_orientation"))
+            if isinstance(crystal, np.ndarray) and crystal.shape == (3, 3):
+                self.crystal_orientation = crystal.astype(np.float64, copy=False)
+        stats = state.get("last_step_stats")
+        self._last_step_stats = copy.deepcopy(stats) if isinstance(stats, dict) else {}
         self.voxel_size_nm = state.get("voxel_size_nm", self.voxel_size_nm)
         self.grid_shape = self.grid.shape
         self.substrate_material = state.get("substrate_material", self.substrate_material)
@@ -8595,7 +8640,20 @@ class ProcessModel:
                 self.open_mask &= stored_arr.astype(bool, copy=False)
             except Exception:
                 pass
-        self._pending_interstitial_injection = None
+        if "pending_interstitial_injection" in state:
+            self._pending_interstitial_injection = _unpack_field(state.get("pending_interstitial_injection"))
+        else:
+            self._pending_interstitial_injection = None
+        restored_fractions: Dict[str, np.ndarray] = {}
+        raw_fractions = state.get("column_fraction")
+        if isinstance(raw_fractions, dict):
+            for key, blob in raw_fractions.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                arr = _unpack_field(blob)
+                if isinstance(arr, np.ndarray):
+                    restored_fractions[key] = arr.astype(np.float32, copy=False)
+        self._column_fraction = restored_fractions
         resist_blob = state.get("resist_state")
         if resist_blob:
             try:
@@ -56708,7 +56766,7 @@ def _webui_worker_main(
     def _snap_drop(obj: Any) -> None:
         _tcad_snapshot_drop_maybe(obj)
 
-    def _push_undo() -> None:
+    def _push_undo(*, defer_trim: bool = False) -> Any:
         ck = {
             "spill_dir": str(snap_undo_dir),
             "spill_tag": f"undo_{int(time.time() * 1000):013d}_{secrets.token_hex(3)}",
@@ -56718,13 +56776,82 @@ def _webui_worker_main(
             snap = model.snapshot_state(compression="dense-zlib", compression_kwargs=ck)
         except Exception:
             snap = model.snapshot_state(compression="dense-zlib")
-        undo_stack.append(_snap_store(snap, kind="undo"))
-        if len(undo_stack) > max_undo:
-            _snap_drop(undo_stack.pop(0))
+        token = _snap_store(snap, kind="undo")
+        undo_stack.append(token)
+        if not defer_trim:
+            while len(undo_stack) > max_undo:
+                _snap_drop(undo_stack.pop(0))
+        return token
 
-    def _discard_latest_undo() -> None:
-        if undo_stack:
-            _snap_drop(undo_stack.pop())
+    def _commit_undo(token: Any) -> None:
+        if any(item is token for item in undo_stack):
+            while len(undo_stack) > max_undo:
+                _snap_drop(undo_stack.pop(0))
+
+    def _abort_undo(token: Any) -> None:
+        for index in range(len(undo_stack) - 1, -1, -1):
+            if undo_stack[index] is token:
+                _snap_drop(undo_stack.pop(index))
+                break
+
+    def _finish_step_failure(
+        step: ProcessStep,
+        step_index: int,
+        transaction: Dict[str, Any],
+        *,
+        undo_token: Any = None,
+    ) -> Dict[str, Any]:
+        """Abort or retain a pending undo token and build the worker error payload."""
+        nonlocal model_revision
+        _set_step_runtime_status(step_index, "error")
+        if undo_token is not None:
+            if transaction.get("rolled_back") or transaction.get("snapshot_error"):
+                _abort_undo(undo_token)
+            else:
+                # Rollback itself failed: preserve the pre-step undo entry and invalidate
+                # revision-keyed presentation caches because a partial mutation may remain.
+                _commit_undo(undo_token)
+                model_revision += 1
+                preview_ready.clear()
+        failure = _webui_step_execution_error(step, step_index, transaction)
+        try:
+            model._log(f"Error in step {int(step_index) + 1}: {failure['error']}")
+        except Exception:
+            pass
+        failure["model"] = _webui_model_summary(model)
+        failure["log"] = model.history[-250:]
+        failure["model_revision"] = int(model_revision)
+        return failure
+
+    def _begin_step_execution(step: ProcessStep, step_index: int) -> Dict[str, Any]:
+        """Run non-mutating preflight and allocate an uncommitted undo snapshot."""
+        _set_step_runtime_status(step_index, "running")
+        try:
+            warnings = _webui_localize_exposure_mask_file(step)
+            if warnings:
+                for warning in warnings[:4]:
+                    try:
+                        model._log(f"[mask] {warning}")
+                    except Exception:
+                        pass
+            description = step.describe()
+        except Exception as exc:
+            transaction = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "rolled_back": True,
+            }
+            return {"ok": False, "failure": _finish_step_failure(step, step_index, transaction)}
+        try:
+            undo_token = _push_undo(defer_trim=True)
+        except Exception as exc:
+            transaction = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "rolled_back": True,
+            }
+            return {"ok": False, "failure": _finish_step_failure(step, step_index, transaction)}
+        return {"ok": True, "description": description, "undo_token": undo_token}
 
     # WebUI preview caches (per isolated worker).
     # Keep `preview_mesh_cache` lightweight (metadata only) to avoid multi-user memory blow-ups.
@@ -56975,6 +57102,34 @@ def _webui_worker_main(
                 return int(si)
         return int(len(station_ends) - 1)
 
+    def _finalize_active_agent_run(
+        *,
+        status: str,
+        failed_step: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Close and detach the active Agent run report so later runs cannot reuse it."""
+        astate = current_ui_state.get("agent") if isinstance(current_ui_state, dict) else None
+        if not isinstance(astate, dict):
+            return None
+        run_id = str(astate.pop("_active_run_id", "") or "").strip()
+        runs = astate.get("run_reports")
+        if not run_id or not isinstance(runs, list):
+            return None
+        for report in reversed(runs):
+            if not isinstance(report, dict) or str(report.get("id", "")).strip() != run_id:
+                continue
+            report["ts_end"] = _webui_timestamp()
+            report["status"] = str(status)
+            if isinstance(failed_step, dict):
+                report["failed_step"] = dict(failed_step)
+            if isinstance(error, dict):
+                report["error"] = str(error.get("error", "Step execution failed."))
+                report["error_type"] = str(error.get("error_type", "Exception"))
+                report["rolled_back"] = bool(error.get("rolled_back", False))
+            return report
+        return None
+
     def _run_recipe_incremental(upto_step_index: Optional[int], *, autosave_note: str) -> Dict[str, Any]:
         """Run recipe from start to `upto_step_index` (inclusive), using per-step snapshot time-travel cache."""
         nonlocal model_revision, loop_cache_ctx_sig, loop_cache_station_sigs, loop_cache_station_states, loop_cache_station_ends
@@ -57043,6 +57198,24 @@ def _webui_worker_main(
         except Exception:
             pass
 
+        def _finalize_incremental_failure(step_index: int, failure: Dict[str, Any]) -> Dict[str, Any]:
+            _finalize_active_agent_run(
+                status="error",
+                failed_step={
+                    "index": int(step_index),
+                    "instance_name": failure["instance_name"],
+                    "step_type": failure["step_type"],
+                },
+                error=failure,
+            )
+            try:
+                WaferContextManager.end_run(
+                    current_ui_state, run_id=str(bb_run_id), ok=False, cache_only=False
+                )
+            except Exception:
+                pass
+            return failure
+
         target_station = _recipe_find_station_for_step(ends_all, int(upto_i))
         if target_station < 0:
             return {"ok": True, "result": {"model": _webui_model_summary(model), "log": model.history[-250:]}}
@@ -57103,6 +57276,9 @@ def _webui_worker_main(
         for completed_index in range(0, int(restore_idx) + 1):
             _set_step_runtime_status(completed_index, "done")
 
+        # Restoring a cached prefix or resetting to the substrate changes the visible model even
+        # when every remaining step is disabled or the first executable step later fails.
+        model_revision += 1
         preview_ready.clear()
 
         # Blackboard baseline: publish the restored prefix state so downstream steps can query
@@ -57129,7 +57305,6 @@ def _webui_worker_main(
 
         # If fully satisfied by cache (now allowed even inside a station), we are done.
         if int(restore_idx) >= int(upto_i):
-            model_revision += 1
             preview_ready.clear()
             _autosave(autosave_note)
             try:
@@ -57607,17 +57782,6 @@ def _webui_worker_main(
                     pre_target = ""
                     pre_base_cols = None
                     pre_base_cols_frac = None
-                # Ensure Mask Exposure custom mask files are session-local/available (portable flows).
-                try:
-                    mw = _webui_localize_exposure_mask_file(step)
-                    if mw:
-                        for w in mw[:4]:
-                            try:
-                                model._log(f"[mask] {w}")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
                 # Runtime blackboard pre-snapshot (offline-safe; no logging).
                 pre_h_bb = None
                 pre_open_frac_bb = None
@@ -57631,12 +57795,11 @@ def _webui_worker_main(
                         pre_open_frac_bb = float(np.mean(om0.astype(np.float32, copy=False)))
                 except Exception:
                     pre_open_frac_bb = None
-                try:
-                    desc = step.describe()
-                except Exception:
-                    desc = _normalize_step_instance_name(getattr(step, "instance_name", None), step.name)
-                _set_step_runtime_status(i, "running")
-                _push_undo()
+                execution = _begin_step_execution(step, i)
+                if not execution["ok"]:
+                    return _finalize_incremental_failure(i, execution["failure"])
+                desc = execution["description"]
+                undo_token = execution["undo_token"]
                 # Clear any stale kernel-provided metrics so per-step run reports don't accidentally
                 # reuse the previous step's stats when a kernel is a no-op.
                 try:
@@ -57652,23 +57815,10 @@ def _webui_worker_main(
                     pass
                 transaction = _run_model_transaction(model, lambda: step.execute(model))
                 if not transaction["ok"]:
-                    _set_step_runtime_status(i, "error")
-                    if transaction.get("rolled_back"):
-                        _discard_latest_undo()
-                    failure = _webui_step_execution_error(step, i, transaction)
-                    try:
-                        model._log(f"Error in step {int(i) + 1}: {failure['error']}")
-                    except Exception:
-                        pass
-                    try:
-                        WaferContextManager.end_run(current_ui_state, run_id=str(bb_run_id), ok=False, cache_only=False)
-                    except Exception:
-                        pass
-                    failure["model"] = _webui_model_summary(model)
-                    failure["log"] = model.history[-250:]
-                    failure["model_revision"] = int(model_revision)
-                    return failure
+                    failure = _finish_step_failure(step, i, transaction, undo_token=undo_token)
+                    return _finalize_incremental_failure(i, failure)
                 result_str = transaction.get("value")
+                _commit_undo(undo_token)
                 _set_step_runtime_status(i, "done")
                 if result_str:
                     try:
@@ -58284,7 +58434,7 @@ def _webui_worker_main(
                             model._log("[agent] End-metric delta: " + " | ".join(parts))
                 except Exception:
                     metrics = {}
-                run_id = str(astate.pop("_active_run_id", "") or "").strip()
+                run_id = str(astate.get("_active_run_id", "") or "").strip()
                 runs = astate.get("run_reports")
                 if run_id and isinstance(runs, list):
                     for rr in reversed(runs):
@@ -58334,6 +58484,10 @@ def _webui_worker_main(
                             except Exception:
                                 pass
                             break
+        except Exception:
+            pass
+        try:
+            _finalize_active_agent_run(status="done")
         except Exception:
             pass
         try:
@@ -69666,42 +69820,26 @@ def _webui_worker_main(
                 if not step.enabled:
                     conn.send({"ok": True, "result": {"skipped": True, "reason": "disabled"}, "rid": rid})
                     continue
-                # Ensure custom mask_file is usable even when the recipe was imported from another
-                # session (absolute uploads path). This keeps single-step runs stable.
-                try:
-                    mw = _webui_localize_exposure_mask_file(step)
-                    if mw:
-                        for w in mw[:4]:
-                            try:
-                                model._log(f"[mask] {w}")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                _set_step_runtime_status(idx, "running")
-                _push_undo()
-                desc = step.describe()
+                execution = _begin_step_execution(step, idx)
+                if not execution["ok"]:
+                    failure = execution["failure"]
+                    failure["rid"] = rid
+                    conn.send(failure)
+                    continue
+                desc = execution["description"]
+                undo_token = execution["undo_token"]
                 try:
                     model._log(f"Running: {desc}")
                 except Exception:
                     pass
                 transaction = _run_model_transaction(model, lambda: step.execute(model))
                 if not transaction["ok"]:
-                    _set_step_runtime_status(idx, "error")
-                    if transaction.get("rolled_back"):
-                        _discard_latest_undo()
-                    failure = _webui_step_execution_error(step, idx, transaction)
-                    try:
-                        model._log(f"Error in step {int(idx) + 1}: {failure['error']}")
-                    except Exception:
-                        pass
-                    failure["model"] = _webui_model_summary(model)
-                    failure["log"] = model.history[-250:]
-                    failure["model_revision"] = int(model_revision)
+                    failure = _finish_step_failure(step, idx, transaction, undo_token=undo_token)
                     failure["rid"] = rid
                     conn.send(failure)
                     continue
                 result_str = transaction.get("value")
+                _commit_undo(undo_token)
                 _set_step_runtime_status(idx, "done")
                 if result_str:
                     try:

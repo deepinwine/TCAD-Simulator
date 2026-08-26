@@ -10,6 +10,14 @@ import numpy as np
 import tcad_simulator as tcad
 
 
+class BadPath:
+    def __str__(self):
+        raise TypeError("controlled bad path")
+
+    def __fspath__(self):
+        raise TypeError("controlled bad path")
+
+
 class ModelTransactionTests(unittest.TestCase):
     def setUp(self):
         self.model = tcad.ProcessModel(
@@ -67,6 +75,320 @@ class ModelTransactionTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "ValueError")
         self.assertEqual(result["error"], "original failure")
         self.assertEqual(result["rollback_error"], "restore failed")
+
+    def test_snapshot_failure_does_not_run_operation(self):
+        operation_ran = False
+
+        def operation():
+            nonlocal operation_ran
+            operation_ran = True
+
+        with mock.patch.object(self.model, "snapshot_state", side_effect=RuntimeError("snapshot failed")):
+            result = tcad._run_model_transaction(self.model, operation)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["rolled_back"])
+        self.assertEqual(result["snapshot_error"], "snapshot failed")
+        self.assertFalse(operation_ran)
+
+    def test_transaction_restores_all_process_semantics_and_arrays(self):
+        photoresist_id = self.model.material_db.id_for("Photoresist")
+        self.model.temperature = np.full(self.model.grid.shape, 321.5, dtype=np.float32)
+        self.model.resist_material_id = photoresist_id
+        self.model.resist_diffusion_length_nm = 37.5
+        self.model.last_implant_species = "B"
+        self.model.wafer_orientation = "110"
+        self.model.crystal_orientation = np.arange(9, dtype=np.float64).reshape(3, 3)
+        self.model._column_fraction = {
+            "deposition": np.full(self.model.grid.shape[:2], 0.25, dtype=np.float32)
+        }
+        self.model._pending_interstitial_injection = np.full(
+            self.model.grid.shape[:2], 7.0, dtype=np.float64
+        )
+        self.model._last_step_stats = {"kind": "baseline", "coverage": [0.2, 0.8]}
+
+        expected = {
+            "temperature": self.model.temperature.copy(),
+            "resist_material_id": self.model.resist_material_id,
+            "resist_diffusion_length_nm": self.model.resist_diffusion_length_nm,
+            "last_implant_species": self.model.last_implant_species,
+            "wafer_orientation": self.model.wafer_orientation,
+            "crystal_orientation": self.model.crystal_orientation.copy(),
+            "column_fraction": self.model._column_fraction["deposition"].copy(),
+            "pending_interstitial": self.model._pending_interstitial_injection.copy(),
+            "last_step_stats": self.model._last_step_stats.copy(),
+        }
+
+        def mutate_everything_then_fail():
+            self.model.temperature.fill(999.0)
+            self.model.resist_material_id = self.model.material_db.id_for("Copper")
+            self.model.resist_diffusion_length_nm = 999.0
+            self.model.last_implant_species = "AS"
+            self.model.wafer_orientation = "111"
+            self.model.crystal_orientation.fill(-1.0)
+            self.model._column_fraction["deposition"].fill(0.9)
+            self.model._pending_interstitial_injection.fill(99.0)
+            self.model._last_step_stats = {"kind": "mutated"}
+            raise ValueError("semantic rollback")
+
+        result = tcad._run_model_transaction(self.model, mutate_everything_then_fail)
+
+        self.assertTrue(result["rolled_back"])
+        np.testing.assert_array_equal(self.model.temperature, expected["temperature"])
+        self.assertEqual(self.model.resist_material_id, expected["resist_material_id"])
+        self.assertEqual(self.model.resist_diffusion_length_nm, expected["resist_diffusion_length_nm"])
+        self.assertEqual(self.model.last_implant_species, expected["last_implant_species"])
+        self.assertEqual(self.model.wafer_orientation, expected["wafer_orientation"])
+        np.testing.assert_array_equal(self.model.crystal_orientation, expected["crystal_orientation"])
+        np.testing.assert_array_equal(
+            self.model._column_fraction["deposition"], expected["column_fraction"]
+        )
+        np.testing.assert_array_equal(
+            self.model._pending_interstitial_injection, expected["pending_interstitial"]
+        )
+        self.assertEqual(self.model._last_step_stats, expected["last_step_stats"])
+
+    def test_legacy_snapshot_clears_unavailable_semantics_to_defaults(self):
+        legacy = self.model.snapshot_state(compression="dense")
+        for key in (
+            "resist_material_id",
+            "resist_diffusion_length_nm",
+            "last_implant_species",
+            "wafer_orientation",
+            "crystal_orientation",
+            "last_step_stats",
+            "column_fraction",
+            "pending_interstitial_injection",
+        ):
+            legacy.pop(key, None)
+
+        self.model.resist_material_id = self.model.material_db.id_for("Copper")
+        self.model.resist_diffusion_length_nm = 123.0
+        self.model.last_implant_species = "B"
+        self.model.wafer_orientation = "111"
+        self.model.crystal_orientation = np.arange(9, dtype=np.float64).reshape(3, 3)
+        self.model._last_step_stats = {"mutated": True}
+        self.model._column_fraction = {
+            "deposition": np.ones(self.model.grid.shape[:2], dtype=np.float32)
+        }
+        self.model._pending_interstitial_injection = np.ones(
+            self.model.grid.shape[:2], dtype=np.float64
+        )
+
+        self.model.restore_state(legacy)
+
+        self.assertEqual(
+            self.model.resist_material_id, self.model.material_db.id_for("Photoresist")
+        )
+        self.assertEqual(self.model.resist_diffusion_length_nm, 0.0)
+        self.assertIsNone(self.model.last_implant_species)
+        self.assertIsNone(self.model.wafer_orientation)
+        np.testing.assert_array_equal(self.model.crystal_orientation, np.eye(3))
+        self.assertEqual(self.model._last_step_stats, {})
+        self.assertEqual(self.model._column_fraction, {})
+        self.assertIsNone(self.model._pending_interstitial_injection)
+
+    def test_real_spin_resist_partial_failure_restores_resist_material(self):
+        photoresist_id = self.model.material_db.id_for("Photoresist")
+        copper_id = self.model.material_db.id_for("Copper")
+        step = tcad.SpinResistStep(self.model.material_db)
+        step.params.update({"material": "Copper", "thickness_nm": {"invalid": True}})
+
+        result = tcad._run_model_transaction(self.model, lambda: step.execute(self.model))
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(result["error_type"], "TypeError")
+        self.assertNotEqual(photoresist_id, copper_id)
+        self.assertEqual(self.model.resist_material_id, photoresist_id)
+
+    def test_worker_preflight_failures_are_structured_and_add_no_undo(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = self._start_manager(temp_dir)
+                session, _cookie = manager.create_session()
+                session.rpc("recipe_new", {"name": "Preflight test"}, timeout_s=30.0)
+                session.rpc("recipe_add", {"name": "Mask Exposure", "no_autosave": True}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {
+                        "index": 1,
+                        "params": {"mask_mode": "Custom", "mask_file": BadPath()},
+                        "no_autosave": True,
+                    },
+                    timeout_s=30.0,
+                )
+
+                failure = session.rpc("run_step", {"index": 1}, timeout_s=30.0)
+                self._assert_worker_failure(
+                    failure, step_index=1, expected_type="TypeError", step_type="Mask Exposure"
+                )
+                self.assertEqual(
+                    session.rpc("get_recipe", {}, timeout_s=30.0)["result"][1]["runtime_status"],
+                    "error",
+                )
+                self.assertFalse(session.rpc("undo", {}, timeout_s=30.0)["result"]["undone"])
+
+                session.rpc("reset", {}, timeout_s=30.0)
+                incremental_failure = session.rpc("run_all", {}, timeout_s=30.0)
+                self._assert_worker_failure(
+                    incremental_failure, step_index=1, expected_type="TypeError", step_type="Mask Exposure"
+                )
+                self.assertEqual(
+                    session.rpc("get_recipe", {}, timeout_s=30.0)["result"][1]["runtime_status"],
+                    "error",
+                )
+            finally:
+                if manager is not None:
+                    manager.stop()
+
+    def test_failed_transaction_does_not_reduce_full_undo_history(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = self._start_manager(temp_dir)
+                session, _cookie = manager.create_session()
+                session.rpc("recipe_new", {"name": "Undo capacity test"}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": 20.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                for _ in range(20):
+                    self.assertTrue(session.rpc("run_step", {"index": 0}, timeout_s=30.0)["ok"])
+
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": {"invalid": True}}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                failure = session.rpc("run_step", {"index": 0}, timeout_s=30.0)
+                self.assertFalse(failure["ok"])
+
+                undone = 0
+                for _ in range(21):
+                    if session.rpc("undo", {}, timeout_s=30.0)["result"]["undone"]:
+                        undone += 1
+                self.assertEqual(undone, 20)
+            finally:
+                if manager is not None:
+                    manager.stop()
+
+    def test_incremental_prepare_bumps_revision_and_refreshes_present_materials(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = self._start_manager(temp_dir)
+                session, _cookie = manager.create_session()
+                photoresist_id = tcad.MaterialDatabase().id_for("Photoresist")
+                session.rpc("recipe_new", {"name": "Revision cache test"}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": 20.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                session.rpc("recipe_add", {"name": "Spin Resist", "no_autosave": True}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 1, "params": {"thickness_nm": 10.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                first_run = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertTrue(first_run["ok"])
+                first_revision = first_run["result"]["model_revision"]
+                self.assertIn(photoresist_id, session.rpc("init", {}, timeout_s=30.0)["result"]["present_material_ids"])
+
+                session.rpc("set_step", {"index": 0, "enabled": False, "no_autosave": True}, timeout_s=30.0)
+                session.rpc("set_step", {"index": 1, "enabled": False, "no_autosave": True}, timeout_s=30.0)
+                all_disabled = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertGreater(all_disabled["result"]["model_revision"], first_revision)
+                self.assertNotIn(photoresist_id, session.rpc("init", {}, timeout_s=30.0)["result"]["present_material_ids"])
+
+                session.rpc("set_step", {"index": 0, "enabled": True, "no_autosave": True}, timeout_s=30.0)
+                session.rpc("set_step", {"index": 1, "enabled": True, "no_autosave": True}, timeout_s=30.0)
+                cached_run = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertTrue(cached_run["ok"])
+                session.rpc("set_step", {"index": 1, "enabled": False, "no_autosave": True}, timeout_s=30.0)
+                partial_cached = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertGreater(
+                    partial_cached["result"]["model_revision"], cached_run["result"]["model_revision"]
+                )
+                self.assertNotIn(photoresist_id, session.rpc("init", {}, timeout_s=30.0)["result"]["present_material_ids"])
+
+                session.rpc("set_step", {"index": 1, "enabled": True, "no_autosave": True}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": {"invalid": True}}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                before_failure_revision = partial_cached["result"]["model_revision"]
+                first_step_failure = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertFalse(first_step_failure["ok"])
+                self.assertGreater(first_step_failure["model_revision"], before_failure_revision)
+                self.assertNotIn(photoresist_id, session.rpc("init", {}, timeout_s=30.0)["result"]["present_material_ids"])
+            finally:
+                if manager is not None:
+                    manager.stop()
+
+    def test_failed_agent_run_is_finalized_and_next_run_uses_new_report(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = self._start_manager(temp_dir)
+                session, _cookie = manager.create_session()
+                session.rpc("recipe_new", {"name": "Agent failure test"}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"material": "Germanium", "thickness_nm": 20.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                session.rpc("recipe_add", {"name": "Initialize Wafer", "no_autosave": True}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 1, "params": {"thickness_nm": {"invalid": True}}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                session.rpc(
+                    "ui_state",
+                    {
+                        "ui_state": {
+                            "agent": {
+                                "purpose": "transaction failure audit",
+                                "step_meta": [{}, {}],
+                                "run_reports": [],
+                            }
+                        }
+                    },
+                    timeout_s=30.0,
+                )
+
+                failure = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertFalse(failure["ok"])
+                agent = session.rpc("init", {}, timeout_s=30.0)["result"]["ui_state"]["agent"]
+                self.assertNotIn("_active_run_id", agent)
+                self.assertEqual(len(agent["run_reports"]), 1)
+                failed_report = agent["run_reports"][0]
+                self.assertTrue(failed_report["ts_end"])
+                self.assertEqual(failed_report["status"], "error")
+                self.assertEqual(failed_report["failed_step"]["index"], 1)
+                self.assertTrue(failed_report["error"])
+
+                session.rpc(
+                    "set_step",
+                    {"index": 1, "params": {"thickness_nm": 20.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                success = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertTrue(success["ok"])
+                agent_after = session.rpc("init", {}, timeout_s=30.0)["result"]["ui_state"]["agent"]
+                self.assertNotIn("_active_run_id", agent_after)
+                self.assertEqual(len(agent_after["run_reports"]), 2)
+                self.assertNotEqual(agent_after["run_reports"][0]["id"], agent_after["run_reports"][1]["id"])
+                self.assertEqual(agent_after["run_reports"][1]["status"], "done")
+            finally:
+                if manager is not None:
+                    manager.stop()
 
     def test_worker_single_step_and_incremental_failures_are_transactional(self):
         manager = None
@@ -126,7 +448,7 @@ class ModelTransactionTests(unittest.TestCase):
                 session.rpc("recipe_add", {"name": "Anneal", "no_autosave": True}, timeout_s=30.0)
                 incremental_failure = session.rpc("run_all", {}, timeout_s=30.0)
                 self._assert_worker_failure(incremental_failure, step_index=1, expected_type="TypeError")
-                self.assertEqual(incremental_failure["model_revision"], committed_revision + 1)
+                self.assertEqual(incremental_failure["model_revision"], committed_revision + 2)
 
                 final_state = session.rpc("init", {}, timeout_s=30.0)["result"]
                 self.assertEqual(final_state["model"]["substrate_material"], "Germanium")
@@ -138,16 +460,28 @@ class ModelTransactionTests(unittest.TestCase):
                 if manager is not None:
                     manager.stop()
 
-    def _assert_worker_failure(self, response, *, step_index, expected_type):
+    def _assert_worker_failure(self, response, *, step_index, expected_type, step_type="Initialize Wafer"):
         self.assertFalse(response["ok"])
         self.assertEqual(response["step_index"], step_index)
-        self.assertEqual(response["step_type"], "Initialize Wafer")
-        self.assertEqual(response["instance_name"], "Initialize Wafer")
+        self.assertEqual(response["step_type"], step_type)
+        self.assertEqual(response["instance_name"], step_type)
         self.assertEqual(response["error_type"], expected_type)
         self.assertTrue(response["error"])
         self.assertEqual(response["parameter_path"], "")
         self.assertTrue(response["suggestion"])
         self.assertTrue(response["rolled_back"])
+
+    def _start_manager(self, temp_dir):
+        manager = tcad.WebUIServerManager(
+            host="127.0.0.1",
+            port=0,
+            max_users=1,
+            storage_root=Path(temp_dir),
+            enable_ai_agent=False,
+            default_domain={"grid_shape": [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
+        )
+        manager.start()
+        return manager
 
 
 class StepRuntimeStatusTests(unittest.TestCase):
