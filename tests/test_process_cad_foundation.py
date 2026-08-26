@@ -646,10 +646,85 @@ class RecipeIOSelftestTests(unittest.TestCase):
                 text=True,
                 timeout=180.0,
             )
+            output = f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertIn("Recipe IO selftest PASS", completed.stdout, output)
 
-        output = f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-        self.assertEqual(completed.returncode, 0, output)
-        self.assertIn("Recipe IO selftest PASS", completed.stdout, output)
+            report_paths = sorted(
+                cwd.glob("TCAD_RecipeIO_Selftest_Output_*/current_reports.json")
+            )
+            self.assertEqual(len(report_paths), 1, output)
+            reports = json.loads(report_paths[0].read_text(encoding="utf-8"))
+            fixture_steps = reports["saqp"]["exports"]["A_current"]["steps_full"]
+            by_name = {step["name"]: step for step in fixture_steps}
+            wafer_params = by_name["Initialize Wafer"]["params"]
+            deposition_params = by_name["Deposition"]["params"]
+            self.assertEqual(wafer_params["material"], "Silicon")
+            self.assertEqual(wafer_params["thickness_nm"], 200.0)
+            self.assertEqual(deposition_params["material"], "Silicon Dioxide")
+            self.assertEqual(deposition_params["thickness"], 20.0)
+            self.assertEqual(deposition_params["method"], "ALD")
+
+    def test_default_no_ref_selftest_runs_develop_migration_validator(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(temp_dir)
+                with mock.patch.object(
+                    tcad,
+                    "_assert_recipe_io_develop_migration",
+                    side_effect=RuntimeError("forced migration validation failure"),
+                    create=True,
+                ) as validator, mock.patch.object(
+                    sys, "argv", [str(Path(tcad.__file__).resolve()), "--recipe-io-selftest"]
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "forced migration validation failure"
+                    ):
+                        tcad._run_recipe_io_selftest()
+                    validator.assert_called_once()
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_recipe_io_validators_reject_unmigrated_time_and_fixture_semantic_drift(self):
+        self.assertTrue(hasattr(tcad, "_assert_recipe_io_develop_migration"))
+        self.assertTrue(hasattr(tcad, "_assert_recipe_io_minimal_fixture_roundtrip"))
+        reports = {
+            "saqp": {
+                "exports": {
+                    "A_current": {
+                        "steps_full": [
+                            {
+                                "name": "Initialize Wafer",
+                                "params": {"material": "Silicon", "thickness_nm": 200.0},
+                            },
+                            {
+                                "name": "Deposition",
+                                "params": {
+                                    "material": "Silicon Dioxide",
+                                    "thickness": 80.0,
+                                    "method": "ALD",
+                                },
+                            },
+                        ]
+                    }
+                }
+            },
+            "synthetic": {
+                "exports": {
+                    "A_current": {
+                        "steps_full": [
+                            {"name": "Resist Develop", "params": {"time": 500.0}}
+                        ]
+                    }
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Develop-time migration"):
+            tcad._assert_recipe_io_develop_migration(reports)
+        with self.assertRaisesRegex(RuntimeError, "minimal fixture roundtrip"):
+            tcad._assert_recipe_io_minimal_fixture_roundtrip(reports)
 
 
 class MaterialVisualTests(unittest.TestCase):

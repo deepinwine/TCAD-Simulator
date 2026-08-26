@@ -100888,6 +100888,61 @@ def _run_saqp_selftest() -> int:
     return 0
 
 
+def _recipe_io_current_export_steps(current_reports: Any, flow_tag: str) -> List[Dict[str, Any]]:
+    """Return the current-build A_current step blobs for a Recipe IO selftest flow."""
+    try:
+        report = current_reports[flow_tag]
+        current_export = report["exports"]["A_current"]
+        steps = current_export.get("steps_full") or current_export.get("steps") or []
+    except Exception as exc:
+        raise RuntimeError(f"missing current Recipe IO report for {flow_tag}: {exc}") from exc
+    if not isinstance(steps, list):
+        raise RuntimeError(f"invalid current Recipe IO steps for {flow_tag}")
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def _assert_recipe_io_develop_migration(current_reports: Any) -> None:
+    """Ensure the synthetic v1 develop time was migrated from 500 s to about 50 s."""
+    try:
+        develop_step = next(
+            step
+            for step in _recipe_io_current_export_steps(current_reports, "synthetic")
+            if str(step.get("name") or "") == "Resist Develop"
+        )
+        params_raw = develop_step.get("params_raw")
+        params = params_raw if isinstance(params_raw, dict) else develop_step.get("params")
+        if not isinstance(params, dict):
+            raise ValueError("missing Resist Develop params")
+        migrated_time = float(params["time"])
+        if not math.isfinite(migrated_time) or abs(migrated_time - 50.0) > 1e-6:
+            raise ValueError(f"expected about 50 s after importing v1 value 500 s, got {migrated_time}")
+    except Exception as exc:
+        raise RuntimeError(f"Develop-time migration check failed: {exc}") from exc
+
+
+def _assert_recipe_io_minimal_fixture_roundtrip(current_reports: Any) -> None:
+    """Ensure the repository's minimal legacy fixture retained its process semantics."""
+    try:
+        steps = _recipe_io_current_export_steps(current_reports, "saqp")
+        by_name = {str(step.get("name") or ""): step for step in steps}
+        wafer_params = by_name["Initialize Wafer"].get("params")
+        deposition_params = by_name["Deposition"].get("params")
+        if not isinstance(wafer_params, dict) or not isinstance(deposition_params, dict):
+            raise ValueError("missing exported step params")
+        if str(wafer_params.get("material") or "") != "Silicon":
+            raise ValueError("Initialize Wafer material changed")
+        if float(wafer_params.get("thickness_nm")) != 200.0:
+            raise ValueError("Initialize Wafer thickness changed")
+        if str(deposition_params.get("material") or "") != "Silicon Dioxide":
+            raise ValueError("Deposition material changed")
+        if float(deposition_params.get("thickness")) != 20.0:
+            raise ValueError("Deposition thickness changed")
+        if str(deposition_params.get("method") or "") != "ALD":
+            raise ValueError("Deposition method changed")
+    except Exception as exc:
+        raise RuntimeError(f"Recipe IO minimal fixture roundtrip check failed: {exc}") from exc
+
+
 def _run_recipe_io_selftest() -> int:
     """Headless regression selftest for recipe IO and optional reference parity.
 
@@ -101459,6 +101514,10 @@ def _run_recipe_io_selftest() -> int:
     cur_reports["synthetic"] = _run_ops_for_flow(synth_blob, storage_root=storage_cur, tag="synthetic")
     (out_root / "current_reports.json").write_text(json.dumps(cur_reports, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    _assert_recipe_io_develop_migration(cur_reports)
+    if not flow_arg:
+        _assert_recipe_io_minimal_fixture_roundtrip(cur_reports)
+
     if not ref_path:
         print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference comparison skipped)")
         return 0
@@ -101808,21 +101867,6 @@ if __name__ == '__main__':
 
     _cmp(cur_norm_saqp, ref_norm_saqp, ctx="saqp:A_current")
     _cmp(cur_norm_syn, ref_norm_syn, ctx="synthetic:A_current")
-
-    # Develop-time conversion sanity (separate check): synthetic should migrate in current build.
-    try:
-        cur_steps = (cur_reports.get("synthetic", {}).get("exports", {}).get("A_current") or {}).get("steps_full") or []
-        t_cur = None
-        for sb in cur_steps:
-            if isinstance(sb, dict) and str(sb.get("name") or "") == "Resist Develop":
-                p = sb.get("params_raw") if isinstance(sb.get("params_raw"), dict) else sb.get("params", {})
-                if isinstance(p, dict):
-                    t_cur = p.get("time")
-                    break
-        if t_cur is None or float(t_cur) > 200.0:
-            raise RuntimeError("Develop time migration did not apply (expected ~50s after import).")
-    except Exception as exc:
-        raise RuntimeError(f"Develop-time migration check failed: {exc}")
 
     print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference={Path(ref_path).name})")
     return 0
