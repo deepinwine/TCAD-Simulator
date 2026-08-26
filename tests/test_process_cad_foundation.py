@@ -1,5 +1,8 @@
 import json
 import math
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -604,6 +607,49 @@ class StepRuntimeStatusTests(unittest.TestCase):
             finally:
                 if manager is not None:
                     manager.stop()
+
+
+class RecipeIOSelftestTests(unittest.TestCase):
+    def test_repository_default_fixture_is_a_minimal_legacy_recipe(self):
+        fixture_path = Path(tcad.__file__).resolve().parent / "tests" / "fixtures" / "legacy_recipe_minimal.json"
+        recipe = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(recipe["version"], 1)
+        self.assertEqual(recipe["name"], "Legacy Minimal")
+        self.assertEqual(
+            [step["name"] for step in recipe["steps"]],
+            ["Initialize Wafer", "Deposition"],
+        )
+        self.assertEqual(recipe["steps"][0]["params"]["material"], "Silicon")
+        self.assertEqual(recipe["steps"][0]["params"]["thickness_nm"], 200.0)
+        self.assertEqual(recipe["steps"][1]["params"]["material"], "Silicon Dioxide")
+        self.assertEqual(recipe["steps"][1]["params"]["thickness"], 20.0)
+        self.assertEqual(recipe["steps"][1]["params"]["method"], "ALD")
+
+    def test_default_recipe_io_selftest_ignores_cwd_bait_files(self):
+        simulator_path = Path(tcad.__file__).resolve()
+        env = os.environ.copy()
+        env.update({"TCAD_SKIP_QT": "1", "MPLBACKEND": "Agg"})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            (cwd / "legacy_recipe_minimal.json").write_text("not valid json", encoding="utf-8")
+            (cwd / "SAQP_Thinking_Flow.json").write_text("not valid json", encoding="utf-8")
+            (cwd / "tcad_simulator_2.19.py").write_text(
+                "raise RuntimeError('cwd reference bait executed')\n", encoding="utf-8"
+            )
+            completed = subprocess.run(
+                [sys.executable, str(simulator_path), "--recipe-io-selftest"],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=180.0,
+            )
+
+        output = f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        self.assertEqual(completed.returncode, 0, output)
+        self.assertIn("Recipe IO selftest PASS", completed.stdout, output)
 
 
 class MaterialVisualTests(unittest.TestCase):

@@ -100889,7 +100889,7 @@ def _run_saqp_selftest() -> int:
 
 
 def _run_recipe_io_selftest() -> int:
-    """Headless regression selftest for recipe IO parity vs tcad_simulator_2.19.py.
+    """Headless regression selftest for recipe IO and optional reference parity.
 
     Covers:
     - File import/export: recipe_import + recipe_export roundtrip across sessions.
@@ -100906,8 +100906,16 @@ def _run_recipe_io_selftest() -> int:
 
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--recipe-io-selftest", action="store_true", help="Run recipe IO regression selftest and exit.")
-    parser.add_argument("--flow", default="SAQP_Thinking_Flow.json", help="Primary flow JSON to test (default: SAQP_Thinking_Flow.json).")
-    parser.add_argument("--ref", default="tcad_simulator_2.19.py", help="Reference simulator python file to compare against.")
+    parser.add_argument(
+        "--flow",
+        default=None,
+        help="Primary flow JSON to test (default: repository legacy_recipe_minimal.json fixture).",
+    )
+    parser.add_argument(
+        "--ref",
+        default=None,
+        help="Optional reference simulator python file to compare against.",
+    )
     args, _rest = parser.parse_known_args()
     if not bool(getattr(args, "recipe_io_selftest", False)):
         return 2
@@ -101275,8 +101283,15 @@ def _run_recipe_io_selftest() -> int:
         return rep
 
     # Prepare inputs.
-    flow_path = _resolve_path(str(getattr(args, "flow", "") or "SAQP_Thinking_Flow.json"))
-    ref_path = _resolve_path(str(getattr(args, "ref", "") or "tcad_simulator_2.19.py"))
+    flow_arg = str(getattr(args, "flow", "") or "").strip()
+    if flow_arg:
+        flow_path = _resolve_path(flow_arg)
+    else:
+        flow_path = str(
+            (Path(__file__).resolve().parent / "tests" / "fixtures" / "legacy_recipe_minimal.json").resolve()
+        )
+    ref_arg = str(getattr(args, "ref", "") or "").strip()
+    ref_path = _resolve_path(ref_arg) if ref_arg else ""
     flow_blob = _read_json(Path(flow_path))
     # Make the input flow self-contained: legacy SAQP exports may reference mask_file paths that
     # no longer exist on the local machine (e.g., old TCAD_Web_Data uploads). For recipe-IO parity
@@ -101443,6 +101458,10 @@ def _run_recipe_io_selftest() -> int:
     cur_reports["saqp"] = _run_ops_for_flow(flow_blob, storage_root=storage_cur, tag="saqp")
     cur_reports["synthetic"] = _run_ops_for_flow(synth_blob, storage_root=storage_cur, tag="synthetic")
     (out_root / "current_reports.json").write_text(json.dumps(cur_reports, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if not ref_path:
+        print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference comparison skipped)")
+        return 0
 
     # Run reference build probes in a subprocess (avoid multiprocessing spawn issues with dynamic module import).
     ref_out_path = (out_root / "ref_reports.json").resolve()
@@ -101805,6 +101824,7 @@ if __name__ == '__main__':
     except Exception as exc:
         raise RuntimeError(f"Develop-time migration check failed: {exc}")
 
+    print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference={Path(ref_path).name})")
     return 0
 
 

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "Legacy Minimal",
+  "domain": {
+    "grid_shape": [16, 16, 48],
+    "voxel_size_nm": 5.0,
+    "threads": 1
+  },
+  "steps": [
+    {
+      "name": "Initialize Wafer",
+      "enabled": true,
+      "params": {
+        "material": "Silicon",
+        "thickness_nm": 200.0
+      }
+    },
+    {
+      "name": "Deposition",
+      "enabled": true,
+      "params": {
+        "material": "Silicon Dioxide",
+        "thickness": 20.0,
+        "method": "ALD"
+      }
+    }
+  ]
+}
