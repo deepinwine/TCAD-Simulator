@@ -7404,6 +7404,48 @@ def _normalize_fill_material(material_db: MaterialDatabase, material: Any) -> Tu
     return material_id, str(resolved.name)
 
 
+def _fill_enclosed_xy_holes(occupied_xy: np.ndarray) -> np.ndarray:
+    """Add XY holes enclosed by occupied columns to the physical wafer footprint.
+
+    Four-neighbour connectivity matches the XY cross-section of the simulator's
+    six-neighbour 3D accessibility rule.  Boundary-connected concavities remain
+    exterior; this is intentionally not a convex-hull operation.
+    """
+
+    occupied = np.asarray(occupied_xy, dtype=bool)
+    if occupied.ndim != 2:
+        raise ValueError("Fill wafer footprint must be a two-dimensional mask.")
+    if occupied.size == 0:
+        return occupied.copy()
+    if _scipy_ndimage is not None:
+        try:
+            structure = _scipy_ndimage.generate_binary_structure(2, 1)
+            return _scipy_ndimage.binary_fill_holes(occupied, structure=structure).astype(bool, copy=False)
+        except Exception:
+            pass
+
+    exterior_allowed = ~occupied
+    reached = np.zeros_like(occupied, dtype=bool)
+    reached[0, :] = exterior_allowed[0, :]
+    reached[-1, :] |= exterior_allowed[-1, :]
+    reached[:, 0] |= exterior_allowed[:, 0]
+    reached[:, -1] |= exterior_allowed[:, -1]
+    front = reached.copy()
+    while np.any(front):
+        next_front = np.zeros_like(front, dtype=bool)
+        next_front[1:, :] |= front[:-1, :]
+        next_front[:-1, :] |= front[1:, :]
+        next_front[:, 1:] |= front[:, :-1]
+        next_front[:, :-1] |= front[:, 1:]
+        next_front &= exterior_allowed
+        next_front &= ~reached
+        if not np.any(next_front):
+            break
+        reached |= next_front
+        front = next_front
+    return ~reached
+
+
 def _strip_target_seeds(target_mask: np.ndarray, accessible_void: np.ndarray, boundary_z: int) -> np.ndarray:
     """Build exterior-adjacent Strip seeds with one full-size output allocation."""
 
@@ -12628,6 +12670,7 @@ class ProcessModel:
         if occupied_z.size == 0:
             return 0
         occupied_xy = np.any(self.grid, axis=2)
+        wafer_footprint = _fill_enclosed_xy_holes(occupied_xy)
         occupied_x = np.flatnonzero(np.any(occupied_xy, axis=1))
         occupied_y = np.flatnonzero(np.any(occupied_xy, axis=0))
         if not (occupied_x.size and occupied_y.size):
@@ -12636,7 +12679,7 @@ class ProcessModel:
         x_slice = slice(int(occupied_x[0]), int(occupied_x[-1]) + 1)
         y_slice = slice(int(occupied_y[0]), int(occupied_y[-1]) + 1)
         grid_roi = self.grid[x_slice, y_slice, :]
-        footprint = occupied_xy[x_slice, y_slice]
+        footprint = wafer_footprint[x_slice, y_slice]
         depth_voxels = max(1, int(math.ceil(depth_nm / float(self.voxel_size_nm))))
         nz = int(self.grid.shape[2])
         if direction_key == "top":

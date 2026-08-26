@@ -262,6 +262,56 @@ class StripTests(unittest.TestCase):
 
 
 class FillTests(unittest.TestCase):
+    def test_through_hole_is_part_of_wafer_footprint_from_top_and_bottom(self):
+        for direction, expected_z in (("top", slice(3, 6)), ("bottom", slice(0, 3))):
+            with self.subTest(direction=direction):
+                db, model = make_model((10, 10, 10))
+                self.addCleanup(model.parallel.shutdown)
+                silicon_id = db.id_for("Silicon")
+                copper_id = db.id_for("Copper")
+                model.grid[1:9, 1:9, :6] = np.uint16(silicon_id)
+                model.grid[4:6, 4:6, :6] = np.uint16(0)
+                model._rebuild_height_map()
+
+                filled = model.fill_voids("Copper", 30.0, direction=direction)
+
+                self.assertEqual(filled, 2 * 2 * 3)
+                self.assertTrue(np.all(model.grid[4:6, 4:6, expected_z] == copper_id))
+                outside_wafer = np.ones(model.grid.shape[:2], dtype=bool)
+                outside_wafer[1:9, 1:9] = False
+                self.assertFalse(np.any(model.grid[outside_wafer, :] == copper_id))
+
+    def test_through_hole_footprint_has_a_no_scipy_fallback(self):
+        db, model = make_model((9, 9, 9))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[1:8, 1:8, :6] = np.uint16(silicon_id)
+        model.grid[3:5, 3:5, :6] = np.uint16(0)
+        model._rebuild_height_map()
+
+        with mock.patch.object(tcad, "_scipy_ndimage", None):
+            filled = model.fill_voids("Copper", 20.0, direction="top")
+
+        self.assertEqual(filled, 2 * 2 * 2)
+        self.assertTrue(np.all(model.grid[3:5, 3:5, 4:6] == copper_id))
+
+    def test_open_xy_concavity_and_bbox_exterior_are_not_promoted_to_footprint(self):
+        db, model = make_model((12, 12, 10))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[2:10, 2:10, :6] = np.uint16(silicon_id)
+        model.grid[2:6, 5:7, :6] = np.uint16(0)
+        model._rebuild_height_map()
+
+        filled = model.fill_voids("Copper", 30.0, direction="top")
+
+        self.assertEqual(filled, 0)
+        self.assertFalse(np.any(model.grid[2:6, 5:7, :] == copper_id))
+        self.assertFalse(np.any(model.grid[:2, :, :] == copper_id))
+        self.assertFalse(np.any(model.grid[10:, :, :] == copper_id))
+
     def test_fill_open_trench_without_filling_sealed_or_external_void(self):
         db, model = make_model((12, 12, 18))
         self.addCleanup(model.parallel.shutdown)
