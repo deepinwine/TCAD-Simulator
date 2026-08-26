@@ -4,8 +4,150 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest import mock
 
+import numpy as np
 import tcad_simulator as tcad
+
+
+class ModelTransactionTests(unittest.TestCase):
+    def setUp(self):
+        self.model = tcad.ProcessModel(
+            tcad.MaterialDatabase(),
+            grid_shape=(12, 12, 16),
+            voxel_size_nm=5.0,
+            max_workers=1,
+        )
+
+    def tearDown(self):
+        try:
+            self.model.parallel.shutdown()
+        except Exception:
+            pass
+
+    def test_failed_operation_restores_dense_snapshot(self):
+        before = self.model.snapshot_state(compression="dense")
+
+        def mutate_then_fail():
+            self.model.grid[:, :, :] = np.uint16(0)
+            raise ValueError("controlled transaction failure")
+
+        result = tcad._run_model_transaction(self.model, mutate_then_fail)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(result["error_type"], "ValueError")
+        self.assertEqual(result["error"], "controlled transaction failure")
+        np.testing.assert_array_equal(self.model.grid, before["grid"])
+
+    def test_successful_operation_keeps_mutation_and_value(self):
+        replacement = np.uint16(self.model.material_db.id_for("Germanium"))
+
+        def mutate_successfully():
+            self.model.grid[0, 0, 0] = replacement
+            return "committed"
+
+        result = tcad._run_model_transaction(self.model, mutate_successfully)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["rolled_back"])
+        self.assertEqual(result["value"], "committed")
+        self.assertEqual(self.model.grid[0, 0, 0], replacement)
+
+    def test_restore_failure_preserves_original_error(self):
+        def mutate_then_fail():
+            self.model.grid[0, 0, 0] = np.uint16(0)
+            raise ValueError("original failure")
+
+        with mock.patch.object(self.model, "restore_state", side_effect=RuntimeError("restore failed")):
+            result = tcad._run_model_transaction(self.model, mutate_then_fail)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["rolled_back"])
+        self.assertEqual(result["error_type"], "ValueError")
+        self.assertEqual(result["error"], "original failure")
+        self.assertEqual(result["rollback_error"], "restore failed")
+
+    def test_worker_single_step_and_incremental_failures_are_transactional(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = tcad.WebUIServerManager(
+                    host="127.0.0.1",
+                    port=0,
+                    max_users=1,
+                    storage_root=Path(temp_dir),
+                    enable_ai_agent=False,
+                    default_domain={"grid_shape": [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
+                )
+                manager.start()
+                session, _cookie = manager.create_session()
+                self.assertIsNotNone(session)
+
+                session.rpc("recipe_new", {"name": "Transaction test"}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"material": "Germanium", "thickness_nm": 40.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                single_success = session.rpc("run_step", {"index": 0}, timeout_s=30.0)
+                self.assertTrue(single_success["ok"])
+                committed_revision = single_success["result"]["model_revision"]
+                self.assertEqual(
+                    session.rpc("get_recipe", {}, timeout_s=30.0)["result"][0]["runtime_status"],
+                    "done",
+                )
+                committed_model = session.rpc("init", {}, timeout_s=30.0)["result"]["model"]
+                self.assertEqual(committed_model["substrate_material"], "Germanium")
+
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": {"invalid": True}}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                single_failure = session.rpc("run_step", {"index": 0}, timeout_s=30.0)
+                self._assert_worker_failure(single_failure, step_index=0, expected_type="TypeError")
+                self.assertEqual(single_failure["model_revision"], committed_revision)
+                after_single_failure = session.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(after_single_failure["model"], committed_model)
+                self.assertEqual(after_single_failure["recipe"][0]["runtime_status"], "error")
+
+                session.rpc(
+                    "set_step",
+                    {"index": 0, "params": {"thickness_nm": 40.0}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                session.rpc("recipe_add", {"name": "Initialize Wafer", "no_autosave": True}, timeout_s=30.0)
+                session.rpc(
+                    "set_step",
+                    {"index": 1, "params": {"thickness_nm": {"invalid": True}}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                session.rpc("recipe_add", {"name": "Anneal", "no_autosave": True}, timeout_s=30.0)
+                incremental_failure = session.rpc("run_all", {}, timeout_s=30.0)
+                self._assert_worker_failure(incremental_failure, step_index=1, expected_type="TypeError")
+                self.assertEqual(incremental_failure["model_revision"], committed_revision + 1)
+
+                final_state = session.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(final_state["model"]["substrate_material"], "Germanium")
+                self.assertEqual(
+                    [step["runtime_status"] for step in final_state["recipe"]],
+                    ["done", "error", "dirty"],
+                )
+            finally:
+                if manager is not None:
+                    manager.stop()
+
+    def _assert_worker_failure(self, response, *, step_index, expected_type):
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["step_index"], step_index)
+        self.assertEqual(response["step_type"], "Initialize Wafer")
+        self.assertEqual(response["instance_name"], "Initialize Wafer")
+        self.assertEqual(response["error_type"], expected_type)
+        self.assertTrue(response["error"])
+        self.assertEqual(response["parameter_path"], "")
+        self.assertTrue(response["suggestion"])
+        self.assertTrue(response["rolled_back"])
 
 
 class StepRuntimeStatusTests(unittest.TestCase):

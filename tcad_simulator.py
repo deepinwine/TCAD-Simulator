@@ -31189,6 +31189,55 @@ def _invalidate_step_statuses(statuses: Any, start_index: int, recipe_length: in
     return out
 
 
+def _run_model_transaction(model: ProcessModel, operation: Callable[[], Any]) -> Dict[str, Any]:
+    """Run one model mutation and restore a dense snapshot when it raises."""
+    try:
+        before = model.snapshot_state(compression="dense")
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "rolled_back": False,
+            "snapshot_error": str(exc),
+        }
+
+    try:
+        value = operation()
+    except Exception as exc:
+        result: Dict[str, Any] = {
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "rolled_back": False,
+        }
+        try:
+            model.restore_state(before)
+            result["rolled_back"] = True
+        except Exception as rollback_exc:
+            result["rollback_error"] = str(rollback_exc)
+        return result
+    return {"ok": True, "value": value, "rolled_back": False}
+
+
+def _webui_step_execution_error(step: ProcessStep, step_index: int, transaction: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a stable, conservative error payload for a failed process step."""
+    response: Dict[str, Any] = {
+        "ok": False,
+        "step_index": int(step_index),
+        "instance_name": _normalize_step_instance_name(getattr(step, "instance_name", None), step.name),
+        "step_type": str(step.name),
+        "error": str(transaction.get("error", "Step execution failed.")),
+        "error_type": str(transaction.get("error_type", "Exception")),
+        "parameter_path": "",
+        "suggestion": "Review the step parameters and retry.",
+        "rolled_back": bool(transaction.get("rolled_back", False)),
+    }
+    if transaction.get("rollback_error"):
+        response["rollback_error"] = str(transaction["rollback_error"])
+    return response
+
+
 def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "name": step.name,
@@ -35541,6 +35590,12 @@ def _webui_worker_main(
     def _invalidate_step_runtime_statuses(start_index: int) -> None:
         nonlocal step_runtime_statuses
         step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, start_index, len(steps))
+
+    def _set_step_runtime_status(index: int, status: str) -> None:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        if 0 <= int(index) < len(step_runtime_statuses) and status in _STEP_RUNTIME_STATES:
+            step_runtime_statuses[int(index)] = status
 
     # Normalize any "material" role params to mat_id ints so recipes persist stably across renames.
     pending_warnings: List[str] = []
@@ -56667,6 +56722,10 @@ def _webui_worker_main(
         if len(undo_stack) > max_undo:
             _snap_drop(undo_stack.pop(0))
 
+    def _discard_latest_undo() -> None:
+        if undo_stack:
+            _snap_drop(undo_stack.pop())
+
     # WebUI preview caches (per isolated worker).
     # Keep `preview_mesh_cache` lightweight (metadata only) to avoid multi-user memory blow-ups.
     preview_mesh_cache: Dict[str, Dict[str, Any]] = {}  # mode -> {rev, face_limit, voxel_um, meshes:[{mat_id,color,bbox,tri_count}]}
@@ -57041,7 +57100,9 @@ def _webui_worker_main(
         if restore_idx < 0:
             model.reset_state()
 
-        model_revision += 1
+        for completed_index in range(0, int(restore_idx) + 1):
+            _set_step_runtime_status(completed_index, "done")
+
         preview_ready.clear()
 
         # Blackboard baseline: publish the restored prefix state so downstream steps can query
@@ -57086,6 +57147,7 @@ def _webui_worker_main(
                     "log": model.history[-250:],
                     "cache_reused": int(reuse_n),
                     "stations_total": int(len(stations_all)),
+                    "model_revision": int(model_revision),
                     "blackboard_summary": bb_summary,
                 },
             }
@@ -57111,6 +57173,7 @@ def _webui_worker_main(
                 step = steps[i]
                 if not step.enabled:
                     # Disabled steps are no-ops but still participate in time-travel indexing.
+                    _set_step_runtime_status(i, "done")
                     try:
                         snap_obj = last_step_snap
                         if last_step_snap is None:
@@ -57568,7 +57631,11 @@ def _webui_worker_main(
                         pre_open_frac_bb = float(np.mean(om0.astype(np.float32, copy=False)))
                 except Exception:
                     pre_open_frac_bb = None
-                desc = step.describe()
+                try:
+                    desc = step.describe()
+                except Exception:
+                    desc = _normalize_step_instance_name(getattr(step, "instance_name", None), step.name)
+                _set_step_runtime_status(i, "running")
                 _push_undo()
                 # Clear any stale kernel-provided metrics so per-step run reports don't accidentally
                 # reuse the previous step's stats when a kernel is a no-op.
@@ -57583,7 +57650,26 @@ def _webui_worker_main(
                     )
                 except Exception:
                     pass
-                result_str = step.execute(model)
+                transaction = _run_model_transaction(model, lambda: step.execute(model))
+                if not transaction["ok"]:
+                    _set_step_runtime_status(i, "error")
+                    if transaction.get("rolled_back"):
+                        _discard_latest_undo()
+                    failure = _webui_step_execution_error(step, i, transaction)
+                    try:
+                        model._log(f"Error in step {int(i) + 1}: {failure['error']}")
+                    except Exception:
+                        pass
+                    try:
+                        WaferContextManager.end_run(current_ui_state, run_id=str(bb_run_id), ok=False, cache_only=False)
+                    except Exception:
+                        pass
+                    failure["model"] = _webui_model_summary(model)
+                    failure["log"] = model.history[-250:]
+                    failure["model_revision"] = int(model_revision)
+                    return failure
+                result_str = transaction.get("value")
+                _set_step_runtime_status(i, "done")
                 if result_str:
                     try:
                         # Include step index in the completion marker so WebUI can stay in-sync
@@ -58168,7 +58254,6 @@ def _webui_worker_main(
             # "modify step 40 -> restore from 39" time travel with finer granularity and avoids
             # double-caching large model states.
 
-        model_revision += 1
         preview_ready.clear()
         _autosave(autosave_note)
         # Finalize any active AI-agent run report record.
@@ -58273,6 +58358,7 @@ def _webui_worker_main(
                 "cache_reused": int(reuse_n),
                 "cache_rerun_from": int(first_rerun_station),
                 "stations_total": int(len(stations_all)),
+                "model_revision": int(model_revision),
                 "blackboard_summary": bb_summary,
             },
         }
@@ -68574,7 +68660,10 @@ def _webui_worker_main(
                 video_pos = next_pos
                 step_index = int(video_plan[video_pos])
                 step = steps[step_index]
-                desc = step.describe()
+                try:
+                    desc = step.describe()
+                except Exception:
+                    desc = _normalize_step_instance_name(getattr(step, "instance_name", None), step.name)
                 try:
                     model._log(f"[Video] Running: {desc}")
                 except Exception:
@@ -69592,13 +69681,31 @@ def _webui_worker_main(
                                 pass
                 except Exception:
                     pass
+                _set_step_runtime_status(idx, "running")
                 _push_undo()
                 desc = step.describe()
                 try:
                     model._log(f"Running: {desc}")
                 except Exception:
                     pass
-                result_str = step.execute(model)
+                transaction = _run_model_transaction(model, lambda: step.execute(model))
+                if not transaction["ok"]:
+                    _set_step_runtime_status(idx, "error")
+                    if transaction.get("rolled_back"):
+                        _discard_latest_undo()
+                    failure = _webui_step_execution_error(step, idx, transaction)
+                    try:
+                        model._log(f"Error in step {int(idx) + 1}: {failure['error']}")
+                    except Exception:
+                        pass
+                    failure["model"] = _webui_model_summary(model)
+                    failure["log"] = model.history[-250:]
+                    failure["model_revision"] = int(model_revision)
+                    failure["rid"] = rid
+                    conn.send(failure)
+                    continue
+                result_str = transaction.get("value")
+                _set_step_runtime_status(idx, "done")
                 if result_str:
                     try:
                         model._log(f"→ {result_str}")
@@ -69613,6 +69720,8 @@ def _webui_worker_main(
                         "result": {
                             "description": desc,
                             "result": result_str,
+                            "runtime_status": step_runtime_statuses[idx],
+                            "model_revision": int(model_revision),
                             "model": _webui_model_summary(model),
                             "log": model.history[-250:],
                         },
