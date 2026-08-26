@@ -787,3 +787,220 @@ class WaferFlipTests(unittest.TestCase):
         self.assertIsInstance(restored, tcad.WaferFlipStep)
         self.assertEqual(restored.params, {})
         self.assertNotIn("Wafer Flip", [item.name for item in tcad._webui_default_recipe(db)])
+
+
+class BondingTests(unittest.TestCase):
+    def test_top_bonding_adds_interface_then_handle_without_changing_wafer(self):
+        db, model = make_model((6, 6, 20))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        before = model.grid[:, :, :4].copy()
+        model._rebuild_height_map()
+
+        result = model.bond_wafer(
+            handle_material="Silicon",
+            handle_thickness_nm=40.0,
+            bonding_material="Silicon Dioxide",
+            bonding_layer_nm=10.0,
+        )
+
+        self.assertEqual(result["bond_voxels"], 1)
+        self.assertEqual(result["handle_voxels"], 4)
+        self.assertEqual(result["bond_cells"], 6 * 6)
+        self.assertEqual(result["handle_cells"], 6 * 6 * 4)
+        self.assertEqual(result["active_side"], "top")
+        np.testing.assert_array_equal(model.grid[:, :, :4], before)
+        self.assertTrue(np.all(model.grid[:, :, 4] == oxide_id))
+        self.assertTrue(np.all(model.grid[:, :, 5:9] == silicon_id))
+        self.assertFalse(np.any(model.grid[:, :, 9:]))
+
+    def test_bottom_bonding_follows_flipped_active_side_in_physical_order(self):
+        db, model = make_model((6, 6, 20))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        model.flip_wafer()
+        flipped_before = model.grid[:, :, 16:20].copy()
+
+        result = model.bond_wafer("Silicon", 40.0, "Silicon Dioxide", 10.0)
+
+        self.assertEqual(result["active_side"], "bottom")
+        np.testing.assert_array_equal(model.grid[:, :, 16:20], flipped_before)
+        self.assertTrue(np.all(model.grid[:, :, 15] == oxide_id))
+        self.assertTrue(np.all(model.grid[:, :, 11:15] == silicon_id))
+        self.assertFalse(np.any(model.grid[:, :, :11]))
+
+    def test_zero_bond_layer_allows_direct_handle_and_thickness_uses_ceiling(self):
+        db, model = make_model((3, 3, 10))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, :2] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+
+        result = model.bond_wafer("Copper", 10.01, "Silicon Dioxide", 0.0)
+
+        self.assertEqual(result["bond_voxels"], 0)
+        self.assertEqual(result["handle_voxels"], 2)
+        self.assertEqual(result["bond_cells"], 0)
+        self.assertEqual(result["handle_cells"], 3 * 3 * 2)
+        self.assertTrue(np.all(model.grid[:, :, 2:4] == copper_id))
+
+    def test_insufficient_space_reports_required_available_and_is_atomic(self):
+        db, model = make_model((4, 4, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        model.doping = np.arange(model.grid.size, dtype=np.float32).reshape(model.grid.shape)
+        model._rebuild_height_map()
+        before_grid = model.grid.copy()
+        before_doping = model.doping.copy()
+
+        with self.assertRaisesRegex(ValueError, r"required.*5.*available.*4"):
+            model.bond_wafer("Silicon", 40.0, "Silicon Dioxide", 10.0)
+
+        np.testing.assert_array_equal(model.grid, before_grid)
+        np.testing.assert_array_equal(model.doping, before_doping)
+
+    def test_empty_model_and_invalid_materials_and_thicknesses_are_rejected(self):
+        _db, model = make_model((3, 3, 10))
+        self.addCleanup(model.parallel.shutdown)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            model.bond_wafer("Silicon", 10.0, "Silicon Dioxide", 0.0)
+
+        model.grid[:, :, :2] = np.uint16(model.material_db.id_for("Silicon"))
+        model._rebuild_height_map()
+        invalid_materials = ("Void", 0, "Missingium", True, None)
+        for value in invalid_materials:
+            with self.subTest(handle_material=value):
+                with self.assertRaises(ValueError):
+                    model.bond_wafer(value, 10.0, "Silicon Dioxide", 0.0)
+            with self.subTest(bonding_material=value):
+                with self.assertRaises(ValueError):
+                    model.bond_wafer("Silicon", 10.0, value, 0.0)
+
+        for value in (0.0, -1.0, float("nan"), float("inf"), True):
+            with self.subTest(handle_thickness_nm=value):
+                with self.assertRaises(ValueError):
+                    model.bond_wafer("Silicon", value, "Silicon Dioxide", 0.0)
+        for value in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(bonding_layer_nm=value):
+                with self.assertRaises(ValueError):
+                    model.bond_wafer("Silicon", 10.0, "Silicon Dioxide", value)
+
+    def test_target_volume_precheck_never_overwrites_non_void_anomaly(self):
+        db, model = make_model((3, 3, 12))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        model.grid[1, 1, 6] = np.uint16(oxide_id)
+        model._rebuild_height_map()
+        before = model.grid.copy()
+
+        # Simulate stale/corrupt occupied-Z metadata so the proposed target range
+        # intersects an anomalous occupied cell. The explicit target precheck must
+        # still refuse the write rather than relying only on the global boundary.
+        with mock.patch.object(tcad.np, "flatnonzero", return_value=np.arange(4)):
+            with self.assertRaisesRegex(ValueError, "non-Void"):
+                model.bond_wafer("Silicon", 40.0, "Silicon Dioxide", 10.0)
+
+        np.testing.assert_array_equal(model.grid, before)
+
+    def test_invalid_active_side_is_safely_normalized_to_top(self):
+        db, model = make_model((2, 2, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[:, :, :2] = np.uint16(silicon_id)
+        model.active_side = "sideways"
+        model._rebuild_height_map()
+
+        result = model.bond_wafer("Silicon", 10.0, "Silicon Dioxide", 10.0)
+
+        self.assertEqual(result["active_side"], "top")
+        self.assertEqual(model.active_side, "top")
+        self.assertTrue(np.all(model.grid[:, :, 2] == oxide_id))
+        self.assertTrue(np.all(model.grid[:, :, 3] == silicon_id))
+
+    def test_new_material_clears_all_colocated_volume_state_and_preserves_aliases(self):
+        db, model = make_model((2, 2, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :2] = np.uint16(silicon_id)
+        shape = model.grid.shape
+        shared = np.full(shape, 7.0, dtype=np.float32)
+        model.doping = shared
+        model.active_dopants = shared
+        for field_name in model._spatial_volume_field_names():
+            if field_name not in {"doping", "active_dopants"}:
+                setattr(model, field_name, np.full(shape, 11.0, dtype=np.float32))
+        model.defects_interstitial = model.interstitials
+        model.defects_vacancy = model.vacancies
+        species = np.full(shape, 13.0, dtype=np.float32)
+        model.dopant_species_fields = {"Shared": shared, "B": species, "metadata": "keep"}
+        resist_volume = np.full(shape, 17.0, dtype=np.float32)
+        model._resist_state = SimpleNamespace(shared=shared, volume=resist_volume, surface=np.ones(shape[:2]))
+        model._rebuild_height_map()
+
+        model.bond_wafer("Silicon", 10.0, "Silicon Dioxide", 10.0)
+
+        added = (slice(None), slice(None), slice(2, 4))
+        original = (slice(None), slice(None), slice(0, 2))
+        arrays = [
+            *(getattr(model, name) for name in model._spatial_volume_field_names()),
+            model.dopant_species_fields["Shared"],
+            model.dopant_species_fields["B"],
+            model._resist_state.shared,
+            model._resist_state.volume,
+        ]
+        for array in arrays:
+            with self.subTest(array_id=id(array)):
+                self.assertTrue(np.all(array[added] == 0.0))
+                self.assertTrue(np.all(array[original] != 0.0))
+        self.assertIs(model.doping, model.active_dopants)
+        self.assertIs(model.doping, model.dopant_species_fields["Shared"])
+        self.assertIs(model.doping, model._resist_state.shared)
+        self.assertIs(model.interstitials, model.defects_interstitial)
+        self.assertIs(model.vacancies, model.defects_vacancy)
+        self.assertEqual(model.dopant_species_fields["metadata"], "keep")
+        self.assertTrue(np.all(model._resist_state.surface == 1.0))
+
+    def test_step_factory_execute_roundtrip_and_default_recipe_exclusion(self):
+        db, model = make_model((2, 2, 12))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :2] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        step = tcad.PROCESS_STEP_FACTORIES["Bonding"](db)
+        step.params.update(
+            {
+                "handle_material": "Silicon",
+                "handle_thickness_nm": 20.01,
+                "bonding_material": "Silicon Dioxide",
+                "bonding_layer_nm": 10.0,
+            }
+        )
+
+        result = step.execute(model)
+        blob = tcad._webui_serialize_step(step)
+        restored = tcad._webui_deserialize_step(blob, db)
+
+        self.assertIsInstance(step, tcad.BondingStep)
+        self.assertEqual(step.name, "Bonding")
+        self.assertEqual(step.group, "Wafer")
+        self.assertEqual(set(step.params), {
+            "handle_material",
+            "handle_thickness_nm",
+            "bonding_material",
+            "bonding_layer_nm",
+        })
+        self.assertIn("Bonding", result)
+        self.assertIn("3", result)
+        self.assertIsInstance(restored, tcad.BondingStep)
+        self.assertEqual(restored.params, step.params)
+        self.assertNotIn("Bonding", [item.name for item in tcad._webui_default_recipe(db)])

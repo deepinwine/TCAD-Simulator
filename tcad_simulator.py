@@ -7363,45 +7363,56 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
     return material_ids, material_names
 
 
-def _normalize_fill_material(material_db: MaterialDatabase, material: Any) -> Tuple[int, str]:
-    """Resolve one non-Void Fill material name or ID."""
+def _normalize_nonvoid_material(
+    material_db: MaterialDatabase,
+    material: Any,
+    operation: str,
+) -> Tuple[int, str]:
+    """Resolve one non-Void material name or ID for a named operation."""
 
+    operation_name = str(operation or "Process").strip() or "Process"
     raw = material
     if isinstance(raw, np.ndarray):
         if raw.ndim != 0:
-            raise ValueError("Fill material arrays must be zero-dimensional IDs.")
+            raise ValueError(f"{operation_name} material arrays must be zero-dimensional IDs.")
         raw = raw.item()
     if isinstance(raw, (bool, np.bool_)) or raw is None:
-        raise ValueError("Fill material must be one non-Void material name or ID.")
+        raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
     if isinstance(raw, str):
         token = raw.strip()
         if not token:
-            raise ValueError("Fill material must be one non-Void material name or ID.")
+            raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
         if re.fullmatch(r"[+-]?\d+", token):
             material_id = int(token)
             try:
                 resolved = material_db.material(material_id)
             except Exception as exc:
-                raise ValueError(f"Unknown Fill material ID: {material_id}") from exc
+                raise ValueError(f"Unknown {operation_name} material ID: {material_id}") from exc
         else:
             try:
                 material_id = int(material_db.id_for(token))
                 resolved = material_db.material(material_id)
             except Exception as exc:
-                raise ValueError(f"Unknown Fill material: {token}") from exc
+                raise ValueError(f"Unknown {operation_name} material: {token}") from exc
     elif isinstance(raw, (int, np.integer)):
         material_id = int(raw)
         try:
             resolved = material_db.material(material_id)
         except Exception as exc:
-            raise ValueError(f"Unknown Fill material ID: {material_id}") from exc
+            raise ValueError(f"Unknown {operation_name} material ID: {material_id}") from exc
     else:
-        raise ValueError("Fill material must be one non-Void material name or ID.")
+        raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
     if material_id <= 0 or resolved.name == "Void":
-        raise ValueError("Void cannot be selected as a Fill material.")
+        raise ValueError(f"Void cannot be selected as a {operation_name} material.")
     if material_id > int(np.iinfo(np.uint16).max):
-        raise ValueError(f"Fill material ID is outside the voxel range: {material_id}")
+        raise ValueError(f"{operation_name} material ID is outside the voxel range: {material_id}")
     return material_id, str(resolved.name)
+
+
+def _normalize_fill_material(material_db: MaterialDatabase, material: Any) -> Tuple[int, str]:
+    """Resolve one non-Void Fill material name or ID."""
+
+    return _normalize_nonvoid_material(material_db, material, "Fill")
 
 
 def _fill_enclosed_xy_holes(occupied_xy: np.ndarray) -> np.ndarray:
@@ -7998,6 +8009,107 @@ class ProcessModel:
         self._log(f"Wafer flipped: active side is now {self.active_side}")
         return self.active_side
 
+    def bond_wafer(
+        self,
+        handle_material: Any,
+        handle_thickness_nm: float,
+        bonding_material: Any,
+        bonding_layer_nm: float,
+    ) -> Dict[str, Any]:
+        """Attach a bonding layer and handle wafer outside the current active side."""
+
+        handle_id, handle_name = _normalize_nonvoid_material(
+            self.material_db,
+            handle_material,
+            "Bonding handle",
+        )
+        bond_id, bond_name = _normalize_nonvoid_material(
+            self.material_db,
+            bonding_material,
+            "Bonding layer",
+        )
+
+        def _thickness_voxels(value: Any, label: str, *, allow_zero: bool) -> int:
+            if isinstance(value, (bool, np.bool_)):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.")
+            try:
+                thickness_nm = float(value)
+            except (TypeError, ValueError, OverflowError):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.") from None
+            valid = thickness_nm >= 0.0 if allow_zero else thickness_nm > 0.0
+            if not math.isfinite(thickness_nm) or not valid:
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.")
+            if thickness_nm == 0.0:
+                return 0
+            return max(1, int(math.ceil(thickness_nm / float(self.voxel_size_nm))))
+
+        handle_voxels = _thickness_voxels(
+            handle_thickness_nm,
+            "Bonding handle thickness",
+            allow_zero=False,
+        )
+        bond_voxels = _thickness_voxels(
+            bonding_layer_nm,
+            "Bonding layer thickness",
+            allow_zero=True,
+        )
+        required_voxels = handle_voxels + bond_voxels
+        occupied_z = np.flatnonzero(np.any(self.grid != 0, axis=(0, 1)))
+        if occupied_z.size == 0:
+            raise ValueError("Cannot bond a wafer onto an empty model.")
+
+        active_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        nz = int(self.grid.shape[2])
+        if active_side == "top":
+            surface = int(occupied_z[-1])
+            available_voxels = nz - surface - 1
+            target_start = surface + 1
+            target_stop = target_start + required_voxels
+            bond_slice = slice(target_start, target_start + bond_voxels)
+            handle_slice = slice(target_start + bond_voxels, target_stop)
+        else:
+            surface = int(occupied_z[0])
+            available_voxels = surface
+            target_start = surface - required_voxels
+            target_stop = surface
+            handle_slice = slice(target_start, surface - bond_voxels)
+            bond_slice = slice(surface - bond_voxels, surface)
+
+        if required_voxels > available_voxels:
+            raise ValueError(
+                "Insufficient Z space for Bonding: "
+                f"required {required_voxels} voxels, available {available_voxels} voxels."
+            )
+
+        volume_roi = (slice(None), slice(None), slice(target_start, target_stop))
+        if np.any(self.grid[volume_roi] != 0):
+            raise ValueError("Bonding target volume contains non-Void voxels; existing material was not overwritten.")
+
+        if bond_voxels:
+            self.grid[:, :, bond_slice] = np.uint16(bond_id)
+        self.grid[:, :, handle_slice] = np.uint16(handle_id)
+        self._clear_spatial_volume_mask(volume_roi)
+        self.active_side = active_side
+        self._rebuild_height_map([bond_id, handle_id])
+
+        nx, ny = int(self.grid.shape[0]), int(self.grid.shape[1])
+        bond_cells = nx * ny * bond_voxels
+        handle_cells = nx * ny * handle_voxels
+        self._log(
+            f"Bonding ({active_side}) added {bond_voxels} voxel layer(s) of {bond_name} "
+            f"and {handle_voxels} voxel layer(s) of handle {handle_name}"
+        )
+        return {
+            "bond_voxels": bond_voxels,
+            "handle_voxels": handle_voxels,
+            "bond_cells": bond_cells,
+            "handle_cells": handle_cells,
+            "active_side": active_side,
+        }
+
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -8390,6 +8502,47 @@ class ProcessModel:
                 arr[roi][mask] = 0.0
             except Exception:
                 continue
+
+    def _clear_spatial_volume_mask(
+        self,
+        roi: Tuple[slice, slice, slice],
+        mask: Optional[np.ndarray] = None,
+    ) -> None:
+        """Clear co-located 3D state once per array identity inside an ROI."""
+
+        cleared_arrays: Set[int] = {id(self.grid)}
+
+        def _clear(field: Any) -> None:
+            if (
+                not isinstance(field, np.ndarray)
+                or field.shape != self.grid.shape
+                or id(field) in cleared_arrays
+            ):
+                return
+            if mask is None:
+                field[roi] = 0.0
+            else:
+                field[roi][mask] = 0.0
+            cleared_arrays.add(id(field))
+
+        for field_name in self._spatial_volume_field_names():
+            _clear(getattr(self, field_name, None))
+
+        dopant_fields = getattr(self, "dopant_species_fields", None)
+        if isinstance(dopant_fields, dict):
+            for field in dopant_fields.values():
+                _clear(field)
+
+        resist_state = getattr(self, "_resist_state", None)
+        if isinstance(resist_state, dict):
+            for field in resist_state.values():
+                _clear(field)
+        elif resist_state is not None:
+            for field_name in self._state_field_names(resist_state):
+                try:
+                    _clear(getattr(resist_state, field_name))
+                except Exception:
+                    continue
 
     def _clear_dopant_species_top_layers(
         self, xs: np.ndarray, ys: np.ndarray, heights_before: np.ndarray, removed_layers: np.ndarray
@@ -12810,20 +12963,7 @@ class ProcessModel:
 
         volume_roi = (x_slice, y_slice, z_slice)
         self.grid[volume_roi][fill_mask] = np.uint16(material_id)
-        cleared_arrays: Set[int] = set()
-        for field_name in self._spatial_volume_field_names():
-            field = getattr(self, field_name, None)
-            if not isinstance(field, np.ndarray) or field.shape != self.grid.shape or id(field) in cleared_arrays:
-                continue
-            field[volume_roi][fill_mask] = 0.0
-            cleared_arrays.add(id(field))
-        self._clear_dopant_species_mask(volume_roi, fill_mask)
-        resist_state = getattr(self, "_resist_state", None)
-        if resist_state is not None:
-            for field in vars(resist_state).values():
-                if isinstance(field, np.ndarray) and field.shape == self.grid.shape and id(field) not in cleared_arrays:
-                    field[volume_roi][fill_mask] = 0.0
-                    cleared_arrays.add(id(field))
+        self._clear_spatial_volume_mask(volume_roi, fill_mask)
         self._rebuild_height_map([material_id])
         mode = "including sealed" if bool(include_sealed) else "exterior-connected"
         self._log(
@@ -19500,6 +19640,60 @@ class WaferFlipStep(ProcessStep):
         return f"Wafer Flip: active side {active_side}"
 
 
+class BondingStep(ProcessStep):
+    name = "Bonding"
+    group = "Wafer"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec(
+                "handle_material",
+                "Handle wafer material",
+                "enum",
+                "Silicon",
+                choices=materials,
+            ),
+            ParameterSpec(
+                "handle_thickness_nm",
+                "Handle wafer thickness",
+                "float",
+                40.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "bonding_material",
+                "Bonding layer material",
+                "enum",
+                "Silicon Dioxide",
+                choices=materials,
+            ),
+            ParameterSpec(
+                "bonding_layer_nm",
+                "Bonding layer thickness",
+                "float",
+                10.0,
+                0.0,
+                10000.0,
+                units="nm",
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        result = model.bond_wafer(
+            self.params.get("handle_material"),
+            self.params.get("handle_thickness_nm"),
+            self.params.get("bonding_material"),
+            self.params.get("bonding_layer_nm"),
+        )
+        return (
+            f"Bonding ({result['active_side']}): added {result['bond_voxels']} bond "
+            f"and {result['handle_voxels']} handle voxel layers"
+        )
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
@@ -19823,6 +20017,7 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Fill": FillStep,
     "Strip": StripStep,
     "Wafer Flip": WaferFlipStep,
+    "Bonding": BondingStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,
     "Ion Implant": ImplantationStep,
