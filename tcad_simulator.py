@@ -2926,8 +2926,11 @@ if _numba is not None:
         seeds_f = seeds.reshape(n)
         mask_f = mask.reshape(n)
         reached_f = np.zeros(n, dtype=np.bool_)
-        # Use int32 to halve memory (domain sizes are already bounded by RAM).
-        q = np.empty(n, dtype=np.int32)
+        # A connected flood can enqueue each passable voxel at most once. Sizing
+        # the queue to the mask population avoids a full-grid int32 allocation
+        # for sparse material ROIs.
+        queue_capacity = int(np.count_nonzero(mask_f))
+        q = np.empty(queue_capacity, dtype=np.int32)
         head = 0
         tail = 0
         for idx in range(n):
@@ -3668,6 +3671,15 @@ def _binary_propagation_fallback_3d(
         reached |= nxt
         front = nxt
     return reached
+
+
+def _propagate_binary_3d(seeds: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Six-neighbour binary propagation with the available optimized backend."""
+
+    if _scipy_ndimage is not None:
+        structure = _scipy_ndimage.generate_binary_structure(3, 1)
+        return _scipy_ndimage.binary_propagation(seeds, structure=structure, mask=mask)
+    return _binary_propagation_fallback_3d(seeds, mask)
 
 
 def _binary_propagation_distance_3d(
@@ -7294,7 +7306,14 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
         raw_items: List[Any] = [part.strip() for part in re.split(r"[;,]", materials) if part.strip()]
     elif isinstance(materials, (int, np.integer)):
         raw_items = [materials]
-    elif isinstance(materials, (list, tuple, set, np.ndarray)):
+    elif isinstance(materials, np.ndarray):
+        if materials.ndim == 0:
+            raw_items = [materials.item()]
+        elif materials.ndim == 1:
+            raw_items = materials.tolist()
+        else:
+            raise ValueError("Strip material arrays must be scalar or one-dimensional.")
+    elif isinstance(materials, (list, tuple, set)):
         raw_items = list(materials)
     else:
         raise ValueError("Strip materials must be material names or IDs.")
@@ -7310,8 +7329,10 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
             token = raw.strip()
             if not token:
                 raise ValueError("Strip materials cannot contain empty names.")
-            if token.isdigit():
+            if re.fullmatch(r"[+-]?\d+", token):
                 material_id = int(token)
+                if material_id < 0:
+                    raise ValueError(f"Unknown Strip material ID: {material_id}")
                 try:
                     material = material_db.material(material_id)
                 except Exception as exc:
@@ -7324,6 +7345,8 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
                     raise ValueError(f"Unknown Strip material: {token}") from exc
         elif isinstance(raw, (int, np.integer)):
             material_id = int(raw)
+            if material_id < 0:
+                raise ValueError(f"Unknown Strip material ID: {material_id}")
             try:
                 material = material_db.material(material_id)
             except Exception as exc:
@@ -7338,6 +7361,48 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
     if not material_ids:
         raise ValueError("Strip materials must contain at least one non-Void material.")
     return material_ids, material_names
+
+
+def _strip_target_seeds(target_mask: np.ndarray, accessible_void: np.ndarray, boundary_z: int) -> np.ndarray:
+    """Build exterior-adjacent Strip seeds with one full-size output allocation."""
+
+    target_mask = np.asarray(target_mask, dtype=bool)
+    accessible_void = np.asarray(accessible_void, dtype=bool)
+    if target_mask.shape != accessible_void.shape or target_mask.ndim != 3:
+        raise ValueError("Strip target/accessibility masks must be matching 3D arrays.")
+    if boundary_z not in {-1, 0}:
+        raise ValueError("Strip boundary must be top (-1) or bottom (0).")
+    target_seeds = np.zeros_like(target_mask, dtype=bool)
+    for output_view, void_view, target_view in (
+        (target_seeds[1:, :, :], accessible_void[:-1, :, :], target_mask[1:, :, :]),
+        (target_seeds[:-1, :, :], accessible_void[1:, :, :], target_mask[:-1, :, :]),
+        (target_seeds[:, 1:, :], accessible_void[:, :-1, :], target_mask[:, 1:, :]),
+        (target_seeds[:, :-1, :], accessible_void[:, 1:, :], target_mask[:, :-1, :]),
+        (target_seeds[:, :, 1:], accessible_void[:, :, :-1], target_mask[:, :, 1:]),
+        (target_seeds[:, :, :-1], accessible_void[:, :, 1:], target_mask[:, :, :-1]),
+    ):
+        np.logical_or(output_view, void_view, out=output_view, where=target_view)
+    np.logical_or(
+        target_seeds[:, :, boundary_z],
+        target_mask[:, :, boundary_z],
+        out=target_seeds[:, :, boundary_z],
+    )
+    return target_seeds
+
+
+def _strip_mask_bounds(mask: np.ndarray) -> Tuple[slice, slice, slice]:
+    """Return the tight 3D bounding box of a non-empty boolean mask."""
+
+    x_idx = np.flatnonzero(np.any(mask, axis=(1, 2)))
+    y_idx = np.flatnonzero(np.any(mask, axis=(0, 2)))
+    z_idx = np.flatnonzero(np.any(mask, axis=(0, 1)))
+    if not (x_idx.size and y_idx.size and z_idx.size):
+        raise ValueError("Cannot bound an empty Strip mask.")
+    return (
+        slice(int(x_idx[0]), int(x_idx[-1]) + 1),
+        slice(int(y_idx[0]), int(y_idx[-1]) + 1),
+        slice(int(z_idx[0]), int(z_idx[-1]) + 1),
+    )
 
 
 def resample_mask(mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
@@ -7746,6 +7811,22 @@ class ProcessModel:
 
     def material_at(self, x: int, y: int, z: int) -> int:
         return int(self.grid[x, y, z])
+
+    def _spatial_volume_field_names(self) -> Tuple[str, ...]:
+        """Model attributes whose arrays follow the full 3D voxel grid."""
+
+        return (
+            "doping",
+            "active_dopants",
+            "interstitials",
+            "vacancies",
+            "cluster_interstitial",
+            "cluster_bic",
+            "damage_concentration",
+            "temperature",
+            "defects_interstitial",
+            "defects_vacancy",
+        )
 
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -12492,8 +12573,8 @@ class ProcessModel:
         if not isinstance(exposed_only, (bool, np.bool_)):
             raise ValueError("Strip exposed_only must be a boolean.")
         material_ids, material_names = _normalize_strip_materials(self.material_db, materials)
-        target_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
-        if not np.any(target_mask):
+        present_materials = set(self._ensure_material_z_cache()[2])
+        if not any(material_id in present_materials for material_id in material_ids):
             return 0
 
         if bool(exposed_only):
@@ -12502,69 +12583,52 @@ class ProcessModel:
             boundary_z = -1 if direction_key == "top" else 0
             void_seeds[:, :, boundary_z] = void_mask[:, :, boundary_z]
             if np.any(void_seeds):
-                if _scipy_ndimage is not None:
-                    structure = _scipy_ndimage.generate_binary_structure(3, 1)
-                    accessible_void = _scipy_ndimage.binary_propagation(
-                        void_seeds,
-                        structure=structure,
-                        mask=void_mask,
-                    )
-                else:
-                    accessible_void = _binary_propagation_fallback_3d(void_seeds, void_mask)
+                accessible_void = _propagate_binary_3d(void_seeds, void_mask)
             else:
                 accessible_void = np.zeros_like(void_mask, dtype=bool)
+            del void_seeds
+            del void_mask
 
-            adjacent_to_void = np.zeros_like(accessible_void, dtype=bool)
-            adjacent_to_void[1:, :, :] |= accessible_void[:-1, :, :]
-            adjacent_to_void[:-1, :, :] |= accessible_void[1:, :, :]
-            adjacent_to_void[:, 1:, :] |= accessible_void[:, :-1, :]
-            adjacent_to_void[:, :-1, :] |= accessible_void[:, 1:, :]
-            adjacent_to_void[:, :, 1:] |= accessible_void[:, :, :-1]
-            adjacent_to_void[:, :, :-1] |= accessible_void[:, :, 1:]
-            target_seeds = target_mask & adjacent_to_void
-            target_seeds[:, :, boundary_z] |= target_mask[:, :, boundary_z]
+            target_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
+            target_seeds = _strip_target_seeds(target_mask, accessible_void, boundary_z)
+            del accessible_void
             if not np.any(target_seeds):
                 return 0
-            if _scipy_ndimage is not None:
-                structure = _scipy_ndimage.generate_binary_structure(3, 1)
-                removal_mask = _scipy_ndimage.binary_propagation(
-                    target_seeds,
-                    structure=structure,
-                    mask=target_mask,
-                )
+
+            target_bounds = _strip_mask_bounds(target_mask)
+            target_shape = tuple(int(s.stop - s.start) for s in target_bounds)
+            target_volume = int(np.prod(target_shape, dtype=np.int64))
+            if target_volume * 2 < int(target_mask.size):
+                propagation_mask = np.ascontiguousarray(target_mask[target_bounds])
+                propagation_seeds = np.ascontiguousarray(target_seeds[target_bounds])
+                del target_mask
+                del target_seeds
+                volume_roi = target_bounds
             else:
-                removal_mask = _binary_propagation_fallback_3d(target_seeds, target_mask)
+                propagation_mask = target_mask
+                propagation_seeds = target_seeds
+                volume_roi = (slice(None), slice(None), slice(None))
+            removal_mask = _propagate_binary_3d(propagation_seeds, propagation_mask)
+            del propagation_seeds
+            del propagation_mask
         else:
-            removal_mask = target_mask
+            removal_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
+            volume_roi = (slice(None), slice(None), slice(None))
 
         removed = int(np.count_nonzero(removal_mask))
         if removed <= 0:
             return 0
-        self.grid[removal_mask] = np.uint16(0)
-        for field_name in (
-            "doping",
-            "active_dopants",
-            "interstitials",
-            "vacancies",
-            "cluster_interstitial",
-            "cluster_bic",
-            "defects_interstitial",
-            "defects_vacancy",
-            "damage_concentration",
-        ):
+        self.grid[volume_roi][removal_mask] = np.uint16(0)
+        for field_name in self._spatial_volume_field_names():
             field = getattr(self, field_name, None)
             if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
-                field[removal_mask] = 0.0
-        try:
-            self._clear_dopant_species_mask((slice(None), slice(None), slice(None)), removal_mask)
-        except Exception:
-            pass
+                field[volume_roi][removal_mask] = 0.0
+        self._clear_dopant_species_mask(volume_roi, removal_mask)
         resist_state = getattr(self, "_resist_state", None)
         if resist_state is not None:
-            for field_name in ("acid_conc", "base_conc", "polymer_fraction", "pag_fraction", "pac_fraction"):
-                field = getattr(resist_state, field_name, None)
+            for field in vars(resist_state).values():
                 if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
-                    field[removal_mask] = 0.0
+                    field[volume_roi][removal_mask] = 0.0
         self._rebuild_height_map(material_ids)
         mode = "exposed" if bool(exposed_only) else "global"
         self._log(f"Strip ({mode}, {direction_key}) removed {removed} voxels: {', '.join(material_names)}")
@@ -89588,6 +89652,27 @@ function renderParams() {
         } catch (e) {}
       });
       group.appendChild(sel);
+    } else if (spec.type === 'bool') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      const rawBool = (step.params && step.params[spec.key] !== undefined)
+        ? step.params[spec.key]
+        : spec.default;
+      let normalizedBool = false;
+      if (typeof rawBool === 'boolean') normalizedBool = rawBool;
+      else if (typeof rawBool === 'number') normalizedBool = (rawBool === 1);
+      else if (typeof rawBool === 'string') {
+        normalizedBool = ['true', '1', 'yes', 'on'].includes(rawBool.trim().toLowerCase());
+      }
+      input.checked = normalizedBool;
+      input.addEventListener('change', () => {
+        step.params[spec.key] = Boolean(input.checked);
+        scheduleApplyParams(0);
+        try {
+          if (isExposure && String(spec.key || '') === 'advanced_enable') renderParams();
+        } catch (e) {}
+      });
+      group.appendChild(input);
     } else {
       const input = document.createElement(spec.type === 'text' ? 'input' : 'input');
       input.type = (spec.type === 'float' || spec.type === 'int') ? 'number' : 'text';
