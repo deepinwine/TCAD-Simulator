@@ -12676,8 +12676,9 @@ class ProcessModel:
         if not (occupied_x.size and occupied_y.size):
             return 0
 
-        x_slice = slice(int(occupied_x[0]), int(occupied_x[-1]) + 1)
-        y_slice = slice(int(occupied_y[0]), int(occupied_y[-1]) + 1)
+        nx, ny = (int(self.grid.shape[0]), int(self.grid.shape[1]))
+        x_slice = slice(max(0, int(occupied_x[0]) - 1), min(nx, int(occupied_x[-1]) + 2))
+        y_slice = slice(max(0, int(occupied_y[0]) - 1), min(ny, int(occupied_y[-1]) + 2))
         grid_roi = self.grid[x_slice, y_slice, :]
         footprint = wafer_footprint[x_slice, y_slice]
         depth_voxels = max(1, int(math.ceil(depth_nm / float(self.voxel_size_nm))))
@@ -12700,6 +12701,14 @@ class ProcessModel:
             void_roi = np.equal(grid_roi, 0)
             exterior_seeds = np.zeros_like(void_roi, dtype=bool)
             exterior_seeds[:, :, boundary_z] = void_roi[:, :, boundary_z]
+            if x_slice.start == 0:
+                exterior_seeds[0, :, :] |= void_roi[0, :, :]
+            if x_slice.stop == nx:
+                exterior_seeds[-1, :, :] |= void_roi[-1, :, :]
+            if y_slice.start == 0:
+                exterior_seeds[:, 0, :] |= void_roi[:, 0, :]
+            if y_slice.stop == ny:
+                exterior_seeds[:, -1, :] |= void_roi[:, -1, :]
             reachable = _propagate_binary_3d(exterior_seeds, void_roi)
             del exterior_seeds
             del void_roi

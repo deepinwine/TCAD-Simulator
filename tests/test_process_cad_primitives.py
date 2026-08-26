@@ -262,6 +262,68 @@ class StripTests(unittest.TestCase):
 
 
 class FillTests(unittest.TestCase):
+    def _make_side_open_cavity_model(self, direction, *, remote_column=False, at_domain_edge=False):
+        db, model = make_model((12, 12, 12))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        x_start = 0 if at_domain_edge else 3
+        if direction == "top":
+            model.grid[x_start : x_start + 5, 3:7, 0:6] = np.uint16(silicon_id)
+            cavity_z = slice(2, 4)
+            remote_z = slice(0, 6)
+        else:
+            model.grid[x_start : x_start + 5, 3:7, 4:10] = np.uint16(silicon_id)
+            cavity_z = slice(6, 8)
+            remote_z = slice(4, 10)
+        model.grid[x_start : x_start + 2, 4:6, cavity_z] = np.uint16(0)
+        if remote_column:
+            model.grid[1, 3, remote_z] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        return db, model, (slice(x_start, x_start + 2), slice(4, 6), cavity_z)
+
+    def test_side_open_capped_cavity_is_exterior_connected(self):
+        for direction in ("top", "bottom"):
+            with self.subTest(direction=direction):
+                db, model, cavity = self._make_side_open_cavity_model(direction)
+                copper_id = db.id_for("Copper")
+
+                filled = model.fill_voids("Copper", 40.0, direction=direction)
+
+                self.assertEqual(filled, 2 * 2 * 2)
+                self.assertTrue(np.all(model.grid[cavity] == copper_id))
+
+    def test_remote_unrelated_column_does_not_change_side_open_fill(self):
+        scipy_backend = tcad._scipy_ndimage
+        for direction in ("top", "bottom"):
+            for fallback in (False, True):
+                with self.subTest(direction=direction, fallback=fallback):
+                    grids = []
+                    counts = []
+                    backend = None if fallback else scipy_backend
+                    for remote_column in (False, True):
+                        db, model, cavity = self._make_side_open_cavity_model(
+                            direction,
+                            remote_column=remote_column,
+                        )
+                        with mock.patch.object(tcad, "_scipy_ndimage", backend):
+                            counts.append(model.fill_voids("Copper", 40.0, direction=direction))
+                        grids.append(model.grid[cavity].copy())
+
+                    self.assertEqual(counts, [2 * 2 * 2, 2 * 2 * 2])
+                    self.assertTrue(np.array_equal(grids[0], grids[1]))
+                    self.assertTrue(np.all(grids[0] == db.id_for("Copper")))
+
+    def test_side_open_cavity_at_model_boundary_is_seeded_as_exterior(self):
+        for direction in ("top", "bottom"):
+            with self.subTest(direction=direction):
+                db, model, cavity = self._make_side_open_cavity_model(direction, at_domain_edge=True)
+                copper_id = db.id_for("Copper")
+
+                filled = model.fill_voids("Copper", 40.0, direction=direction)
+
+                self.assertEqual(filled, 2 * 2 * 2)
+                self.assertTrue(np.all(model.grid[cavity] == copper_id))
+
     def test_through_hole_is_part_of_wafer_footprint_from_top_and_bottom(self):
         for direction, expected_z in (("top", slice(3, 6)), ("bottom", slice(0, 3))):
             with self.subTest(direction=direction):
