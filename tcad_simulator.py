@@ -8087,11 +8087,12 @@ class ProcessModel:
         volume_roi = (slice(None), slice(None), slice(target_start, target_stop))
         if np.any(self.grid[volume_roi] != 0):
             raise ValueError("Bonding target volume contains non-Void voxels; existing material was not overwritten.")
+        spatial_arrays = self._require_writable_spatial_volumes("Bonding")
 
         if bond_voxels:
             self.grid[:, :, bond_slice] = np.uint16(bond_id)
         self.grid[:, :, handle_slice] = np.uint16(handle_id)
-        self._clear_spatial_volume_mask(volume_roi)
+        self._clear_spatial_volume_mask(volume_roi, arrays=spatial_arrays)
         self.active_side = active_side
         self._rebuild_height_map([bond_id, handle_id])
 
@@ -8503,46 +8504,68 @@ class ProcessModel:
             except Exception:
                 continue
 
-    def _clear_spatial_volume_mask(
-        self,
-        roi: Tuple[slice, slice, slice],
-        mask: Optional[np.ndarray] = None,
-    ) -> None:
-        """Clear co-located 3D state once per array identity inside an ROI."""
+    def _spatial_volume_arrays(self) -> Tuple[np.ndarray, ...]:
+        """Collect the grid and all co-located 3D state arrays once by identity."""
 
-        cleared_arrays: Set[int] = {id(self.grid)}
+        arrays: List[np.ndarray] = []
+        seen: Set[int] = set()
 
-        def _clear(field: Any) -> None:
-            if (
-                not isinstance(field, np.ndarray)
-                or field.shape != self.grid.shape
-                or id(field) in cleared_arrays
-            ):
+        def _collect(value: Any) -> None:
+            if not isinstance(value, np.ndarray) or value.shape != self.grid.shape or id(value) in seen:
                 return
-            if mask is None:
-                field[roi] = 0.0
-            else:
-                field[roi][mask] = 0.0
-            cleared_arrays.add(id(field))
+            arrays.append(value)
+            seen.add(id(value))
 
+        _collect(self.grid)
         for field_name in self._spatial_volume_field_names():
-            _clear(getattr(self, field_name, None))
+            _collect(getattr(self, field_name, None))
 
         dopant_fields = getattr(self, "dopant_species_fields", None)
         if isinstance(dopant_fields, dict):
             for field in dopant_fields.values():
-                _clear(field)
+                _collect(field)
 
         resist_state = getattr(self, "_resist_state", None)
         if isinstance(resist_state, dict):
             for field in resist_state.values():
-                _clear(field)
+                _collect(field)
         elif resist_state is not None:
             for field_name in self._state_field_names(resist_state):
                 try:
-                    _clear(getattr(resist_state, field_name))
+                    field = getattr(resist_state, field_name)
                 except Exception:
                     continue
+                _collect(field)
+        return tuple(arrays)
+
+    def _require_writable_spatial_volumes(self, operation: str) -> Tuple[np.ndarray, ...]:
+        """Validate every array that an operation will mutate before its first write."""
+
+        arrays = self._spatial_volume_arrays()
+        if any(not bool(array.flags.writeable) for array in arrays):
+            operation_name = str(operation or "Process").strip() or "Process"
+            raise ValueError(
+                f"{operation_name} requires a writable voxel grid and writable co-located 3D state arrays."
+            )
+        return arrays
+
+    def _clear_spatial_volume_mask(
+        self,
+        roi: Tuple[slice, slice, slice],
+        mask: Optional[np.ndarray] = None,
+        *,
+        arrays: Optional[Sequence[np.ndarray]] = None,
+    ) -> None:
+        """Clear co-located 3D state once per array identity inside an ROI."""
+
+        spatial_arrays = tuple(arrays) if arrays is not None else self._spatial_volume_arrays()
+        for field in spatial_arrays:
+            if field is self.grid:
+                continue
+            if mask is None:
+                field[roi] = 0.0
+            else:
+                field[roi][mask] = 0.0
 
     def _clear_dopant_species_top_layers(
         self, xs: np.ndarray, ys: np.ndarray, heights_before: np.ndarray, removed_layers: np.ndarray
@@ -12962,8 +12985,9 @@ class ProcessModel:
             return 0
 
         volume_roi = (x_slice, y_slice, z_slice)
+        spatial_arrays = self._require_writable_spatial_volumes("Fill")
         self.grid[volume_roi][fill_mask] = np.uint16(material_id)
-        self._clear_spatial_volume_mask(volume_roi, fill_mask)
+        self._clear_spatial_volume_mask(volume_roi, fill_mask, arrays=spatial_arrays)
         self._rebuild_height_map([material_id])
         mode = "including sealed" if bool(include_sealed) else "exterior-connected"
         self._log(

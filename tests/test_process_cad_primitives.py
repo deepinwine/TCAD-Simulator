@@ -524,6 +524,25 @@ class FillTests(unittest.TestCase):
         self.assertEqual(float(resist_acid[1, 1, 3]), 0.0)
         self.assertEqual(float(resist_acid[0, 0, 3]), 987.0)
 
+    def test_fill_rejects_readonly_colocated_state_before_writing_grid(self):
+        db, model = make_model((3, 3, 5))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        model.grid[1, 1, 3] = np.uint16(0)
+        readonly = np.full(model.grid.shape, 42.0, dtype=np.float32)
+        readonly.flags.writeable = False
+        model.doping = readonly
+        model._rebuild_height_map()
+        before_grid = model.grid.copy()
+        before_doping = model.doping.copy()
+
+        with self.assertRaisesRegex(ValueError, r"Fill.*writable"):
+            model.fill_voids("Copper", 10.0)
+
+        np.testing.assert_array_equal(model.grid, before_grid)
+        np.testing.assert_array_equal(model.doping, before_doping)
+
     def test_fill_step_factory_specs_execution_roundtrip_and_default_recipe(self):
         db, model = make_model((5, 5, 7))
         self.addCleanup(model.parallel.shutdown)
@@ -865,6 +884,40 @@ class BondingTests(unittest.TestCase):
 
         np.testing.assert_array_equal(model.grid, before_grid)
         np.testing.assert_array_equal(model.doping, before_doping)
+
+    def test_readonly_colocated_state_is_rejected_before_any_bonding_mutation(self):
+        for readonly_location in ("grid", "doping", "resist"):
+            with self.subTest(readonly_location=readonly_location):
+                db, model = make_model((3, 3, 10))
+                self.addCleanup(model.parallel.shutdown)
+                silicon_id = db.id_for("Silicon")
+                model.grid[:, :, :2] = np.uint16(silicon_id)
+                writable = np.full(model.grid.shape, 23.0, dtype=np.float32)
+                readonly = np.full(model.grid.shape, 47.0, dtype=np.float32)
+                readonly.flags.writeable = False
+                model.doping = readonly if readonly_location == "doping" else writable
+                model._resist_state = SimpleNamespace(
+                    volume=readonly if readonly_location == "resist" else writable,
+                    surface=np.full(model.grid.shape[:2], 3.0, dtype=np.float32),
+                )
+                model.active_side = "sideways"
+                model._rebuild_height_map()
+                if readonly_location == "grid":
+                    model.grid.flags.writeable = False
+                before_grid = model.grid.copy()
+                before_doping = model.doping.copy()
+                before_resist = model._resist_state.volume.copy()
+                before_surface = model._resist_state.surface.copy()
+                before_side = model.active_side
+
+                with self.assertRaisesRegex(ValueError, r"Bonding.*writable"):
+                    model.bond_wafer("Silicon", 10.0, "Silicon Dioxide", 10.0)
+
+                np.testing.assert_array_equal(model.grid, before_grid)
+                np.testing.assert_array_equal(model.doping, before_doping)
+                np.testing.assert_array_equal(model._resist_state.volume, before_resist)
+                np.testing.assert_array_equal(model._resist_state.surface, before_surface)
+                self.assertEqual(model.active_side, before_side)
 
     def test_empty_model_and_invalid_materials_and_thicknesses_are_rejected(self):
         _db, model = make_model((3, 3, 10))
