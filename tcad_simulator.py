@@ -7363,6 +7363,47 @@ def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) ->
     return material_ids, material_names
 
 
+def _normalize_fill_material(material_db: MaterialDatabase, material: Any) -> Tuple[int, str]:
+    """Resolve one non-Void Fill material name or ID."""
+
+    raw = material
+    if isinstance(raw, np.ndarray):
+        if raw.ndim != 0:
+            raise ValueError("Fill material arrays must be zero-dimensional IDs.")
+        raw = raw.item()
+    if isinstance(raw, (bool, np.bool_)) or raw is None:
+        raise ValueError("Fill material must be one non-Void material name or ID.")
+    if isinstance(raw, str):
+        token = raw.strip()
+        if not token:
+            raise ValueError("Fill material must be one non-Void material name or ID.")
+        if re.fullmatch(r"[+-]?\d+", token):
+            material_id = int(token)
+            try:
+                resolved = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown Fill material ID: {material_id}") from exc
+        else:
+            try:
+                material_id = int(material_db.id_for(token))
+                resolved = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown Fill material: {token}") from exc
+    elif isinstance(raw, (int, np.integer)):
+        material_id = int(raw)
+        try:
+            resolved = material_db.material(material_id)
+        except Exception as exc:
+            raise ValueError(f"Unknown Fill material ID: {material_id}") from exc
+    else:
+        raise ValueError("Fill material must be one non-Void material name or ID.")
+    if material_id <= 0 or resolved.name == "Void":
+        raise ValueError("Void cannot be selected as a Fill material.")
+    if material_id > int(np.iinfo(np.uint16).max):
+        raise ValueError(f"Fill material ID is outside the voxel range: {material_id}")
+    return material_id, str(resolved.name)
+
+
 def _strip_target_seeds(target_mask: np.ndarray, accessible_void: np.ndarray, boundary_z: int) -> np.ndarray:
     """Build exterior-adjacent Strip seeds with one full-size output allocation."""
 
@@ -12556,6 +12597,99 @@ class ProcessModel:
         )
         results = self.reconstruct_material_components(material_id, enforced)
         return [res.brep_solid for res in results if res.brep_solid is not None]
+
+    # -- fill -------------------------------------------------------------------
+
+    def fill_voids(
+        self,
+        material: Any,
+        max_depth_nm: float,
+        direction: str = "top",
+        include_sealed: bool = False,
+    ) -> int:
+        """Fill directionally reachable voids inside a bounded surface-depth window."""
+
+        material_id, material_name = _normalize_fill_material(self.material_db, material)
+        if isinstance(max_depth_nm, (bool, np.bool_)):
+            raise ValueError("Fill max_depth_nm must be a positive finite number.")
+        try:
+            depth_nm = float(max_depth_nm)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Fill max_depth_nm must be a positive finite number.") from None
+        if not math.isfinite(depth_nm) or depth_nm <= 0.0:
+            raise ValueError("Fill max_depth_nm must be a positive finite number.")
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in {"top", "bottom"}:
+            raise ValueError("Fill direction must be 'top' or 'bottom'.")
+        if not isinstance(include_sealed, (bool, np.bool_)):
+            raise ValueError("Fill include_sealed must be a boolean.")
+
+        occupied_z = np.flatnonzero(np.any(self.grid, axis=(0, 1)))
+        if occupied_z.size == 0:
+            return 0
+        occupied_xy = np.any(self.grid, axis=2)
+        occupied_x = np.flatnonzero(np.any(occupied_xy, axis=1))
+        occupied_y = np.flatnonzero(np.any(occupied_xy, axis=0))
+        if not (occupied_x.size and occupied_y.size):
+            return 0
+
+        x_slice = slice(int(occupied_x[0]), int(occupied_x[-1]) + 1)
+        y_slice = slice(int(occupied_y[0]), int(occupied_y[-1]) + 1)
+        grid_roi = self.grid[x_slice, y_slice, :]
+        footprint = occupied_xy[x_slice, y_slice]
+        depth_voxels = max(1, int(math.ceil(depth_nm / float(self.voxel_size_nm))))
+        nz = int(self.grid.shape[2])
+        if direction_key == "top":
+            surface = int(occupied_z[-1])
+            z_start = max(0, surface - depth_voxels + 1)
+            z_stop = surface + 1
+            boundary_z = -1
+        else:
+            surface = int(occupied_z[0])
+            z_start = surface
+            z_stop = min(nz, surface + depth_voxels)
+            boundary_z = 0
+        z_slice = slice(z_start, z_stop)
+
+        if bool(include_sealed):
+            fill_mask = np.equal(grid_roi[:, :, z_slice], 0)
+        else:
+            void_roi = np.equal(grid_roi, 0)
+            exterior_seeds = np.zeros_like(void_roi, dtype=bool)
+            exterior_seeds[:, :, boundary_z] = void_roi[:, :, boundary_z]
+            reachable = _propagate_binary_3d(exterior_seeds, void_roi)
+            del exterior_seeds
+            del void_roi
+            fill_mask = np.ascontiguousarray(reachable[:, :, z_slice])
+            del reachable
+        np.logical_and(fill_mask, footprint[:, :, None], out=fill_mask)
+        filled = int(np.count_nonzero(fill_mask))
+        if filled <= 0:
+            return 0
+
+        volume_roi = (x_slice, y_slice, z_slice)
+        self.grid[volume_roi][fill_mask] = np.uint16(material_id)
+        cleared_arrays: Set[int] = set()
+        for field_name in self._spatial_volume_field_names():
+            field = getattr(self, field_name, None)
+            if not isinstance(field, np.ndarray) or field.shape != self.grid.shape or id(field) in cleared_arrays:
+                continue
+            field[volume_roi][fill_mask] = 0.0
+            cleared_arrays.add(id(field))
+        self._clear_dopant_species_mask(volume_roi, fill_mask)
+        resist_state = getattr(self, "_resist_state", None)
+        if resist_state is not None:
+            for field in vars(resist_state).values():
+                if isinstance(field, np.ndarray) and field.shape == self.grid.shape and id(field) not in cleared_arrays:
+                    field[volume_roi][fill_mask] = 0.0
+                    cleared_arrays.add(id(field))
+        self._rebuild_height_map([material_id])
+        mode = "including sealed" if bool(include_sealed) else "exterior-connected"
+        self._log(
+            f"Fill ({mode}, {direction_key}, max {depth_nm:.3g} nm) "
+            f"added {filled} voxels: {material_name}"
+        )
+        return filled
 
     # -- strip ------------------------------------------------------------------
 
@@ -19123,6 +19257,53 @@ class SelectiveEpitaxyStep(ProcessStep):
             model.last_implant_species = lattice_species
 
 
+class FillStep(ProcessStep):
+    name = "Fill"
+    group = "Deposition"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec("material", "Fill material", "enum", "Copper", choices=materials),
+            ParameterSpec(
+                "max_depth_nm",
+                "Maximum fill depth",
+                "float",
+                100.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "direction",
+                "Access direction",
+                "enum",
+                "top",
+                choices=[("top", "Top"), ("bottom", "Bottom")],
+            ),
+            ParameterSpec(
+                "include_sealed",
+                "Include sealed voids",
+                "bool",
+                False,
+                tooltip="Also fill sealed cavities inside the selected depth window.",
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        material_id, material_name = _normalize_fill_material(
+            model.material_db,
+            self.params.get("material"),
+        )
+        filled = model.fill_voids(
+            material_id,
+            self.params.get("max_depth_nm"),
+            direction=self.params.get("direction"),
+            include_sealed=self.params.get("include_sealed"),
+        )
+        return f"Fill {material_name}: added {filled} voxels"
+
+
 class StripStep(ProcessStep):
     name = "Strip"
     group = "Clean"
@@ -19489,6 +19670,7 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Resist Develop": DevelopStep,
     "Deposition": DepositionStep,
     "Selective Epitaxy": SelectiveEpitaxyStep,
+    "Fill": FillStep,
     "Strip": StripStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,

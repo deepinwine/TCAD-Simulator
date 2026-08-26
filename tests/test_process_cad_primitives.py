@@ -1,5 +1,6 @@
 import re
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -258,3 +259,192 @@ class StripTests(unittest.TestCase):
         self.assertEqual(specs["materials"].type, "text")
         self.assertEqual(specs["exposed_only"].type, "bool")
         self.assertEqual([choice[0] for choice in specs["direction"].choices], ["top", "bottom"])
+
+
+class FillTests(unittest.TestCase):
+    def test_fill_open_trench_without_filling_sealed_or_external_void(self):
+        db, model = make_model((12, 12, 18))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, :10] = np.uint16(silicon_id)
+        model.grid[2:5, 2:5, 5:10] = np.uint16(0)
+        model.grid[8:10, 8:10, 3:5] = np.uint16(0)
+        model._rebuild_height_map()
+
+        filled = model.fill_voids("Copper", 60.0, direction="top", include_sealed=False)
+
+        self.assertEqual(filled, 3 * 3 * 5)
+        self.assertTrue(np.all(model.grid[2:5, 2:5, 5:10] == copper_id))
+        self.assertFalse(np.any(model.grid[8:10, 8:10, 3:5] == copper_id))
+        self.assertFalse(np.any(model.grid[:, :, 10:] == copper_id))
+        self.assertTrue(np.all(model.height_map == 10))
+        self.assertTrue(np.all(model.open_mask))
+
+    def test_fill_depth_uses_ceil_and_never_crosses_the_depth_window(self):
+        cases = ((20.0, 2), (20.01, 3))
+        for depth_nm, expected_layers in cases:
+            with self.subTest(depth_nm=depth_nm):
+                db, model = make_model((6, 6, 12))
+                self.addCleanup(model.parallel.shutdown)
+                silicon_id = db.id_for("Silicon")
+                copper_id = db.id_for("Copper")
+                model.grid[:, :, :8] = np.uint16(silicon_id)
+                model.grid[2:4, 2:4, 1:8] = np.uint16(0)
+                model._rebuild_height_map()
+
+                filled = model.fill_voids("Copper", depth_nm, direction="top")
+
+                first_filled_z = 8 - expected_layers
+                self.assertEqual(filled, 2 * 2 * expected_layers)
+                self.assertTrue(np.all(model.grid[2:4, 2:4, first_filled_z:8] == copper_id))
+                self.assertFalse(np.any(model.grid[2:4, 2:4, :first_filled_z] == copper_id))
+
+    def test_fill_from_bottom_is_directionally_symmetric(self):
+        db, model = make_model((7, 7, 14))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, 4:12] = np.uint16(silicon_id)
+        model.grid[2:5, 2:5, 4:10] = np.uint16(0)
+        model._rebuild_height_map()
+
+        filled = model.fill_voids("Copper", 30.0, direction="bottom")
+
+        self.assertEqual(filled, 3 * 3 * 3)
+        self.assertTrue(np.all(model.grid[2:5, 2:5, 4:7] == copper_id))
+        self.assertFalse(np.any(model.grid[2:5, 2:5, 7:10] == copper_id))
+        self.assertFalse(np.any(model.grid[:, :, :4] == copper_id))
+
+    def test_include_sealed_fills_only_cavities_inside_the_depth_window(self):
+        db, model = make_model((10, 10, 15))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, :10] = np.uint16(silicon_id)
+        model.grid[2:4, 2:4, 5:7] = np.uint16(0)
+        model.grid[6:8, 6:8, 2:4] = np.uint16(0)
+        model._rebuild_height_map()
+
+        filled = model.fill_voids("Copper", 60.0, direction="top", include_sealed=True)
+
+        self.assertEqual(filled, 2 * 2 * 2)
+        self.assertTrue(np.all(model.grid[2:4, 2:4, 5:7] == copper_id))
+        self.assertFalse(np.any(model.grid[6:8, 6:8, 2:4] == copper_id))
+        self.assertFalse(np.any(model.grid[:, :, 10:] == copper_id))
+
+    def test_empty_model_returns_zero_and_validation_is_explicit(self):
+        db, model = make_model((4, 4, 6))
+        self.addCleanup(model.parallel.shutdown)
+
+        self.assertEqual(model.fill_voids("Copper", 10.0), 0)
+        for material in ("Void", "Missingium", True):
+            with self.subTest(material=material):
+                with self.assertRaises(ValueError):
+                    model.fill_voids(material, 10.0)
+        for depth in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0, True):
+            with self.subTest(depth=depth):
+                with self.assertRaises(ValueError):
+                    model.fill_voids("Copper", depth)
+        with self.assertRaises(ValueError):
+            model.fill_voids("Copper", 10.0, direction="side")
+        for include_sealed in (1, "yes", None):
+            with self.subTest(include_sealed=include_sealed):
+                with self.assertRaises(ValueError):
+                    model.fill_voids("Copper", 10.0, include_sealed=include_sealed)
+
+    def test_fill_accepts_integer_and_zero_dimensional_material_ids(self):
+        for as_zero_dimensional in (False, True):
+            with self.subTest(as_zero_dimensional=as_zero_dimensional):
+                db, model = make_model((4, 4, 6))
+                self.addCleanup(model.parallel.shutdown)
+                silicon_id = db.id_for("Silicon")
+                copper_id = db.id_for("Copper")
+                model.grid[:, :, :4] = np.uint16(silicon_id)
+                model.grid[1, 1, 2:4] = np.uint16(0)
+                model._rebuild_height_map()
+                selector = np.array(copper_id, dtype=np.int64) if as_zero_dimensional else copper_id
+
+                filled = model.fill_voids(selector, 10.0)
+
+                self.assertEqual(filled, 1)
+                self.assertEqual(int(model.grid[1, 1, 3]), copper_id)
+                self.assertEqual(int(model.grid[1, 1, 2]), 0)
+
+    def test_fill_clears_ghost_state_without_breaking_field_aliases(self):
+        db, model = make_model((4, 4, 6))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :4] = np.uint16(silicon_id)
+        model.grid[1, 1, 3] = np.uint16(0)
+        model._rebuild_height_map()
+        canonical_fields = (
+            "doping",
+            "active_dopants",
+            "interstitials",
+            "vacancies",
+            "cluster_interstitial",
+            "cluster_bic",
+            "damage_concentration",
+            "temperature",
+        )
+        for field_name in canonical_fields:
+            setattr(model, field_name, np.full(model.grid.shape, 321.5, dtype=np.float32))
+        model.defects_interstitial = model.interstitials
+        model.defects_vacancy = model.vacancies
+        species = np.full(model.grid.shape, 654.0, dtype=np.float32)
+        model.dopant_species_fields = {"B": species}
+        resist_acid = np.full(model.grid.shape, 987.0, dtype=np.float32)
+        model._resist_state = SimpleNamespace(acid=resist_acid)
+
+        filled = model.fill_voids("Copper", 10.0)
+
+        self.assertEqual(filled, 1)
+        self.assertIs(model.defects_interstitial, model.interstitials)
+        self.assertIs(model.defects_vacancy, model.vacancies)
+        for field_name in model._spatial_volume_field_names():
+            field = getattr(model, field_name)
+            with self.subTest(field_name=field_name):
+                self.assertEqual(float(field[1, 1, 3]), 0.0)
+                self.assertEqual(float(field[0, 0, 3]), 321.5)
+        self.assertEqual(float(species[1, 1, 3]), 0.0)
+        self.assertEqual(float(species[0, 0, 3]), 654.0)
+        self.assertEqual(float(resist_acid[1, 1, 3]), 0.0)
+        self.assertEqual(float(resist_acid[0, 0, 3]), 987.0)
+
+    def test_fill_step_factory_specs_execution_roundtrip_and_default_recipe(self):
+        db, model = make_model((5, 5, 7))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, :5] = np.uint16(silicon_id)
+        model.grid[2, 2, 3:5] = np.uint16(0)
+        model._rebuild_height_map()
+        step = tcad.PROCESS_STEP_FACTORIES["Fill"](db)
+        step.params.update(
+            {
+                "material": "Copper",
+                "max_depth_nm": 20.0,
+                "direction": "top",
+                "include_sealed": False,
+            }
+        )
+
+        result = step.execute(model)
+        blob = tcad._webui_serialize_step(step)
+        restored = tcad._webui_deserialize_step(blob, db)
+
+        self.assertIsInstance(step, tcad.FillStep)
+        self.assertEqual(int(model.grid[2, 2, 3]), copper_id)
+        self.assertEqual(int(model.grid[2, 2, 4]), copper_id)
+        self.assertIn("2", result)
+        self.assertIn("Copper", result)
+        self.assertIsInstance(restored, tcad.FillStep)
+        self.assertEqual(restored.params, step.params)
+        specs = {spec.key: spec for spec in restored.parameter_specs()}
+        self.assertEqual(specs["material"].type, "enum")
+        self.assertNotIn("Void", [choice[0] for choice in specs["material"].choices])
+        self.assertEqual(specs["max_depth_nm"].type, "float")
+        self.assertEqual([choice[0] for choice in specs["direction"].choices], ["top", "bottom"])
+        self.assertEqual(specs["include_sealed"].type, "bool")
+        self.assertNotIn("Fill", [item.name for item in tcad._webui_default_recipe(db)])
