@@ -988,8 +988,61 @@ console.log(JSON.stringify({
         self.assertAlmostEqual(result["after"], 10, places=8)
         self.assertEqual(result["frustum"], [-25, 25, 10, -10, 1])
 
+    def test_top_view_roundtrip_preserves_zero_z_up_on_fresh_cameras(self):
+        capture = _extract_function("captureView3dNow", "scheduleCaptureView3d")
+        apply_view = _extract_function("applyView3d", "centerObjectAtOrigin")
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + capture
+            + apply_view
+            + r"""
+setCameraMode('orthographic');
+if (!applyStandardView('TOP')) throw new Error('TOP view rejected');
+captureView3dNow();
+const saved = JSON.parse(JSON.stringify(state.view3d));
+
+perspectiveCamera = makeCamera('perspective');
+perspectiveCamera.aspect = 2;
+orthographicCamera = makeCamera('orthographic');
+camera = perspectiveCamera;
+cameraMode = 'perspective';
+controls.object = camera;
+controls.target.set(0, 0, 0);
+
+const restored = applyView3d(saved);
+const restoredUp = [camera.up.x, camera.up.y, camera.up.z];
+const invalidRestored = applyView3d({ ...saved, up: [NaN, Infinity] });
+const invalidUp = [camera.up.x, camera.up.y, camera.up.z];
+console.log(JSON.stringify({
+  savedUp: saved.up,
+  restored,
+  restoredUp,
+  cameraMode,
+  target: [controls.target.x, controls.target.y, controls.target.z],
+  controlsOwnsActive: controls.object === camera,
+  activeIsFreshOrtho: camera === orthographicCamera,
+  invalidRestored,
+  invalidUp
+}));
+"""
+        )
+
+        self.assertEqual(result["savedUp"], [0, 1, 0])
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["restoredUp"], [0, 1, 0])
+        self.assertEqual(result["cameraMode"], "orthographic")
+        self.assertEqual(result["target"], [6, 9, 12])
+        self.assertTrue(result["controlsOwnsActive"])
+        self.assertTrue(result["activeIsFreshOrtho"])
+        self.assertTrue(result["invalidRestored"])
+        self.assertEqual(result["invalidUp"], [0, 0, 1])
+
     def test_remote_apply_ignores_orthographic_scale_metadata(self):
         remote_apply = _extract_function("remoteApplyView", "remoteResetView")
+        remote_payload = _extract_function(
+            "remoteCameraPayload", "_remoteDesiredGbufferSize"
+        )
         result = _run_node(
             r"""
 const state = {};
@@ -999,22 +1052,56 @@ function _remoteCaptureView() { events.push('capture'); }
 function scheduleRemoteRender(highRes, delay) { events.push(`render:${highRes}:${delay}`); }
 """
             + remote_apply
+            + remote_payload
             + r"""
 const ok = remoteApplyView({
   pos: [12, 4, 6],
   target: [2, 4, 6],
-  up: [0, 0, 1],
+  up: [0, 1, 0],
   cameraMode: 'orthographic',
   orthographicVisibleHalfHeight: 10
 });
-console.log(JSON.stringify({ ok, remoteOrbit, events }));
+const payload = remoteCameraPayload();
+const appliedUp = remoteOrbit.up.slice();
+const invalidOk = remoteApplyView({ pos: [12, 4, 6], target: [2, 4, 6], up: [NaN, Infinity] });
+const invalidUp = remoteOrbit.up.slice();
+console.log(JSON.stringify({ ok, remoteOrbit, payload, appliedUp, invalidOk, invalidUp, events }));
 """
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["remoteOrbit"]["target"], [2, 4, 6])
         self.assertEqual(result["remoteOrbit"]["radius"], 10)
-        self.assertEqual(result["events"], ["capture", "render:true:30"])
+        self.assertEqual(result["appliedUp"], [0, 1, 0])
+        self.assertEqual(result["payload"]["up"], [0, 1, 0])
+        self.assertTrue(result["invalidOk"])
+        self.assertEqual(result["invalidUp"], [0, 0, 1])
+        self.assertEqual(
+            result["events"],
+            ["capture", "render:true:30", "capture", "render:true:30"],
+        )
+
+    def test_host_camera_basis_preserves_zero_and_falls_back_for_invalid_up(self):
+        basis = _extract_function("_remoteCameraBasis", "_remoteProjectToGbuf")
+        result = _run_node(
+            basis
+            + r"""
+const zeroZ = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [1, 0, 0] });
+const invalid = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [NaN, Infinity] });
+const allZero = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [0, 0, 0] });
+const finite = (value) => value.every(Number.isFinite);
+console.log(JSON.stringify({
+  zeroZ,
+  invalidFinite: finite(invalid.right) && finite(invalid.up) && finite(invalid.fwd),
+  allZeroFinite: finite(allZero.right) && finite(allZero.up) && finite(allZero.fwd)
+}));
+"""
+        )
+
+        self.assertEqual(result["zeroZ"]["right"], [0, 0, -1])
+        self.assertEqual(result["zeroZ"]["up"], [1, 0, 0])
+        self.assertTrue(result["invalidFinite"])
+        self.assertTrue(result["allZeroFinite"])
 
 
 if __name__ == "__main__":

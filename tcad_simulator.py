@@ -93352,11 +93352,16 @@ function captureView3dNow() {
     try { tar = (controls && controls.target) ? controls.target : null; } catch (e) { tar = null; }
     if (!tar) tar = { x: 0, y: 0, z: 0 };
     const up = camera.up || { x: 0, y: 0, z: 1 };
+    const upX = Number(up.x), upY = Number(up.y), upZ = Number(up.z);
     const zoom = Number.isFinite(camera.zoom) ? camera.zoom : 1.0;
     const capturedView = {
       pos: [Number(pos.x) || 0, Number(pos.y) || 0, Number(pos.z) || 0],
       target: [Number(tar.x) || 0, Number(tar.y) || 0, Number(tar.z) || 0],
-      up: [Number(up.x) || 0, Number(up.y) || 0, Number(up.z) || 1],
+      up: [
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1,
+      ],
       zoom: zoom,
       cameraMode: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
     };
@@ -93394,8 +93399,13 @@ function applyView3d(view) {
       if (!setCameraMode(requestedMode)) return false;
     }
     camera.position.set(Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0);
-    if (Array.isArray(view.up) && view.up.length >= 3) {
-      camera.up.set(Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1);
+    if (Array.isArray(view.up)) {
+      const upX = Number(view.up[0]), upY = Number(view.up[1]), upZ = Number(view.up[2]);
+      camera.up.set(
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1
+      );
     }
     if (controls && controls.target) {
       controls.target.set(Number(target[0]) || 0, Number(target[1]) || 0, Number(target[2]) || 0);
@@ -93946,8 +93956,13 @@ function remoteApplyView(view) {
     remoteOrbit.theta = Math.atan2(vy, vx);
     remoteOrbit.phi = Math.asin(Math.max(-1, Math.min(1, vz / r)));
     remoteOrbit.target = [tx, ty, tz];
-    if (Array.isArray(view.up) && view.up.length >= 3) {
-      remoteOrbit.up = [Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1];
+    if (Array.isArray(view.up)) {
+      const upX = Number(view.up[0]), upY = Number(view.up[1]), upZ = Number(view.up[2]);
+      remoteOrbit.up = [
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1,
+      ];
     }
     _remoteCaptureView();
     scheduleRemoteRender(true, 30);
@@ -93985,8 +94000,18 @@ function remoteCameraPayload() {
   const py = (Number(t[1]) || 0) + r * cph * sth;
   const pz = (Number(t[2]) || 0) + r * sph;
   const up = remoteOrbit.up || [0, 0, 1];
+  const upX = Number(up[0]), upY = Number(up[1]), upZ = Number(up[2]);
   const fov = Math.max(15, Math.min(90, Number(remoteOrbit.fov) || 50));
-  return { pos: [px, py, pz], target: [Number(t[0]) || 0, Number(t[1]) || 0, Number(t[2]) || 0], up: [Number(up[0]) || 0, Number(up[1]) || 0, Number(up[2]) || 1], fov_deg: fov };
+  return {
+    pos: [px, py, pz],
+    target: [Number(t[0]) || 0, Number(t[1]) || 0, Number(t[2]) || 0],
+    up: [
+      Number.isFinite(upX) ? upX : 0,
+      Number.isFinite(upY) ? upY : 0,
+      Number.isFinite(upZ) ? upZ : 1,
+    ],
+    fov_deg: fov,
+  };
 }
 
 function _remoteDesiredGbufferSize(highRes) {
@@ -94199,9 +94224,10 @@ function _remoteCameraBasis(cam) {
   let fz = (Number(tar[2]) || 0) - (Number(pos[2]) || 0);
   let fn = Math.hypot(fx, fy, fz) || 1.0;
   fx /= fn; fy /= fn; fz /= fn;
-  let ux = Number(up0[0]) || 0;
-  let uy = Number(up0[1]) || 0;
-  let uz = Number(up0[2]) || 1;
+  const rawUx = Number(up0[0]), rawUy = Number(up0[1]), rawUz = Number(up0[2]);
+  let ux = Number.isFinite(rawUx) ? rawUx : 0;
+  let uy = Number.isFinite(rawUy) ? rawUy : 0;
+  let uz = Number.isFinite(rawUz) ? rawUz : 1;
   let un = Math.hypot(ux, uy, uz) || 1.0;
   ux /= un; uy /= un; uz /= un;
   // right = normalize(cross(fwd, up))
