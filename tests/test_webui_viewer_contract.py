@@ -33,6 +33,15 @@ def _run_node(source):
     return json.loads(proc.stdout)
 
 
+def _camera_contract_source():
+    source = tcad._WEBUI_SCRIPT_JS
+    start = source.find("const STANDARD_VIEWS =")
+    end = source.find("\nfunction webglCapability()", start)
+    if start < 0 or end < 0:
+        raise AssertionError("could not extract camera contract source")
+    return source[start:end]
+
+
 class WebGLCapabilityContractTests(unittest.TestCase):
     def test_probe_uses_a_temporary_canvas_and_prefers_webgl2(self):
         self.assertNotIn("_webglAvailable", tcad._WEBUI_SCRIPT_JS)
@@ -212,7 +221,7 @@ console.log(JSON.stringify({{ events, state }}));
         result = _run_node(
             f"""
 let state, window, THREE;
-let renderer, scene, camera, meshGroup, loader, controls, _viewerResizeHandler;
+let renderer, scene, camera, perspectiveCamera, orthographicCamera, meshGroup, loader, controls, _viewerResizeHandler;
 let _webglAnimActive, _webglNeedRender, _webglRenderTimer;
 let events, listeners, failAt, actualCanvas;
 
@@ -249,6 +258,8 @@ function runCase(which) {{
   listeners = new Set();
   state = {{ viewerReady: false, viewerBackend: 'pending', viewerWebglVersion: 0, viewerFallbackReason: '', forceRender: null }};
   renderer = scene = camera = meshGroup = loader = controls = _viewerResizeHandler = null;
+  perspectiveCamera = {{ stale: true }};
+  orthographicCamera = {{ stale: true }};
   _webglAnimActive = true;
   _webglNeedRender = true;
   _webglRenderTimer = null;
@@ -303,7 +314,7 @@ function runCase(which) {{
   return {{
     events: events.slice(),
     listenerCount: listeners.size,
-    refsCleared: [renderer, scene, camera, meshGroup, loader, controls, _viewerResizeHandler].every((v) => v === null),
+    refsCleared: [renderer, scene, camera, perspectiveCamera, orthographicCamera, meshGroup, loader, controls, _viewerResizeHandler].every((v) => v === null),
     state: {{ ...state }}
   }};
 }}
@@ -359,6 +370,191 @@ console.log(JSON.stringify({{ elements, state }}));
         self.assertTrue(cutaway["disabled"])
         self.assertFalse(cutaway["checked"])
         self.assertIn("GPU failed", cutaway["title"])
+
+
+class CameraContractTests(unittest.TestCase):
+    @staticmethod
+    def _node_prelude():
+        return r"""
+class Vector3 {
+  constructor(x = 0, y = 0, z = 0) { this.set(x, y, z); }
+  set(x, y, z) { this.x = Number(x); this.y = Number(y); this.z = Number(z); return this; }
+  copy(v) { return this.set(v.x, v.y, v.z); }
+  clone() { return new Vector3(this.x, this.y, this.z); }
+  sub(v) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
+  addScaledVector(v, s) { this.x += v.x * s; this.y += v.y * s; this.z += v.z * s; return this; }
+  multiplyScalar(s) { this.x *= s; this.y *= s; this.z *= s; return this; }
+  length() { return Math.hypot(this.x, this.y, this.z); }
+  normalize() { const n = this.length() || 1; return this.multiplyScalar(1 / n); }
+  distanceTo(v) { return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z); }
+}
+class Box3 {
+  setFromObject(obj) { this.box = obj && obj.__box ? obj.__box : null; return this; }
+  isEmpty() { return !this.box; }
+  getCenter(out) {
+    return out.set((this.box.min.x + this.box.max.x) / 2, (this.box.min.y + this.box.max.y) / 2, (this.box.min.z + this.box.max.z) / 2);
+  }
+  getSize(out) {
+    return out.set(this.box.max.x - this.box.min.x, this.box.max.y - this.box.min.y, this.box.max.z - this.box.min.z);
+  }
+}
+function makeCamera(kind) {
+  return {
+    kind,
+    isPerspectiveCamera: kind === 'perspective',
+    isOrthographicCamera: kind === 'orthographic',
+    position: new Vector3(), up: new Vector3(0, 0, 1), quaternion: { copy() { return this; } },
+    fov: 50, zoom: 1, aspect: 1, left: -1, right: 1, top: 1, bottom: -1,
+    near: 0.001, far: 1000, projectionUpdates: 0,
+    updateProjectionMatrix() { this.projectionUpdates += 1; },
+    lookAt(v) { this.lookTarget = v.clone(); }
+  };
+}
+const THREE = { Vector3, Box3 };
+let perspectiveCamera = makeCamera('perspective');
+let orthographicCamera = makeCamera('orthographic');
+let camera = perspectiveCamera;
+let cameraMode = 'perspective';
+let meshGroup = {
+  children: [{}],
+  __box: { min: new Vector3(2, 4, 6), max: new Vector3(10, 14, 18) }
+};
+const controls = {
+  object: camera,
+  target: new Vector3(),
+  updates: 0,
+  update() { this.updates += 1; }
+};
+const state = { viewerBackend: 'webgl', viewerMode: '3d', _viewApplying: false };
+const elements = {};
+function $(id) { return elements[id] || null; }
+function requestWebglRender() {}
+function applySliceViewOffset3d() {}
+function updateRuler3d() {}
+function scheduleCaptureView3d() {}
+function _normalizeViewerFallbackReason(value) { return String(value || 'WebGL unavailable'); }
+"""
+
+    def test_seven_standard_views_fit_real_bounds_with_finite_pose(self):
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + r"""
+const results = {};
+for (const name of ['ISO', 'TOP', 'BOTTOM', 'FRONT', 'BACK', 'LEFT', 'RIGHT']) {
+  if (!applyStandardView(name)) throw new Error(`view ${name} was rejected`);
+  results[name] = {
+    position: [camera.position.x, camera.position.y, camera.position.z],
+    up: [camera.up.x, camera.up.y, camera.up.z],
+    target: [controls.target.x, controls.target.y, controls.target.z],
+    near: camera.near,
+    far: camera.far
+  };
+}
+console.log(JSON.stringify(results));
+"""
+        )
+
+        center = [6, 9, 12]
+        expected_signs = {
+            "TOP": [0, 0, 1], "BOTTOM": [0, 0, -1],
+            "FRONT": [0, -1, 0], "BACK": [0, 1, 0],
+            "LEFT": [-1, 0, 0], "RIGHT": [1, 0, 0],
+            "ISO": [1, -1, 1],
+        }
+        for name, pose in result.items():
+            with self.subTest(view=name):
+                values = pose["position"] + pose["up"] + pose["target"] + [pose["near"], pose["far"]]
+                self.assertTrue(all(isinstance(value, (int, float)) for value in values))
+                self.assertEqual(pose["target"], center)
+                self.assertGreater(pose["near"], 0)
+                self.assertGreater(pose["far"], pose["near"])
+                delta = [pose["position"][i] - center[i] for i in range(3)]
+                for component, sign in zip(delta, expected_signs[name]):
+                    if sign == 0:
+                        self.assertAlmostEqual(component, 0, places=8)
+                    else:
+                        self.assertGreater(component * sign, 0)
+
+    def test_projection_switch_preserves_visible_scale_and_controls_object(self):
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + r"""
+controls.target.set(6, 9, 12);
+perspectiveCamera.position.set(6, -11, 12);
+const before = viewerVisibleHalfHeight(perspectiveCamera, controls.target);
+const toOrtho = setCameraMode('orthographic');
+const orthoScale = viewerVisibleHalfHeight(camera, controls.target);
+const orthoOwnsControls = controls.object === orthographicCamera;
+const toPerspective = setCameraMode('perspective');
+const after = viewerVisibleHalfHeight(camera, controls.target);
+console.log(JSON.stringify({ before, orthoScale, after, toOrtho, toPerspective, orthoOwnsControls, perspectiveOwnsControls: controls.object === perspectiveCamera }));
+"""
+        )
+
+        self.assertTrue(result["toOrtho"])
+        self.assertTrue(result["toPerspective"])
+        self.assertTrue(result["orthoOwnsControls"])
+        self.assertTrue(result["perspectiveOwnsControls"])
+        self.assertAlmostEqual(result["orthoScale"] / result["before"], 1, delta=0.03)
+        self.assertAlmostEqual(result["after"] / result["before"], 1, delta=0.03)
+
+    def test_resize_updates_both_camera_projections(self):
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + r"""
+orthographicCamera.top = 3;
+orthographicCamera.bottom = -3;
+const before = [perspectiveCamera.projectionUpdates, orthographicCamera.projectionUpdates];
+_resizeViewerCameras(900, 450);
+console.log(JSON.stringify({
+  perspectiveAspect: perspectiveCamera.aspect,
+  orthoAspect: (orthographicCamera.right - orthographicCamera.left) / (orthographicCamera.top - orthographicCamera.bottom),
+  updates: [perspectiveCamera.projectionUpdates - before[0], orthographicCamera.projectionUpdates - before[1]]
+}));
+"""
+        )
+
+        self.assertAlmostEqual(result["perspectiveAspect"], 2)
+        self.assertAlmostEqual(result["orthoAspect"], 2)
+        self.assertEqual(result["updates"], [1, 1])
+
+    def test_remote_disables_camera_controls_and_webgl_restores_them(self):
+        normalize_reason = _extract_function(
+            "_normalizeViewerFallbackReason", "_updateViewerBackendUI"
+        )
+        update_ui = _extract_function("_updateViewerBackendUI", "_remoteCaptureView")
+        result = _run_node(
+            f"""
+const ids = ['viewer-camera-mode', 'viewer-view-iso', 'viewer-view-top', 'viewer-view-bottom', 'viewer-view-front', 'viewer-view-back', 'viewer-view-left', 'viewer-view-right'];
+const elements = {{
+  'viewer-backend-status': {{ textContent: '', hidden: true, title: '' }},
+  'viewer-hint': {{ textContent: '', style: {{ display: 'none' }} }},
+  'slice-cutaway-toggle': {{ disabled: false, checked: true, title: '' }},
+  'slice-cutaway-toggle-wrap': {{ title: '', dataset: {{}}, setAttribute(k, v) {{ this[k] = v; }} }}
+}};
+for (const id of ids) elements[id] = {{ disabled: false, title: `original:${{id}}`, dataset: {{}}, setAttribute(k, v) {{ this[k] = v; }} }};
+const state = {{ viewerBackend: 'remote', viewerMode: '3d', viewerFallbackReason: 'GPU unavailable' }};
+function $(id) {{ return elements[id] || null; }}
+{normalize_reason}
+{update_ui}
+_updateViewerBackendUI();
+const remote = ids.map((id) => ({{ disabled: elements[id].disabled, title: elements[id].title, aria: elements[id]['aria-disabled'] }}));
+state.viewerBackend = 'webgl';
+_updateViewerBackendUI();
+const webgl = ids.map((id) => ({{ disabled: elements[id].disabled, title: elements[id].title, aria: elements[id]['aria-disabled'] }}));
+console.log(JSON.stringify({{ remote, webgl }}));
+"""
+        )
+
+        self.assertTrue(all(item["disabled"] for item in result["remote"]))
+        self.assertTrue(all("Host Render" in item["title"] for item in result["remote"]))
+        self.assertTrue(all(item["aria"] == "true" for item in result["remote"]))
+        self.assertTrue(all(not item["disabled"] for item in result["webgl"]))
+        self.assertTrue(all(item["title"].startswith("original:") for item in result["webgl"]))
+        self.assertTrue(all(item["aria"] == "false" for item in result["webgl"]))
 
 
 if __name__ == "__main__":
