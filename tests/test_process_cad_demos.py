@@ -2,6 +2,7 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -9,6 +10,29 @@ import tcad_simulator as tcad
 
 
 DEMO_NAMES = ("Basic Trench", "Spacer Formation", "Bonding + Thinning")
+
+
+def geometry_checkpoint(database, model):
+    counts = {}
+    full_planes = {}
+    for material_name in (
+        "Silicon",
+        "Silicon Dioxide",
+        "Photoresist",
+        "Polysilicon",
+        "Silicon Nitride",
+    ):
+        material_id = database.id_for(material_name)
+        counts[material_name] = int(np.count_nonzero(model.grid == material_id))
+        full_planes[material_name] = np.flatnonzero(
+            np.all(model.grid == material_id, axis=(0, 1))
+        ).tolist()
+    return {
+        "counts": counts,
+        "full_planes": full_planes,
+        "height_min": int(model.height_map.min()),
+        "height_max": int(model.height_map.max()),
+    }
 
 
 def execute_demo(name):
@@ -21,6 +45,7 @@ def execute_demo(name):
         max_workers=1,
     )
     started = time.perf_counter()
+    trace = []
     try:
         for index, blob in enumerate(recipe["steps"]):
             if not blob.get("enabled", True):
@@ -28,13 +53,23 @@ def execute_demo(name):
             step = tcad._webui_deserialize_step(blob, database)
             if step is None:
                 raise AssertionError(f"{name} step {index + 1} could not be deserialized: {blob!r}")
+            before = geometry_checkpoint(database, model)
             try:
                 step.execute(model)
             except Exception as exc:
                 raise AssertionError(
                     f"{name} step {index + 1} ({blob.get('name')}) failed: {exc}"
                 ) from exc
-        return database, model, time.perf_counter() - started
+            trace.append(
+                {
+                    "name": blob["name"],
+                    "instance_name": step.instance_name,
+                    "params": dict(step.params),
+                    "before": before,
+                    "after": geometry_checkpoint(database, model),
+                }
+            )
+        return database, model, time.perf_counter() - started, trace
     except Exception:
         model.parallel.shutdown()
         raise
@@ -85,6 +120,7 @@ class DemoRecipeRegistryTests(unittest.TestCase):
                 "Spin Resist",
                 "Mask Exposure",
                 "Resist Develop",
+                "Etch",
                 "Etch",
                 "Strip",
             ],
@@ -147,18 +183,18 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
             for name in DEMO_NAMES:
                 cls.runs[name] = execute_demo(name)
         except Exception:
-            for _database, model, _elapsed in cls.runs.values():
+            for _database, model, _elapsed, _trace in cls.runs.values():
                 model.parallel.shutdown()
             raise
 
     @classmethod
     def tearDownClass(cls):
-        for _database, model, _elapsed in cls.runs.values():
+        for _database, model, _elapsed, _trace in cls.runs.values():
             model.parallel.shutdown()
 
     def test_all_demos_finish_with_visible_bounded_geometry_in_reasonable_time(self):
         total_elapsed = 0.0
-        for name, (database, model, elapsed) in self.runs.items():
+        for name, (database, model, elapsed, _trace) in self.runs.items():
             with self.subTest(demo=name):
                 total_elapsed += elapsed
                 occupied = np.argwhere(model.grid != 0)
@@ -173,7 +209,7 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         self.assertLess(total_elapsed, 90.0)
 
     def test_basic_trench_strips_resist_and_leaves_patterned_oxide_on_silicon(self):
-        database, model, _elapsed = self.runs["Basic Trench"]
+        database, model, _elapsed, trace = self.runs["Basic Trench"]
         resist_id = database.id_for("Photoresist")
         silicon_id = database.id_for("Silicon")
         oxide_id = database.id_for("Silicon Dioxide")
@@ -184,10 +220,22 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         oxide_columns = np.any(model.grid == oxide_id, axis=2)
         self.assertTrue(np.any(oxide_columns))
         self.assertTrue(np.any(~oxide_columns))
-        self.assertGreater(np.unique(model.height_map).size, 1)
+        silicon_etch = next(
+            checkpoint
+            for checkpoint in trace
+            if checkpoint["instance_name"] == "Anisotropic silicon trench etch"
+        )
+        self.assertLess(
+            silicon_etch["after"]["counts"]["Silicon"],
+            silicon_etch["before"]["counts"]["Silicon"],
+        )
+        self.assertGreaterEqual(
+            int(model.height_map.max()) - int(model.height_map.min()),
+            4,
+        )
 
     def test_spacer_demo_leaves_two_multilayer_sidewalls_after_core_strip(self):
-        database, model, _elapsed = self.runs["Spacer Formation"]
+        database, model, _elapsed, _trace = self.runs["Spacer Formation"]
         spacer_id = database.id_for("Silicon Nitride")
         core_id = database.id_for("Polysilicon")
         spacer = model.grid == spacer_id
@@ -203,11 +251,30 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         self.assertFalse(np.any(np.all(spacer, axis=(0, 1))))
 
     def test_bonding_demo_preserves_handle_bond_layer_and_thinned_device(self):
-        database, model, _elapsed = self.runs["Bonding + Thinning"]
+        database, model, _elapsed, trace = self.runs["Bonding + Thinning"]
         silicon_id = database.id_for("Silicon")
         oxide_id = database.id_for("Silicon Dioxide")
 
         self.assertEqual(model.active_side, "bottom")
+        bonding = next(checkpoint for checkpoint in trace if checkpoint["name"] == "Bonding")
+        front_oxide_z = set(bonding["before"]["full_planes"]["Silicon Dioxide"])
+        bonded_oxide_z = set(bonding["after"]["full_planes"]["Silicon Dioxide"])
+        new_bond_z = bonded_oxide_z - front_oxide_z
+        expected_bond_layers = int(
+            np.ceil(bonding["params"]["bonding_layer_nm"] / model.voxel_size_nm)
+        )
+        self.assertTrue(front_oxide_z)
+        self.assertEqual(len(new_bond_z), expected_bond_layers)
+        self.assertEqual(
+            bonding["after"]["counts"]["Silicon Dioxide"]
+            - bonding["before"]["counts"]["Silicon Dioxide"],
+            expected_bond_layers * model.grid.shape[0] * model.grid.shape[1],
+        )
+        self.assertEqual(max(new_bond_z) + 1, min(front_oxide_z))
+        bonded_silicon_z = set(bonding["after"]["full_planes"]["Silicon"])
+        self.assertIn(min(new_bond_z) - 1, bonded_silicon_z)
+        self.assertIn(max(front_oxide_z) + 1, bonded_silicon_z)
+
         silicon_planes = np.all(model.grid == silicon_id, axis=(0, 1))
         oxide_planes = np.all(model.grid == oxide_id, axis=(0, 1))
         silicon_z = np.flatnonzero(silicon_planes)
@@ -225,6 +292,29 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         self.assertGreater(handle.size, device.size)
         self.assertEqual(device.size, 8)
         self.assertTrue(np.all(oxide_planes[handle[-1] + 1 : device[0]]))
+
+    def test_all_demos_execute_without_scipy_ndimage(self):
+        fallback_runs = []
+        try:
+            with mock.patch.object(tcad, "_scipy_ndimage", None):
+                for name in DEMO_NAMES:
+                    fallback_runs.append(execute_demo(name))
+            for name, (database, model, _elapsed, trace) in zip(DEMO_NAMES, fallback_runs):
+                with self.subTest(demo=name):
+                    self.assertGreaterEqual(np.unique(model.grid[model.grid != 0]).size, 2)
+                    if name == "Basic Trench":
+                        silicon_etch = next(
+                            checkpoint
+                            for checkpoint in trace
+                            if checkpoint["instance_name"] == "Anisotropic silicon trench etch"
+                        )
+                        self.assertLess(
+                            silicon_etch["after"]["counts"]["Silicon"],
+                            silicon_etch["before"]["counts"]["Silicon"],
+                        )
+        finally:
+            for _database, model, _elapsed, _trace in fallback_runs:
+                model.parallel.shutdown()
 
 
 if __name__ == "__main__":

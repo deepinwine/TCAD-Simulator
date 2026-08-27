@@ -32386,6 +32386,21 @@ def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, An
                 "passivation": 0.4,
             },
         ),
+        _step(
+            "Etch",
+            "Anisotropic silicon trench etch",
+            {
+                "material": "Silicon",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+                "pressure": 8.0,
+                "rf_bias": 240.0,
+                "passivation": 0.4,
+            },
+        ),
         _step("Strip", "Strip trench resist", {"materials": "Photoresist"}),
     ]
 
