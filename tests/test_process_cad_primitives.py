@@ -1057,3 +1057,235 @@ class BondingTests(unittest.TestCase):
         self.assertIsInstance(restored, tcad.BondingStep)
         self.assertEqual(restored.params, step.params)
         self.assertNotIn("Bonding", [item.name for item in tcad._webui_default_recipe(db)])
+
+
+class ThinningTests(unittest.TestCase):
+    def test_flipped_wafer_thins_from_high_z_backside(self):
+        db, model = make_model((5, 5, 16))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :10] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        model.flip_wafer()
+
+        removed = model.thin_wafer(50.0, "Silicon")
+
+        self.assertEqual(model.active_side, "bottom")
+        self.assertEqual(removed, 5 * 5 * 5)
+        self.assertTrue(np.all(model.grid[:, :, 6:11] == silicon_id))
+        self.assertFalse(np.any(model.grid[:, :, :6]))
+        self.assertFalse(np.any(model.grid[:, :, 11:]))
+
+    def test_unflipped_wafer_thins_from_low_z_backside_and_preserves_outer_cap(self):
+        db, model = make_model((4, 4, 14))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, 0] = np.uint16(copper_id)
+        model.grid[:, :, 2:10] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(30.0, silicon_id)
+
+        self.assertEqual(model.active_side, "top")
+        self.assertEqual(removed, 4 * 4 * 5)
+        self.assertTrue(np.all(model.grid[:, :, 0] == copper_id))
+        self.assertFalse(np.any(model.grid[:, :, 2:7]))
+        self.assertTrue(np.all(model.grid[:, :, 7:10] == silicon_id))
+
+    def test_target_at_or_above_segment_thickness_is_a_zero_copy_noop(self):
+        db, model = make_model((3, 3, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, 1:5] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        before_grid = model.grid.copy()
+        before_history = list(model.history)
+
+        self.assertEqual(model.thin_wafer(40.0, "Silicon"), 0)
+        self.assertEqual(model.thin_wafer(50.0, "Silicon"), 0)
+
+        np.testing.assert_array_equal(model.grid, before_grid)
+        self.assertEqual(model.history, before_history)
+
+    def test_non_integer_target_thickness_uses_ceiling(self):
+        db, model = make_model((2, 2, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :5] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(20.01, "Silicon")
+
+        self.assertEqual(removed, 2 * 2 * 2)
+        self.assertFalse(np.any(model.grid[:, :, :2]))
+        self.assertTrue(np.all(model.grid[:, :, 2:5] == silicon_id))
+
+    def test_invalid_target_and_material_values_are_rejected(self):
+        _db, model = make_model((3, 3, 8))
+        self.addCleanup(model.parallel.shutdown)
+        model.grid[:, :, :4] = np.uint16(model.material_db.id_for("Silicon"))
+        model._rebuild_height_map()
+
+        for thickness in (0.0, -1.0, float("nan"), float("inf"), True, None):
+            with self.subTest(target_thickness_nm=thickness):
+                with self.assertRaisesRegex(ValueError, "Thinning"):
+                    model.thin_wafer(thickness, "Silicon")
+        for material in ("Void", 0, "Missingium", True, None, ["Silicon"]):
+            with self.subTest(material=material):
+                with self.assertRaisesRegex(ValueError, "Thinning"):
+                    model.thin_wafer(10.0, material)
+
+    def test_empty_or_target_absent_model_returns_zero(self):
+        db, model = make_model((3, 3, 8))
+        self.addCleanup(model.parallel.shutdown)
+
+        self.assertEqual(model.thin_wafer(10.0, "Silicon"), 0)
+        model.grid[:, :, :4] = np.uint16(db.id_for("Copper"))
+        model._rebuild_height_map()
+        before = model.grid.copy()
+
+        self.assertEqual(model.thin_wafer(10.0, "Silicon"), 0)
+        np.testing.assert_array_equal(model.grid, before)
+
+    def test_only_target_cells_in_removed_z_layers_are_cleared(self):
+        db, model = make_model((3, 3, 7))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, 1:5] = np.uint16(silicon_id)
+        model.grid[1, 1, 1:3] = np.uint16(copper_id)
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(20.0, "Silicon")
+
+        self.assertEqual(removed, 3 * 3 * 2 - 2)
+        self.assertEqual(int(model.grid[1, 1, 1]), copper_id)
+        self.assertEqual(int(model.grid[1, 1, 2]), copper_id)
+        self.assertFalse(np.any(model.grid[:, :, 1:3] == silicon_id))
+        self.assertTrue(np.all(model.grid[:, :, 3:5] == silicon_id))
+
+    def test_removed_cells_clear_all_colocated_state_once_and_preserve_aliases(self):
+        db, model = make_model((2, 2, 6))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        copper_id = db.id_for("Copper")
+        model.grid[:, :, 1:5] = np.uint16(silicon_id)
+        model.grid[0, 0, 1] = np.uint16(copper_id)
+        shape = model.grid.shape
+        shared = np.full(shape, 7.0, dtype=np.float32)
+        model.doping = shared
+        model.active_dopants = shared
+        for field_name in model._spatial_volume_field_names():
+            if field_name not in {"doping", "active_dopants"}:
+                setattr(model, field_name, np.full(shape, 11.0, dtype=np.float32))
+        model.defects_interstitial = model.interstitials
+        model.defects_vacancy = model.vacancies
+        species = np.full(shape, 13.0, dtype=np.float32)
+        model.dopant_species_fields = {"Shared": shared, "B": species, "metadata": "keep"}
+        resist_volume = np.full(shape, 17.0, dtype=np.float32)
+        model._resist_state = SimpleNamespace(
+            shared=shared,
+            volume=resist_volume,
+            surface=np.ones(shape[:2], dtype=np.float32),
+        )
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(20.0, "Silicon")
+
+        removal_mask = np.zeros(shape, dtype=bool)
+        removal_mask[:, :, 1:3] = True
+        removal_mask[0, 0, 1] = False
+        kept_mask = (model.grid != 0)
+        self.assertEqual(removed, int(np.count_nonzero(removal_mask)))
+        arrays = [
+            *(getattr(model, name) for name in model._spatial_volume_field_names()),
+            model.dopant_species_fields["Shared"],
+            model.dopant_species_fields["B"],
+            model._resist_state.shared,
+            model._resist_state.volume,
+        ]
+        for array in arrays:
+            with self.subTest(array_id=id(array)):
+                self.assertTrue(np.all(array[removal_mask] == 0.0))
+                self.assertTrue(np.all(array[kept_mask] != 0.0))
+        self.assertIs(model.doping, model.active_dopants)
+        self.assertIs(model.doping, model.dopant_species_fields["Shared"])
+        self.assertIs(model.doping, model._resist_state.shared)
+        self.assertIs(model.interstitials, model.defects_interstitial)
+        self.assertIs(model.vacancies, model.defects_vacancy)
+        self.assertEqual(model.dopant_species_fields["metadata"], "keep")
+        self.assertTrue(np.all(model._resist_state.surface == 1.0))
+
+    def test_readonly_colocated_state_is_rejected_before_any_thinning_mutation(self):
+        for readonly_location in ("grid", "doping", "resist"):
+            with self.subTest(readonly_location=readonly_location):
+                db, model = make_model((3, 3, 8))
+                self.addCleanup(model.parallel.shutdown)
+                silicon_id = db.id_for("Silicon")
+                model.grid[:, :, :4] = np.uint16(silicon_id)
+                writable = np.full(model.grid.shape, 23.0, dtype=np.float32)
+                readonly = np.full(model.grid.shape, 47.0, dtype=np.float32)
+                readonly.flags.writeable = False
+                model.doping = readonly if readonly_location == "doping" else writable
+                model._resist_state = SimpleNamespace(
+                    volume=readonly if readonly_location == "resist" else writable,
+                    surface=np.full(model.grid.shape[:2], 3.0, dtype=np.float32),
+                )
+                model._rebuild_height_map()
+                if readonly_location == "grid":
+                    model.grid.flags.writeable = False
+                before_grid = model.grid.copy()
+                before_doping = model.doping.copy()
+                before_resist = model._resist_state.volume.copy()
+
+                with self.assertRaisesRegex(ValueError, r"Thinning.*writable"):
+                    model.thin_wafer(20.0, "Silicon")
+
+                np.testing.assert_array_equal(model.grid, before_grid)
+                np.testing.assert_array_equal(model.doping, before_doping)
+                np.testing.assert_array_equal(model._resist_state.volume, before_resist)
+
+    def test_bonding_layer_separates_same_material_segments(self):
+        db, model = make_model((3, 3, 16))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        oxide_id = db.id_for("Silicon Dioxide")
+        model.grid[:, :, :6] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        model.bond_wafer("Silicon", 40.0, "Silicon Dioxide", 10.0)
+
+        removed = model.thin_wafer(30.0, "Silicon")
+
+        self.assertEqual(removed, 3 * 3 * 3)
+        self.assertFalse(np.any(model.grid[:, :, :3]))
+        self.assertTrue(np.all(model.grid[:, :, 3:6] == silicon_id))
+        self.assertTrue(np.all(model.grid[:, :, 6] == oxide_id))
+        self.assertTrue(np.all(model.grid[:, :, 7:11] == silicon_id))
+
+    def test_step_factory_execute_roundtrip_and_default_recipe_exclusion(self):
+        db, model = make_model((2, 2, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, :5] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        step = tcad.PROCESS_STEP_FACTORIES["Thinning"](db)
+        step.params.update({"target_thickness_nm": 20.01, "material": "Silicon"})
+
+        result = step.execute(model)
+        blob = tcad._webui_serialize_step(step)
+        restored = tcad._webui_deserialize_step(blob, db)
+
+        self.assertIsInstance(step, tcad.ThinningStep)
+        self.assertEqual(step.name, "Thinning")
+        self.assertEqual(step.group, "Wafer")
+        self.assertEqual(set(step.params), {"target_thickness_nm", "material"})
+        self.assertIn("Thinning", result)
+        self.assertIn("8", result)
+        self.assertIsInstance(restored, tcad.ThinningStep)
+        self.assertEqual(restored.params, step.params)
+        specs = {spec.key: spec for spec in restored.parameter_specs()}
+        self.assertEqual(specs["target_thickness_nm"].type, "float")
+        self.assertEqual(specs["material"].type, "enum")
+        self.assertNotIn("Void", [choice[0] for choice in specs["material"].choices])
+        self.assertNotIn("Thinning", [item.name for item in tcad._webui_default_recipe(db)])

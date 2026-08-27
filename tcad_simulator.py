@@ -8111,6 +8111,76 @@ class ProcessModel:
             "active_side": active_side,
         }
 
+    def thin_wafer(self, target_thickness_nm: float, material: Any) -> int:
+        """Thin the backside-facing, contiguous segment of one material.
+
+        Leading non-target cap layers are skipped when locating the segment and
+        are intentionally preserved. Within the selected Z layers, only target
+        material cells are removed, so mixed-material features remain. A
+        target-free Z plane separates same-material wafer components, such as a
+        device wafer and a bonded handle wafer.
+        """
+
+        material_id, material_name = _normalize_nonvoid_material(
+            self.material_db,
+            material,
+            "Thinning",
+        )
+        if isinstance(target_thickness_nm, (bool, np.bool_)):
+            raise ValueError("Thinning target thickness must be a positive finite number.")
+        try:
+            target_nm = float(target_thickness_nm)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Thinning target thickness must be a positive finite number.") from None
+        if not math.isfinite(target_nm) or target_nm <= 0.0:
+            raise ValueError("Thinning target thickness must be a positive finite number.")
+        target_layers = max(1, int(math.ceil(target_nm / float(self.voxel_size_nm))))
+
+        material_by_z = np.any(self.grid == np.uint16(material_id), axis=(0, 1))
+        material_z = np.flatnonzero(material_by_z)
+        if material_z.size == 0:
+            return 0
+
+        active_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        backside_is_low_z = active_side == "top"
+        segment_edge = int(material_z[0] if backside_is_low_z else material_z[-1])
+        segment_stop = segment_edge
+        step = 1 if backside_is_low_z else -1
+        next_z = segment_edge + step
+        nz = int(self.grid.shape[2])
+        while 0 <= next_z < nz and bool(material_by_z[next_z]):
+            segment_stop = next_z
+            next_z += step
+
+        segment_layers = abs(segment_stop - segment_edge) + 1
+        if target_layers >= segment_layers:
+            return 0
+        remove_layers = segment_layers - target_layers
+        if backside_is_low_z:
+            remove_start = segment_edge
+            remove_stop = segment_edge + remove_layers
+        else:
+            remove_start = segment_edge - remove_layers + 1
+            remove_stop = segment_edge + 1
+
+        roi = (slice(None), slice(None), slice(remove_start, remove_stop))
+        removal_mask = self.grid[roi] == np.uint16(material_id)
+        removed_cells = int(np.count_nonzero(removal_mask))
+        if removed_cells <= 0:
+            return 0
+
+        spatial_arrays = self._require_writable_spatial_volumes("Thinning")
+        self.grid[roi][removal_mask] = np.uint16(0)
+        self._clear_spatial_volume_mask(roi, removal_mask, arrays=spatial_arrays)
+        self._rebuild_height_map([material_id])
+        backside = "bottom (low Z)" if backside_is_low_z else "top (high Z)"
+        self._log(
+            f"Thinning {material_name} from backside {backside}: removed "
+            f"{remove_layers} voxel layer(s), {removed_cells} cell(s), "
+            f"target {target_layers} voxel layer(s)"
+        )
+        return removed_cells
+
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -19718,6 +19788,44 @@ class BondingStep(ProcessStep):
         )
 
 
+class ThinningStep(ProcessStep):
+    name = "Thinning"
+    group = "Wafer"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec(
+                "target_thickness_nm",
+                "Target remaining thickness",
+                "float",
+                50.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "material",
+                "Target material",
+                "enum",
+                "Silicon",
+                choices=materials,
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        material_id, material_name = _normalize_nonvoid_material(
+            model.material_db,
+            self.params.get("material"),
+            "Thinning",
+        )
+        removed = model.thin_wafer(
+            self.params.get("target_thickness_nm"),
+            material_id,
+        )
+        return f"Thinning {material_name}: removed {removed} voxels from backside"
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
@@ -20042,6 +20150,7 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Strip": StripStep,
     "Wafer Flip": WaferFlipStep,
     "Bonding": BondingStep,
+    "Thinning": ThinningStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,
     "Ion Implant": ImplantationStep,
