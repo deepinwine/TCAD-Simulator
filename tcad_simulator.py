@@ -94222,33 +94222,55 @@ function _remoteCameraBasis(cam) {
   let fx = (Number(tar[0]) || 0) - (Number(pos[0]) || 0);
   let fy = (Number(tar[1]) || 0) - (Number(pos[1]) || 0);
   let fz = (Number(tar[2]) || 0) - (Number(pos[2]) || 0);
-  let fn = Math.hypot(fx, fy, fz) || 1.0;
+  let fn = Math.hypot(fx, fy, fz);
+  if (!(Number.isFinite(fn) && fn > 1e-12)) {
+    fx = 0; fy = 0; fz = -1; fn = 1;
+  }
   fx /= fn; fy /= fn; fz /= fn;
   const rawUx = Number(up0[0]), rawUy = Number(up0[1]), rawUz = Number(up0[2]);
   let ux = Number.isFinite(rawUx) ? rawUx : 0;
   let uy = Number.isFinite(rawUy) ? rawUy : 0;
   let uz = Number.isFinite(rawUz) ? rawUz : 1;
-  let un = Math.hypot(ux, uy, uz) || 1.0;
-  ux /= un; uy /= un; uz /= un;
+  let un = Math.hypot(ux, uy, uz);
+  if (Number.isFinite(un) && un > 1e-12) {
+    ux /= un; uy /= un; uz /= un;
+  } else {
+    ux = 0; uy = 0; uz = 0;
+  }
   // right = normalize(cross(fwd, up))
   let rx = fy * uz - fz * uy;
   let ry = fz * ux - fx * uz;
   let rz = fx * uy - fy * ux;
-  let rn = Math.hypot(rx, ry, rz) || 0.0;
-  if (rn < 1e-8) {
-    // Up is parallel to fwd; choose a fallback up.
-    ux = 0; uy = 1; uz = 0;
+  let rn = Math.hypot(rx, ry, rz);
+  if (!(Number.isFinite(rn) && rn >= 1e-8)) {
+    // Pick the world axis least parallel to fwd. A fixed Y-up fallback is still
+    // degenerate when looking along ±Y and collapses the Host Render projection.
+    const ax = Math.abs(fx), ay = Math.abs(fy), az = Math.abs(fz);
+    if (ax <= ay && ax <= az) { ux = 1; uy = 0; uz = 0; }
+    else if (ay <= az) { ux = 0; uy = 1; uz = 0; }
+    else { ux = 0; uy = 0; uz = 1; }
     rx = fy * uz - fz * uy;
     ry = fz * ux - fx * uz;
     rz = fx * uy - fy * ux;
-    rn = Math.hypot(rx, ry, rz) || 1.0;
+    rn = Math.hypot(rx, ry, rz);
+  }
+  if (!(Number.isFinite(rn) && rn >= 1e-8)) {
+    // Deterministic last resort for malformed forward vectors.
+    fx = 0; fy = 0; fz = -1;
+    ux = 0; uy = 1; uz = 0;
+    rx = 1; ry = 0; rz = 0; rn = 1;
   }
   rx /= rn; ry /= rn; rz /= rn;
   // upn = cross(right, fwd)
   let ux2 = ry * fz - rz * fy;
   let uy2 = rz * fx - rx * fz;
   let uz2 = rx * fy - ry * fx;
-  const u2n = Math.hypot(ux2, uy2, uz2) || 1.0;
+  let u2n = Math.hypot(ux2, uy2, uz2);
+  if (!(Number.isFinite(u2n) && u2n >= 1e-8)) {
+    fx = 0; fy = 0; fz = -1;
+    rx = 1; ry = 0; rz = 0;
+    ux2 = 0; uy2 = 1; uz2 = 0; u2n = 1;
+  }
   ux2 /= u2n; uy2 /= u2n; uz2 /= u2n;
   return { pos: [Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0], right: [rx, ry, rz], up: [ux2, uy2, uz2], fwd: [fx, fy, fz] };
 }

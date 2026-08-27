@@ -1086,22 +1086,52 @@ console.log(JSON.stringify({ ok, remoteOrbit, payload, appliedUp, invalidOk, inv
         result = _run_node(
             basis
             + r"""
-const zeroZ = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [1, 0, 0] });
-const invalid = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [NaN, Infinity] });
-const allZero = _remoteCameraBasis({ pos: [0, -10, 0], target: [0, 0, 0], up: [0, 0, 0] });
-const finite = (value) => value.every(Number.isFinite);
+const norm = (v) => Math.hypot(v[0], v[1], v[2]);
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const metrics = (name, value) => ({
+  name,
+  finite: [...value.fwd, ...value.right, ...value.up].every(Number.isFinite),
+  norms: [norm(value.fwd), norm(value.right), norm(value.up)].map((v) => Number.isFinite(v) ? v : -999),
+  dots: [dot(value.fwd, value.right), dot(value.fwd, value.up), dot(value.right, value.up)].map((v) => Number.isFinite(v) ? v : -999)
+});
+const directions = [
+  ['+X', [1, 0, 0]], ['-X', [-1, 0, 0]],
+  ['+Y', [0, 1, 0]], ['-Y', [0, -1, 0]],
+  ['+Z', [0, 0, 1]], ['-Z', [0, 0, -1]],
+  ['near+X', [1, 1e-10, -2e-10]], ['near-X', [-1, 1e-10, 2e-10]],
+  ['near+Y', [2e-10, 1, -1e-10]], ['near-Y', [-2e-10, -1, 1e-10]],
+  ['near+Z', [1e-10, -2e-10, 1]], ['near-Z', [-1e-10, 2e-10, -1]]
+];
+const cases = [];
+for (const [axis, fwd] of directions) {
+  const pos = fwd.map((v) => -10 * v);
+  const variants = [
+    ['zero', [0, 0, 0]],
+    ['parallel', fwd.slice()],
+    ['anti-parallel', fwd.map((v) => -v)],
+    ['invalid', [NaN, Infinity, undefined]]
+  ];
+  for (const [kind, up] of variants) {
+    cases.push(metrics(`${axis}:${kind}`, _remoteCameraBasis({ pos, target: [0, 0, 0], up })));
+  }
+}
+const validYUp = _remoteCameraBasis({ pos: [0, 0, 10], target: [0, 0, 0], up: [0, 1, 0] });
 console.log(JSON.stringify({
-  zeroZ,
-  invalidFinite: finite(invalid.right) && finite(invalid.up) && finite(invalid.fwd),
-  allZeroFinite: finite(allZero.right) && finite(allZero.up) && finite(allZero.fwd)
+  cases,
+  validYUp
 }));
 """
         )
 
-        self.assertEqual(result["zeroZ"]["right"], [0, 0, -1])
-        self.assertEqual(result["zeroZ"]["up"], [1, 0, 0])
-        self.assertTrue(result["invalidFinite"])
-        self.assertTrue(result["allZeroFinite"])
+        for case in result["cases"]:
+            with self.subTest(case=case["name"]):
+                self.assertTrue(case["finite"])
+                for value in case["norms"]:
+                    self.assertAlmostEqual(value, 1.0, places=8)
+                for value in case["dots"]:
+                    self.assertAlmostEqual(value, 0.0, places=8)
+        self.assertEqual(result["validYUp"]["right"], [1, 0, 0])
+        self.assertEqual(result["validYUp"]["up"], [0, 1, 0])
 
 
 if __name__ == "__main__":
