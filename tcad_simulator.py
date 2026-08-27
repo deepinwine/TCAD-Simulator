@@ -82481,6 +82481,19 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                     切开
                   </label>
                       <button class="btn btn-sm" id="toggle-ruler3d-btn" title="切换 3D 标尺：网格 → 数值 → Off（循环）">标尺: Off</button>
+                      <div class="viewer-camera-controls" id="viewer-camera-controls" role="group" aria-label="WebGL 相机与标准视图">
+                        <select id="viewer-camera-mode" aria-label="相机投影模式" title="切换透视或正交投影">
+                          <option value="perspective" selected>透视</option>
+                          <option value="orthographic">正交</option>
+                        </select>
+                        <button type="button" class="btn btn-sm" id="viewer-view-iso" data-standard-view="ISO" aria-label="切换到等轴测标准视图" title="等轴测标准视图">等轴 ISO</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-top" data-standard-view="TOP" aria-label="切换到顶部标准视图" title="顶部标准视图">顶 TOP</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-bottom" data-standard-view="BOTTOM" aria-label="切换到底部标准视图" title="底部标准视图">底 BOTTOM</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-front" data-standard-view="FRONT" aria-label="切换到前部标准视图" title="前部标准视图">前 FRONT</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-back" data-standard-view="BACK" aria-label="切换到后部标准视图" title="后部标准视图">后 BACK</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-left" data-standard-view="LEFT" aria-label="切换到左侧标准视图" title="左侧标准视图">左 LEFT</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-right" data-standard-view="RIGHT" aria-label="切换到右侧标准视图" title="右侧标准视图">右 RIGHT</button>
+                      </div>
                       <button class="btn btn-sm" id="refresh-preview-btn" title="恢复默认相机视角与缩放">恢复默认视图</button>
                       <button class="btn btn-sm slot-hidden" id="refresh-slice-3d-btn">刷新切片</button>
                     </div>
@@ -93181,6 +93194,9 @@ async function refreshAll(doPreview, retry = 0) {
 let renderer = null;
 let scene = null;
 let camera = null;
+let perspectiveCamera = null;
+let orthographicCamera = null;
+let cameraMode = 'perspective';
 let controls = null;
 let loader = null;
 let meshGroup = null;
@@ -93342,6 +93358,7 @@ function captureView3dNow() {
       target: [Number(tar.x) || 0, Number(tar.y) || 0, Number(tar.z) || 0],
       up: [Number(up.x) || 0, Number(up.y) || 0, Number(up.z) || 1],
       zoom: zoom,
+      cameraMode: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
     };
   } catch (e) {}
 }
@@ -93365,6 +93382,10 @@ function applyView3d(view) {
   if (!pos || pos.length < 3 || !target || target.length < 3) return false;
   state._viewApplying = true;
   try {
+    const requestedMode = String(view.cameraMode || '').trim().toLowerCase();
+    if ((requestedMode === 'perspective' || requestedMode === 'orthographic') && requestedMode !== cameraMode) {
+      if (!setCameraMode(requestedMode)) return false;
+    }
     camera.position.set(Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0);
     if (Array.isArray(view.up) && view.up.length >= 3) {
       camera.up.set(Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1);
@@ -93456,6 +93477,7 @@ function restoreDefaultView() {
   showNotification('恢复默认视图...');
   try {
     state._viewApplying = true;
+    setCameraMode('perspective');
     fitCameraToObject(meshGroup);
   } catch (e) {
     showNotification('恢复默认视图失败：' + e);
@@ -93601,6 +93623,188 @@ function setVideoOverlayText(text) {
   try { requestWebglRender(0); } catch (e) {}
 }
 
+const STANDARD_VIEWS = {
+  TOP:    { direction: [0, 0, 1], up: [0, 1, 0] },
+  BOTTOM: { direction: [0, 0, -1], up: [0, 1, 0] },
+  FRONT:  { direction: [0, -1, 0], up: [0, 0, 1] },
+  BACK:   { direction: [0, 1, 0], up: [0, 0, 1] },
+  LEFT:   { direction: [-1, 0, 0], up: [0, 0, 1] },
+  RIGHT:  { direction: [1, 0, 0], up: [0, 0, 1] },
+  ISO:    { direction: [1, -1, 1], up: [0, 0, 1] },
+};
+
+function _viewerCameraBounds(object3d) {
+  const fallback = {
+    center: new THREE.Vector3(0, 0, 0),
+    size: new THREE.Vector3(1, 1, 1),
+    radius: Math.sqrt(3) * 0.5,
+  };
+  if (typeof THREE === 'undefined' || !THREE.Box3 || !object3d) return fallback;
+  try {
+    const box = new THREE.Box3().setFromObject(object3d);
+    if (!box || box.isEmpty()) return fallback;
+    const center = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    box.getCenter(center);
+    box.getSize(size);
+    const sx = Math.max(0, Number(size.x) || 0);
+    const sy = Math.max(0, Number(size.y) || 0);
+    const sz = Math.max(0, Number(size.z) || 0);
+    if (![center.x, center.y, center.z, sx, sy, sz].every(Number.isFinite)) return fallback;
+    const radius = Math.max(Math.hypot(sx, sy, sz) * 0.5, 0.0005);
+    return { center, size: new THREE.Vector3(sx, sy, sz), radius };
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function viewerVisibleHalfHeight(viewCamera, target) {
+  if (!viewCamera) return 1;
+  const zoom = Math.max(1e-6, Number(viewCamera.zoom) || 1);
+  if (viewCamera.isOrthographicCamera) {
+    return Math.max(1e-6, Math.abs((Number(viewCamera.top) || 1) - (Number(viewCamera.bottom) || -1)) * 0.5 / zoom);
+  }
+  const focus = target || new THREE.Vector3(0, 0, 0);
+  const distance = Math.max(1e-6, viewCamera.position.distanceTo(focus));
+  const fov = Math.max(1, Math.min(179, Number(viewCamera.fov) || 50));
+  return Math.max(1e-6, distance * Math.tan((fov * Math.PI / 180) * 0.5) / zoom);
+}
+
+function _setOrthographicHalfHeight(halfHeight, aspect) {
+  if (!orthographicCamera) return;
+  const hh = Math.max(1e-6, Number(halfHeight) || 1);
+  const ratio = Math.max(1e-6, Number(aspect) || 1);
+  orthographicCamera.top = hh;
+  orthographicCamera.bottom = -hh;
+  orthographicCamera.left = -hh * ratio;
+  orthographicCamera.right = hh * ratio;
+  orthographicCamera.zoom = 1;
+}
+
+function _resizeViewerCameras(width, height) {
+  const w = Math.max(1, Number(width) || 1);
+  const h = Math.max(1, Number(height) || 1);
+  const aspect = w / h;
+  if (perspectiveCamera) {
+    perspectiveCamera.aspect = aspect;
+    perspectiveCamera.updateProjectionMatrix();
+  }
+  if (orthographicCamera) {
+    const halfHeight = Math.max(1e-6, Math.abs((Number(orthographicCamera.top) || 1) - (Number(orthographicCamera.bottom) || -1)) * 0.5);
+    orthographicCamera.left = -halfHeight * aspect;
+    orthographicCamera.right = halfHeight * aspect;
+    orthographicCamera.updateProjectionMatrix();
+  }
+}
+
+function _setCameraClipRange(viewCamera, distance, radius) {
+  if (!viewCamera) return;
+  const dist = Math.max(1e-5, Number(distance) || 1);
+  const r = Math.max(0.0005, Number(radius) || 0.5);
+  viewCamera.near = Math.max(0.0001, Math.min(dist * 0.01, dist - r * 1.5));
+  viewCamera.far = Math.max(viewCamera.near + 1, dist + r * 4, 10);
+  viewCamera.updateProjectionMatrix();
+}
+
+function setCameraMode(mode) {
+  if (state.viewerBackend !== 'webgl' || !perspectiveCamera || !orthographicCamera || !camera) return false;
+  const nextMode = String(mode || '').toLowerCase() === 'orthographic' ? 'orthographic' : 'perspective';
+  const next = nextMode === 'orthographic' ? orthographicCamera : perspectiveCamera;
+  const target = (controls && controls.target) ? controls.target.clone() : _viewerCameraBounds(meshGroup).center;
+  const visibleHalfHeight = viewerVisibleHalfHeight(camera, target);
+  const direction = camera.position.clone().sub(target);
+  if (!(direction.length() > 1e-8)) direction.set(1, -1, 0.8);
+  direction.normalize();
+  try { next.position.copy(camera.position); } catch (e) {}
+  try { next.quaternion.copy(camera.quaternion); } catch (e) {}
+  try { next.up.copy(camera.up); } catch (e) {}
+  if (nextMode === 'orthographic') {
+    const aspect = Math.max(1e-6, Number(perspectiveCamera.aspect) || 1);
+    _setOrthographicHalfHeight(visibleHalfHeight, aspect);
+  } else {
+    const zoom = Math.max(1e-6, Number(perspectiveCamera.zoom) || 1);
+    const fov = Math.max(1, Math.min(179, Number(perspectiveCamera.fov) || 50));
+    const distance = visibleHalfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+    next.position.copy(target).addScaledVector(direction, Math.max(distance, 1e-5));
+  }
+  camera = next;
+  cameraMode = nextMode;
+  const bounds = _viewerCameraBounds(meshGroup);
+  const distance = camera.position.distanceTo(target);
+  _setCameraClipRange(camera, distance, bounds.radius);
+  try { camera.lookAt(target); } catch (e) {}
+  if (controls) {
+    controls.object = camera;
+    if (controls.target) controls.target.copy(target);
+    controls.update();
+  }
+  const selector = $('viewer-camera-mode');
+  if (selector) selector.value = nextMode;
+  try { applySliceViewOffset3d(); } catch (e) {}
+  try { updateRuler3d(); } catch (e) {}
+  try { scheduleCaptureView3d(0); } catch (e) {}
+  try { requestWebglRender(0); } catch (e) {}
+  return true;
+}
+
+function applyStandardView(name) {
+  if (state.viewerBackend !== 'webgl' || !camera) return false;
+  const key = String(name || '').trim().toUpperCase();
+  const preset = STANDARD_VIEWS[key];
+  if (!preset) return false;
+  const bounds = _viewerCameraBounds(meshGroup);
+  const center = bounds.center;
+  const direction = new THREE.Vector3(preset.direction[0], preset.direction[1], preset.direction[2]);
+  if (!(direction.length() > 1e-8)) direction.set(1, -1, 0.8);
+  direction.normalize();
+  const aspect = Math.max(1e-6, Number((perspectiveCamera && perspectiveCamera.aspect) || 1));
+  const halfHeight = Math.max(bounds.radius * 1.18 / Math.min(1, aspect), 0.001);
+  let distance = Math.max(bounds.radius * 3, 0.01);
+  if (camera.isPerspectiveCamera) {
+    const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
+    const fov = Math.max(1, Math.min(179, Number(camera.fov) || 50));
+    distance = halfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+  } else {
+    _setOrthographicHalfHeight(halfHeight, aspect);
+  }
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.up.set(preset.up[0], preset.up[1], preset.up[2]);
+  _setCameraClipRange(camera, distance, bounds.radius);
+  try { camera.lookAt(center); } catch (e) {}
+  if (controls) {
+    controls.object = camera;
+    if (controls.target) controls.target.copy(center);
+    controls.update();
+  }
+  try { applySliceViewOffset3d(); } catch (e) {}
+  try { updateSlicePlane3d(); } catch (e) {}
+  try { updateRuler3d(); } catch (e) {}
+  try { scheduleCaptureView3d(0); } catch (e) {}
+  try { requestWebglRender(0); } catch (e) {}
+  return true;
+}
+
+function bindViewerCameraControls() {
+  const modeSelector = $('viewer-camera-mode');
+  if (modeSelector && !(modeSelector.dataset && modeSelector.dataset.viewerCameraBound === 'true')) {
+    modeSelector.addEventListener('change', () => { setCameraMode(modeSelector.value); });
+    if (modeSelector.dataset) modeSelector.dataset.viewerCameraBound = 'true';
+  }
+  const viewButtonIds = [
+    'viewer-view-iso', 'viewer-view-top', 'viewer-view-bottom', 'viewer-view-front',
+    'viewer-view-back', 'viewer-view-left', 'viewer-view-right'
+  ];
+  for (const id of viewButtonIds) {
+    const button = $(id);
+    if (!button || (button.dataset && button.dataset.viewerCameraBound === 'true')) continue;
+    button.addEventListener('click', () => {
+      const name = button.dataset ? button.dataset.standardView : '';
+      applyStandardView(name);
+    });
+    if (button.dataset) button.dataset.viewerCameraBound = 'true';
+  }
+}
+
 function webglCapability() {
   try {
     const probeCanvas = document.createElement('canvas');
@@ -93659,6 +93863,20 @@ function _updateViewerBackendUI() {
   if (cutawayWrap) {
     cutawayWrap.title = cutawayReason;
     try { cutawayWrap.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
+  }
+  const cameraControlIds = [
+    'viewer-camera-mode', 'viewer-view-iso', 'viewer-view-top', 'viewer-view-bottom',
+    'viewer-view-front', 'viewer-view-back', 'viewer-view-left', 'viewer-view-right'
+  ];
+  for (const id of cameraControlIds) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.dataset && !el.dataset.webglTitle) el.dataset.webglTitle = String(el.title || 'WebGL 标准视图');
+    el.disabled = remote;
+    el.title = remote
+      ? `Host Render 暂不支持相机模式与标准视图：${reason}`
+      : String((el.dataset && el.dataset.webglTitle) || 'WebGL 标准视图');
+    try { el.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
   }
 }
 
@@ -94794,6 +95012,9 @@ function initViewer() {
   renderer = null;
   scene = null;
   camera = null;
+  perspectiveCamera = null;
+  orthographicCamera = null;
+  cameraMode = 'perspective';
   meshGroup = null;
   loader = null;
   controls = null;
@@ -94828,9 +95049,14 @@ function initViewer() {
   try { renderer.info.autoReset = false; } catch (e) {}  // Manual reset for better control
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f172a);
-  camera = new THREE.PerspectiveCamera(50, 1, 0.001, 1000);
-  try { camera.up.set(0, 0, 1); } catch (e) {}
-  camera.position.set(0.3, 0.3, 0.3);
+  perspectiveCamera = new THREE.PerspectiveCamera(50, 1, 0.001, 1000);
+  orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1000);
+  camera = perspectiveCamera;
+  cameraMode = 'perspective';
+  try { perspectiveCamera.up.set(0, 0, 1); } catch (e) {}
+  try { orthographicCamera.up.set(0, 0, 1); } catch (e) {}
+  perspectiveCamera.position.set(0.3, 0.3, 0.3);
+  orthographicCamera.position.set(0.3, 0.3, 0.3);
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
 
@@ -94864,8 +95090,7 @@ function initViewer() {
         const rect = canvas.getBoundingClientRect();
         try { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number(getClientPerf().dprCap) || 1)); } catch (e) {}
         renderer.setSize(rect.width, rect.height, false);
-        camera.aspect = rect.width / rect.height;
-        camera.updateProjectionMatrix();
+        _resizeViewerCameras(rect.width, rect.height);
         try { applySliceViewOffset3d(); } catch (e) {}
         requestWebglRender(0);
       };
@@ -94906,6 +95131,9 @@ function initViewer() {
     loader = null;
     meshGroup = null;
     camera = null;
+    perspectiveCamera = null;
+    orthographicCamera = null;
+    cameraMode = 'perspective';
     scene = null;
     renderer = null;
     state.viewerReady = false;
@@ -96464,14 +96692,23 @@ function fitCameraToObject(object3d) {
       meshCenterOffset = center.clone();
     } catch (e) {}
     object3d.position.sub(center);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    // Default zoom: fit more tightly so the structure appears larger by default.
-    const dist = Math.max(maxDim * 1.35, 0.08);
-    camera.position.set(dist, dist * 0.85, dist);
-    camera.near = Math.max(dist / 2000, 0.0001);
-    camera.far = Math.max(dist * 2000, 10);
-    camera.updateProjectionMatrix();
+    const radius = Math.max(Math.hypot(size.x, size.y, size.z) * 0.5, 0.0005);
+    const aspect = Math.max(1e-6, Number((perspectiveCamera && perspectiveCamera.aspect) || 1));
+    const halfHeight = Math.max(radius * 1.18 / Math.min(1, aspect), 0.001);
+    let dist = Math.max(radius * 3, 0.08);
+    if (camera.isPerspectiveCamera) {
+      const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
+      const fov = Math.max(1, Math.min(179, Number(camera.fov) || 50));
+      dist = halfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+    } else if (camera.isOrthographicCamera) {
+      _setOrthographicHalfHeight(halfHeight, aspect);
+    }
+    const direction = new THREE.Vector3(1, 0.85, 1).normalize();
+    camera.position.copy(direction).multiplyScalar(Math.max(dist, 0.01));
+    _setCameraClipRange(camera, dist, radius);
+    try { camera.lookAt(new THREE.Vector3(0, 0, 0)); } catch (e) {}
     if (controls) {
+      controls.object = camera;
       controls.target.set(0, 0, 0);
       controls.update();
     }
@@ -100780,6 +101017,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (pSolid) pSolid.addEventListener('change', () => { if (pSolid.checked) updatePreviewStyleFromUI(true); });
   if (pFast) pFast.addEventListener('change', () => { if (pFast.checked) updatePreviewStyleFromUI(true); });
   if (pElem) pElem.addEventListener('change', () => { if (pElem.checked) updatePreviewStyleFromUI(true); });
+  bindViewerCameraControls();
   $('refresh-preview-btn').addEventListener('click', restoreDefaultView);
   const rulerBtn = $('toggle-ruler3d-btn');
   if (rulerBtn) rulerBtn.addEventListener('click', () => {

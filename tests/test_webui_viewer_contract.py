@@ -163,6 +163,12 @@ const state = {{ viewerReady: false, viewerBackend: 'pending', viewerFallbackRea
 const window = {{ devicePixelRatio: 1, addEventListener(kind) {{ events.push(`listen:${{kind}}`); }} }};
 function Node() {{ this.position = {{ set() {{}} }}; }}
 Node.prototype.add = function () {{}};
+function Camera(kind) {{
+  this.kind = kind;
+  this.up = {{ set() {{}} }};
+  this.position = {{ set() {{}} }};
+  this.updateProjectionMatrix = function () {{}};
+}}
 const THREE = window.THREE = {{
   WebGLRenderer: function () {{
     events.push(`renderer:backend=${{state.viewerBackend}}`);
@@ -179,16 +185,23 @@ const THREE = window.THREE = {{
   Object3D: {{ DEFAULT_UP: {{ set() {{}} }} }},
   Scene: function () {{ this.add = function () {{}}; }},
   Color: function () {{}},
-  PerspectiveCamera: function () {{ this.up = {{ set() {{}} }}; this.position = {{ set() {{}} }}; this.updateProjectionMatrix = function () {{}}; }},
+  PerspectiveCamera: function () {{ events.push('perspective-camera'); Camera.call(this, 'perspective'); }},
+  OrthographicCamera: function () {{ events.push('orthographic-camera'); Camera.call(this, 'orthographic'); }},
   Group: function () {{}},
   HemisphereLight: Node,
   DirectionalLight: Node,
   AmbientLight: Node,
+  OrbitControls: function (object) {{
+    events.push(`controls:${{object.kind}}`);
+    this.object = object;
+    this.addEventListener = function () {{}};
+  }},
   ACESFilmicToneMapping: 1,
   sRGBEncoding: 2,
   SRGBColorSpace: 3
 }};
-let renderer = null, scene = null, camera = null, meshGroup = null, loader = null, controls = null;
+let renderer = null, scene = null, camera = null, perspectiveCamera = null, orthographicCamera = null, meshGroup = null, loader = null, controls = null;
+let cameraMode = 'perspective';
 let _viewerResizeHandler = null;
 function $(id) {{ if (id !== 'viewer-canvas') throw new Error(`unexpected ${{id}}`); return actualCanvas; }}
 function webglCapability() {{ events.push('capability'); return {{ ok: true, version: 2, reason: '' }}; }}
@@ -201,9 +214,17 @@ function requestWebglRender() {{}}
 function updateRuler3d() {{}}
 function applySliceViewOffset3d() {{}}
 function _updateViewerBackendUI() {{ events.push('backend-ui'); }}
+{_camera_contract_source()}
 {init_viewer}
 initViewer();
-console.log(JSON.stringify({{ events, state }}));
+console.log(JSON.stringify({{
+  events,
+  state,
+  dualCameras: !!perspectiveCamera && !!orthographicCamera,
+  activeIsPerspective: camera === perspectiveCamera,
+  controlsOwnsActive: !!controls && controls.object === camera,
+  cameraMode
+}}));
 """
         )
 
@@ -212,6 +233,10 @@ console.log(JSON.stringify({{ events, state }}));
         self.assertEqual(result["state"]["viewerWebglVersion"], 1)
         self.assertEqual(result["state"]["viewerFallbackReason"], "")
         self.assertTrue(result["state"]["viewerReady"])
+        self.assertTrue(result["dualCameras"])
+        self.assertTrue(result["activeIsPerspective"])
+        self.assertTrue(result["controlsOwnsActive"])
+        self.assertEqual(result["cameraMode"], "perspective")
 
     def test_post_renderer_initialization_failures_are_atomic(self):
         normalize_reason = _extract_function(
@@ -293,6 +318,11 @@ function runCase(which) {{
     }},
     Color: function () {{}},
     PerspectiveCamera: function () {{
+      this.up = {{ set() {{}} }};
+      this.position = {{ set() {{}} }};
+      this.updateProjectionMatrix = function () {{}};
+    }},
+    OrthographicCamera: function () {{
       this.up = {{ set() {{}} }};
       this.position = {{ set() {{}} }};
       this.updateProjectionMatrix = function () {{}};
@@ -411,6 +441,7 @@ function makeCamera(kind) {
   };
 }
 const THREE = { Vector3, Box3 };
+const window = { THREE };
 let perspectiveCamera = makeCamera('perspective');
 let orthographicCamera = makeCamera('orthographic');
 let camera = perspectiveCamera;
@@ -555,6 +586,106 @@ console.log(JSON.stringify({{ remote, webgl }}));
         self.assertTrue(all(not item["disabled"] for item in result["webgl"]))
         self.assertTrue(all(item["title"].startswith("original:") for item in result["webgl"]))
         self.assertTrue(all(item["aria"] == "false" for item in result["webgl"]))
+
+    def test_camera_control_events_dispatch_mode_and_standard_view(self):
+        bind_controls = _extract_function(
+            "bindViewerCameraControls", "webglCapability"
+        )
+        result = _run_node(
+            f"""
+const calls = [];
+function makeElement(value = '') {{
+  return {{
+    value,
+    dataset: {{}},
+    listeners: {{}},
+    addEventListener(kind, fn) {{ this.listeners[kind] = fn; }}
+  }};
+}}
+const elements = {{
+  'viewer-camera-mode': makeElement('perspective'),
+  'viewer-view-iso': makeElement(),
+  'viewer-view-top': makeElement()
+}};
+elements['viewer-view-iso'].dataset.standardView = 'ISO';
+elements['viewer-view-top'].dataset.standardView = 'TOP';
+function $(id) {{ return elements[id] || null; }}
+function setCameraMode(mode) {{ calls.push(`mode:${{mode}}`); return true; }}
+function applyStandardView(name) {{ calls.push(`view:${{name}}`); return true; }}
+{bind_controls}
+bindViewerCameraControls();
+elements['viewer-camera-mode'].value = 'orthographic';
+elements['viewer-camera-mode'].listeners.change();
+elements['viewer-view-iso'].listeners.click();
+elements['viewer-view-top'].listeners.click();
+console.log(JSON.stringify({{ calls }}));
+"""
+        )
+
+        self.assertEqual(
+            result["calls"],
+            ["mode:orthographic", "view:ISO", "view:TOP"],
+        )
+        self.assertRegex(
+            tcad._WEBUI_INDEX_HTML,
+            r'id="viewer-camera-controls"[^>]+aria-label="[^"]+"',
+        )
+        for suffix in ("iso", "top", "bottom", "front", "back", "left", "right"):
+            self.assertRegex(
+                tcad._WEBUI_INDEX_HTML,
+                rf'id="viewer-view-{suffix}"[^>]+aria-label="[^"]+"',
+            )
+
+    def test_capture_and_restore_preserve_projection_mode_and_legacy_views(self):
+        capture = _extract_function("captureView3dNow", "scheduleCaptureView3d")
+        apply_view = _extract_function("applyView3d", "centerObjectAtOrigin")
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + capture
+            + apply_view
+            + r"""
+camera = orthographicCamera;
+cameraMode = 'orthographic';
+controls.object = camera;
+camera.position.set(9, -3, 7);
+camera.up.set(0, 0, 1);
+camera.zoom = 1.75;
+controls.target.set(2, 4, 6);
+captureView3dNow();
+const saved = JSON.parse(JSON.stringify(state.view3d));
+
+camera = perspectiveCamera;
+cameraMode = 'perspective';
+controls.object = camera;
+const restored = applyView3d(saved);
+const restoredMode = cameraMode;
+const restoredOwnsControls = controls.object === orthographicCamera;
+const restoredPosition = [camera.position.x, camera.position.y, camera.position.z];
+
+const legacy = { pos: [1, 2, 3], target: [4, 5, 6], up: [0, 0, 1], zoom: 1 };
+const legacyRestored = applyView3d(legacy);
+console.log(JSON.stringify({
+  saved,
+  restored,
+  restoredMode,
+  restoredOwnsControls,
+  restoredPosition,
+  legacyRestored,
+  legacyMode: cameraMode,
+  legacyPosition: [camera.position.x, camera.position.y, camera.position.z]
+}));
+"""
+        )
+
+        self.assertEqual(result["saved"]["cameraMode"], "orthographic")
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["restoredMode"], "orthographic")
+        self.assertTrue(result["restoredOwnsControls"])
+        self.assertEqual(result["restoredPosition"], [9, -3, 7])
+        self.assertTrue(result["legacyRestored"])
+        self.assertEqual(result["legacyMode"], "orthographic")
+        self.assertEqual(result["legacyPosition"], [1, 2, 3])
 
 
 if __name__ == "__main__":
