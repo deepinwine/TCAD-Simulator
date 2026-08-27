@@ -137,6 +137,7 @@ console.log(JSON.stringify({{ events, state, rendererIsNull: renderer === null }
         self.assertTrue(result["rendererIsNull"])
 
     def test_backend_becomes_webgl_only_after_renderer_succeeds(self):
+        self.assertRegex(tcad._WEBUI_SCRIPT_JS, r"viewerBackend:\s*'pending'")
         init_viewer = _extract_function("initViewer", "formatLenNm")
         result = _run_node(
             f"""
@@ -145,7 +146,7 @@ const actualCanvas = {{
   getContext() {{ throw new Error('real canvas getContext must not be called directly'); }},
   getBoundingClientRect() {{ return {{ width: 640, height: 480 }}; }}
 }};
-const state = {{ viewerReady: false, viewerBackend: 'remote', viewerFallbackReason: 'old', forceRender: null }};
+const state = {{ viewerReady: false, viewerBackend: 'pending', viewerFallbackReason: 'old', forceRender: null }};
 const window = {{ devicePixelRatio: 1, addEventListener(kind) {{ events.push(`listen:${{kind}}`); }} }};
 function Node() {{ this.position = {{ set() {{}} }}; }}
 Node.prototype.add = function () {{}};
@@ -193,13 +194,16 @@ console.log(JSON.stringify({{ events, state }}));
 """
         )
 
-        self.assertIn("renderer:backend=remote", result["events"])
+        self.assertIn("renderer:backend=pending", result["events"])
         self.assertEqual(result["state"]["viewerBackend"], "webgl")
         self.assertEqual(result["state"]["viewerWebglVersion"], 2)
         self.assertEqual(result["state"]["viewerFallbackReason"], "")
         self.assertTrue(result["state"]["viewerReady"])
 
     def test_remote_status_is_visible_and_webgl_only_cutaway_is_disabled(self):
+        normalize_reason = _extract_function(
+            "_normalizeViewerFallbackReason", "_updateViewerBackendUI"
+        )
         update_ui = _extract_function("_updateViewerBackendUI", "_remoteCaptureView")
         result = _run_node(
             f"""
@@ -211,6 +215,7 @@ const elements = {{
 }};
 const state = {{ viewerBackend: 'remote', viewerFallbackReason: '<b>GPU failed</b>' }};
 function $(id) {{ return elements[id] || null; }}
+{normalize_reason}
 {update_ui}
 _updateViewerBackendUI();
 console.log(JSON.stringify({{ elements, state }}));

@@ -82593,6 +82593,7 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                   <input id="material-color-picker" type="color" style="position:fixed; left:-1000px; top:-1000px; width:1px; height:1px; opacity:0" />
                   <div class="viewer-slice-info" id="slice-info" style="display:none"></div>
                   <div class="viewer-ruler" id="viewer-ruler" style="display:none"></div>
+                  <div class="viewer-backend-status" id="viewer-backend-status" hidden></div>
                   <div class="viewer-hint" id="viewer-hint">提示：鼠标拖拽旋转，滚轮缩放，右键平移</div>
             </div>
           </div>
@@ -84023,6 +84024,26 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   background: rgba(15,23,42,0.55);
   border: 1px solid rgba(148,163,184,0.18);
 }
+.viewer-backend-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 8;
+  max-width: min(72%, 720px);
+  color: #fef3c7;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: rgba(120, 53, 15, 0.90);
+  border: 1px solid rgba(251, 191, 36, 0.62);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.28);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.viewer-backend-status[hidden] { display: none !important; }
 
         .viewer-ruler {
           position: absolute;
@@ -84394,7 +84415,9 @@ const state = {
   elementVisible: {}, // el:<name> -> boolean (persisted in recipe config)
   meshes: new Map(), // mat_id -> THREE.Mesh
   viewerReady: false,
-  viewerBackend: 'webgl', // 'webgl' | 'remote'
+  viewerBackend: 'pending', // 'pending' | 'webgl' | 'remote'
+  viewerWebglVersion: 0,
+  viewerFallbackReason: '',
   viewerMode: '3d', // '3d' | '2d'
   ruler3d: 0, // 0=off, 1=grid, 2=grid+labels
   view3d: null, // { pos:[x,y,z], target:[x,y,z], up:[x,y,z], zoom:number }
@@ -93161,6 +93184,7 @@ let camera = null;
 let controls = null;
 let loader = null;
 let meshGroup = null;
+let _viewerResizeHandler = null;
 let rulerGroup = null;
 let rulerGrid = null;
 let rulerGridMajor = null;
@@ -93577,13 +93601,17 @@ function setVideoOverlayText(text) {
   try { requestWebglRender(0); } catch (e) {}
 }
 
-function _webglAvailable(canvas) {
+function webglCapability() {
   try {
-    const c = canvas || document.createElement('canvas');
-    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
-    return !!gl;
+    const probeCanvas = document.createElement('canvas');
+    const webgl2 = probeCanvas.getContext('webgl2');
+    if (webgl2) return { ok: true, version: 2, reason: '' };
+    const webgl1 = probeCanvas.getContext('webgl') || probeCanvas.getContext('experimental-webgl');
+    if (webgl1) return { ok: true, version: 1, reason: '' };
+    return { ok: false, version: 0, reason: 'WebGL 2/1 context unavailable' };
   } catch (e) {
-    return false;
+    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
+    return { ok: false, version: 0, reason: `WebGL probe failed: ${detail || 'unknown error'}` };
   }
 }
 
@@ -93594,21 +93622,44 @@ function _autoFallbackEnabled() {
   return true;
 }
 
-function _shouldUseRemoteViewer() {
-  const forced = String(state.forceRender || '').toLowerCase();
-  if (forced === 'remote') return true;
-  if (forced === 'webgl') return false;
-  const canvas = $('viewer-canvas');
-  // Default policy: prefer client-side WebGL once the 3D model is loaded, so rotate/pan/color
-  // remain fully client-local with minimal host CPU usage.
-  // Host-assisted (G-buffer) rendering is only used when WebGL is unavailable or explicitly forced.
-  const ok = _webglAvailable(canvas);
-  if (ok) return false;
-  // If WebGL is unavailable:
-  // - Prefer Host Render when enabled by the server/GUI (clients without WebGL/GPU).
-  // - Otherwise only use Host Render when auto-fallback is enabled.
-  try { if (state && state.server && state.server.host_assisted_render) return true; } catch (e) {}
-  return _autoFallbackEnabled();
+function _normalizeViewerFallbackReason(reason) {
+  let text = '';
+  try { text = String(reason == null ? '' : reason); } catch (e) { text = ''; }
+  text = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) text = 'WebGL unavailable';
+  return text.slice(0, 180);
+}
+
+function _updateViewerBackendUI() {
+  const remote = (state.viewerBackend === 'remote');
+  const reason = remote ? _normalizeViewerFallbackReason(state.viewerFallbackReason) : '';
+  const status = $('viewer-backend-status');
+  if (status) {
+    status.textContent = remote ? `Host Render · ${reason}` : '';
+    status.title = remote ? reason : '';
+    status.hidden = !remote;
+  }
+  const hint = $('viewer-hint');
+  if (hint && state.viewerMode !== '2d') {
+    hint.textContent = remote
+      ? `Host Render · ${reason} · 拖拽旋转，滚轮缩放，右键/双指平移`
+      : '提示：鼠标拖拽旋转，滚轮缩放，右键平移';
+    if (remote) hint.style.display = '';
+  }
+  const cutaway = $('slice-cutaway-toggle');
+  const cutawayWrap = $('slice-cutaway-toggle-wrap');
+  const cutawayReason = remote
+    ? `Host Render 暂不支持“切开”：${reason}`
+    : '切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）';
+  if (cutaway) {
+    cutaway.disabled = remote;
+    cutaway.title = cutawayReason;
+    if (remote) cutaway.checked = false;
+  }
+  if (cutawayWrap) {
+    cutawayWrap.title = cutawayReason;
+    try { cutawayWrap.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
+  }
 }
 
 function _remoteCaptureView() {
@@ -94586,17 +94637,30 @@ function scheduleRemoteRender(highRes = true, delayMs = 120) {
   }, Math.max(0, delayMs));
 }
 
-function initRemoteViewer() {
-  const canvas = $('viewer-canvas');
+function initRemoteViewer(reason) {
+  let canvas = $('viewer-canvas');
   if (!canvas) return;
-  remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+  const fallbackReason = _normalizeViewerFallbackReason(reason);
+  try { remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false }); } catch (e) { remoteCtx = null; }
+  // A renderer may fail after claiming a WebGL context. Context types cannot be changed on the
+  // same element, so replace only that unusable canvas before starting the 2D Host Render path.
+  if (!remoteCtx) {
+    try {
+      const replacement = canvas.cloneNode(false);
+      canvas.replaceWith(replacement);
+      canvas = replacement;
+      remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+    } catch (e) { remoteCtx = null; }
+  }
   if (!remoteCtx) {
     showNotification('浏览器不支持 Canvas 2D，无法启用 Host Render。', 4200);
     return;
   }
   state.viewerBackend = 'remote';
+  state.viewerWebglVersion = 0;
+  state.viewerFallbackReason = fallbackReason;
   state.viewerReady = true;
-  try { $('viewer-hint').textContent = 'Host Render：拖拽旋转，滚轮缩放，右键/双指平移'; } catch (e) {}
+  try { _updateViewerBackendUI(); } catch (e) {}
   // Seed visibility list.
   try {
     remoteVisibleMatIds = new Set();
@@ -94699,16 +94763,22 @@ function initRemoteViewer() {
 
 function initViewer() {
   if (state.viewerReady) return;
-  if (_shouldUseRemoteViewer()) {
-    initRemoteViewer();
+  const forced = String(state.forceRender || '').trim().toLowerCase();
+  if (forced === 'remote') {
+    initRemoteViewer('Host Render requested');
+    return;
+  }
+  const capability = webglCapability();
+  if (!capability.ok) {
+    initRemoteViewer(capability.reason);
     return;
   }
   if (!window.THREE || !THREE.WebGLRenderer) {
-    showNotification('three.js 未就绪（请检查 /static/three.js）');
+    initRemoteViewer('three.js WebGLRenderer unavailable');
     return;
   }
   if (!THREE.STLLoader) {
-    showNotification('STLLoader 未就绪（请检查 /static/STLLoader.js）');
+    initRemoteViewer('three.js STLLoader unavailable');
     return;
   }
   const perf = getClientPerf();
@@ -94716,7 +94786,12 @@ function initViewer() {
   // Three.js defaults to Y-up, so switch default up to Z-up before creating camera/controls.
   try { THREE.Object3D.DEFAULT_UP.set(0, 0, 1); } catch (e) {}
   const canvas = $('viewer-canvas');
+  if (!canvas) {
+    initRemoteViewer('Viewer canvas unavailable');
+    return;
+  }
   const autoFallback = _autoFallbackEnabled();
+  renderer = null;
   try {
     const powerPreference = (perf.onDemand || getRenderQuality() !== 'high') ? 'low-power' : 'high-performance';
     const opts = {
@@ -94735,12 +94810,12 @@ function initViewer() {
     if (autoFallback) opts.failIfMajorPerformanceCaveat = true;
     renderer = new THREE.WebGLRenderer(opts);
   } catch (e) {
-    if (autoFallback) {
-      try { showNotification('WebGL 初始化失败，尝试 Host Render...', 2600); } catch (e2) {}
-      try { initRemoteViewer(); } catch (e2) {}
-      return;
-    }
-    try { showNotification('WebGL 初始化失败：' + e, 4200); } catch (e2) {}
+    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
+    try { if (renderer && typeof renderer.dispose === 'function') renderer.dispose(); } catch (e2) {}
+    try { if (renderer && typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (e2) {}
+    renderer = null;
+    try { showNotification('WebGL 初始化失败，切换 Host Render...', 2600); } catch (e2) {}
+    initRemoteViewer(`WebGL renderer initialization failed: ${detail || 'unknown error'}`);
     return;
   }
   try { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number(perf.dprCap) || 1)); } catch (e) {}
@@ -94797,11 +94872,20 @@ function initViewer() {
         try { applySliceViewOffset3d(); } catch (e) {}
         requestWebglRender(0);
       };
-  window.addEventListener('resize', resize);
+  try {
+    if (_viewerResizeHandler) window.removeEventListener('resize', _viewerResizeHandler);
+  } catch (e) {}
+  _viewerResizeHandler = resize;
+  window.addEventListener('resize', _viewerResizeHandler);
   resize();
   requestWebglRender(0);
-  state.viewerReady = true;
   state.viewerBackend = 'webgl';
+  state.viewerWebglVersion = (renderer && renderer.capabilities && renderer.capabilities.isWebGL2)
+    ? 2
+    : (capability.version || 1);
+  state.viewerFallbackReason = '';
+  state.viewerReady = true;
+  try { _updateViewerBackendUI(); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
 }
 
@@ -97507,7 +97591,7 @@ function applySliceOverlayUI(triggerRefresh = false) {
               if (cutWrap) {
                 cutWrap.title = canCut
               ? '切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）'
-              : 'Host Render 暂不支持“切开”。请切换为 WebGL 预览后使用。';
+              : `Host Render 暂不支持“切开”：${_normalizeViewerFallbackReason(state.viewerFallbackReason)}`;
           }
           if (cutCb) {
             cutCb.checked = !!state.sliceCutaway;
@@ -97559,8 +97643,9 @@ function applySliceOverlayUI(triggerRefresh = false) {
       } catch (e) {}
       try {
         const hint = $('viewer-hint');
-        if (hint) hint.style.display = active ? 'none' : '';
+        if (hint) hint.style.display = (active && state.viewerBackend === 'webgl') ? 'none' : '';
       } catch (e) {}
+      try { _updateViewerBackendUI(); } catch (e) {}
       try { applySliceViewOffset3d(); } catch (e) {}
 
       if (triggerRefresh && active) {
