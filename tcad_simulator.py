@@ -84433,7 +84433,7 @@ const state = {
   viewerFallbackReason: '',
   viewerMode: '3d', // '3d' | '2d'
   ruler3d: 0, // 0=off, 1=grid, 2=grid+labels
-  view3d: null, // { pos:[x,y,z], target:[x,y,z], up:[x,y,z], zoom:number }
+  view3d: null, // { pos, target, up, zoom, cameraMode?, orthographicVisibleHalfHeight? }
   _viewApplying: false,
       sliceAxis: 'X',
       sliceIndex: 0,
@@ -93353,13 +93353,20 @@ function captureView3dNow() {
     if (!tar) tar = { x: 0, y: 0, z: 0 };
     const up = camera.up || { x: 0, y: 0, z: 1 };
     const zoom = Number.isFinite(camera.zoom) ? camera.zoom : 1.0;
-    state.view3d = {
+    const capturedView = {
       pos: [Number(pos.x) || 0, Number(pos.y) || 0, Number(pos.z) || 0],
       target: [Number(tar.x) || 0, Number(tar.y) || 0, Number(tar.z) || 0],
       up: [Number(up.x) || 0, Number(up.y) || 0, Number(up.z) || 1],
       zoom: zoom,
       cameraMode: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
     };
+    if (camera.isOrthographicCamera) {
+      const visibleHalfHeight = viewerVisibleHalfHeight(camera, tar);
+      if (Number.isFinite(visibleHalfHeight) && visibleHalfHeight > 0) {
+        capturedView.orthographicVisibleHalfHeight = visibleHalfHeight;
+      }
+    }
+    state.view3d = capturedView;
   } catch (e) {}
 }
 
@@ -93390,14 +93397,22 @@ function applyView3d(view) {
     if (Array.isArray(view.up) && view.up.length >= 3) {
       camera.up.set(Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1);
     }
-    if (Number.isFinite(view.zoom)) camera.zoom = view.zoom;
-    camera.updateProjectionMatrix();
     if (controls && controls.target) {
       controls.target.set(Number(target[0]) || 0, Number(target[1]) || 0, Number(target[2]) || 0);
-      controls.update();
     } else {
       camera.lookAt(new THREE.Vector3(Number(target[0]) || 0, Number(target[1]) || 0, Number(target[2]) || 0));
     }
+    const savedVisibleHalfHeight = Number(view.orthographicVisibleHalfHeight);
+    if (camera.isOrthographicCamera && Number.isFinite(savedVisibleHalfHeight) && savedVisibleHalfHeight > 0) {
+      const rawAspect = Number(perspectiveCamera && perspectiveCamera.aspect);
+      const fullFrustumAspect = (Number.isFinite(rawAspect) && rawAspect > 0) ? rawAspect : 1;
+      _setOrthographicHalfHeight(savedVisibleHalfHeight, fullFrustumAspect);
+      camera.zoom = 1;
+    } else if (Number.isFinite(view.zoom)) {
+      camera.zoom = view.zoom;
+    }
+    camera.updateProjectionMatrix();
+    if (controls && controls.target) controls.update();
     return true;
   } catch (e) {
     return false;

@@ -930,6 +930,92 @@ console.log(JSON.stringify({
         self.assertEqual(result["legacyMode"], "orthographic")
         self.assertEqual(result["legacyPosition"], [1, 2, 3])
 
+    def test_fresh_camera_roundtrip_restores_orthographic_visible_scale(self):
+        capture = _extract_function("captureView3dNow", "scheduleCaptureView3d")
+        apply_view = _extract_function("applyView3d", "centerObjectAtOrigin")
+        result = _run_node(
+            self._node_prelude()
+            + _camera_contract_source()
+            + capture
+            + apply_view
+            + r"""
+camera = orthographicCamera;
+cameraMode = 'orthographic';
+controls.object = camera;
+camera.left = -40;
+camera.right = 40;
+camera.top = 20;
+camera.bottom = -20;
+camera.zoom = 2;
+camera.position.set(9, -3, 7);
+camera.up.set(0, 0, 1);
+controls.target.set(2, 4, 6);
+const before = viewerVisibleHalfHeight(camera, controls.target);
+captureView3dNow();
+const saved = JSON.parse(JSON.stringify(state.view3d));
+
+perspectiveCamera = makeCamera('perspective');
+perspectiveCamera.aspect = 2.5;
+orthographicCamera = makeCamera('orthographic');
+camera = perspectiveCamera;
+cameraMode = 'perspective';
+controls.object = camera;
+controls.target.set(0, 0, 0);
+
+const restored = applyView3d(saved);
+const after = viewerVisibleHalfHeight(camera, controls.target);
+console.log(JSON.stringify({
+  before,
+  saved,
+  restored,
+  after,
+  cameraMode,
+  target: [controls.target.x, controls.target.y, controls.target.z],
+  activeIsFreshOrtho: camera === orthographicCamera,
+  controlsOwnsFreshOrtho: controls.object === orthographicCamera,
+  frustum: [camera.left, camera.right, camera.top, camera.bottom, camera.zoom]
+}));
+"""
+        )
+
+        self.assertEqual(result["before"], 10)
+        self.assertEqual(result["saved"].get("orthographicVisibleHalfHeight"), 10)
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["cameraMode"], "orthographic")
+        self.assertEqual(result["target"], [2, 4, 6])
+        self.assertTrue(result["activeIsFreshOrtho"])
+        self.assertTrue(result["controlsOwnsFreshOrtho"])
+        self.assertAlmostEqual(result["after"], 10, places=8)
+        self.assertEqual(result["frustum"], [-25, 25, 10, -10, 1])
+
+    def test_remote_apply_ignores_orthographic_scale_metadata(self):
+        remote_apply = _extract_function("remoteApplyView", "remoteResetView")
+        result = _run_node(
+            r"""
+const state = {};
+const remoteOrbit = { theta: 0, phi: 0, radius: 1, target: [0, 0, 0], up: [0, 0, 1] };
+const events = [];
+function _remoteCaptureView() { events.push('capture'); }
+function scheduleRemoteRender(highRes, delay) { events.push(`render:${highRes}:${delay}`); }
+"""
+            + remote_apply
+            + r"""
+const ok = remoteApplyView({
+  pos: [12, 4, 6],
+  target: [2, 4, 6],
+  up: [0, 0, 1],
+  cameraMode: 'orthographic',
+  orthographicVisibleHalfHeight: 10
+});
+console.log(JSON.stringify({ ok, remoteOrbit, events }));
+"""
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["remoteOrbit"]["target"], [2, 4, 6])
+        self.assertEqual(result["remoteOrbit"]["radius"], 10)
+        self.assertEqual(result["events"], ["capture", "render:true:30"])
+
 
 if __name__ == "__main__":
     unittest.main()
