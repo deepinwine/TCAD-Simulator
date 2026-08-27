@@ -94792,6 +94792,12 @@ function initViewer() {
   }
   const autoFallback = _autoFallbackEnabled();
   renderer = null;
+  scene = null;
+  camera = null;
+  meshGroup = null;
+  loader = null;
+  controls = null;
+  let initResizeHandler = null;
   try {
     const powerPreference = (perf.onDemand || getRenderQuality() !== 'high') ? 'low-power' : 'high-performance';
     const opts = {
@@ -94809,15 +94815,6 @@ function initViewer() {
     // When enabled, reject software WebGL (SwiftShader) to avoid pegging client CPU; we can fall back to Host Render.
     if (autoFallback) opts.failIfMajorPerformanceCaveat = true;
     renderer = new THREE.WebGLRenderer(opts);
-  } catch (e) {
-    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
-    try { if (renderer && typeof renderer.dispose === 'function') renderer.dispose(); } catch (e2) {}
-    try { if (renderer && typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (e2) {}
-    renderer = null;
-    try { showNotification('WebGL 初始化失败，切换 Host Render...', 2600); } catch (e2) {}
-    initRemoteViewer(`WebGL renderer initialization failed: ${detail || 'unknown error'}`);
-    return;
-  }
   try { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number(perf.dprCap) || 1)); } catch (e) {}
   try { renderer.setClearColor(0x0f172a, 1.0); } catch (e) {}
   try { renderer.physicallyCorrectLights = true; } catch (e) {}
@@ -94876,17 +94873,49 @@ function initViewer() {
     if (_viewerResizeHandler) window.removeEventListener('resize', _viewerResizeHandler);
   } catch (e) {}
   _viewerResizeHandler = resize;
+  initResizeHandler = resize;
   window.addEventListener('resize', _viewerResizeHandler);
   resize();
   requestWebglRender(0);
   state.viewerBackend = 'webgl';
-  state.viewerWebglVersion = (renderer && renderer.capabilities && renderer.capabilities.isWebGL2)
-    ? 2
-    : (capability.version || 1);
+  state.viewerWebglVersion = (renderer && renderer.capabilities && renderer.capabilities.isWebGL2 === true) ? 2 : 1;
   state.viewerFallbackReason = '';
   state.viewerReady = true;
   try { _updateViewerBackendUI(); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
+  } catch (e) {
+    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
+    const fallbackReason = _normalizeViewerFallbackReason(
+      `WebGL viewer initialization failed: ${detail || 'unknown error'}`
+    );
+    if (initResizeHandler) {
+      try { window.removeEventListener('resize', initResizeHandler); } catch (e2) {}
+      if (_viewerResizeHandler === initResizeHandler) _viewerResizeHandler = null;
+    }
+    try { _webglAnimActive = false; } catch (e2) {}
+    try { _webglNeedRender = false; } catch (e2) {}
+    try {
+      if (_webglRenderTimer) clearTimeout(_webglRenderTimer);
+      _webglRenderTimer = null;
+    } catch (e2) {}
+    try { if (controls && typeof controls.dispose === 'function') controls.dispose(); } catch (e2) {}
+    try { if (scene) disposeObject3DDeep(scene); } catch (e2) {}
+    try { if (renderer && typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (e2) {}
+    try { if (renderer && typeof renderer.dispose === 'function') renderer.dispose(); } catch (e2) {}
+    controls = null;
+    loader = null;
+    meshGroup = null;
+    camera = null;
+    scene = null;
+    renderer = null;
+    state.viewerReady = false;
+    state.viewerBackend = 'remote';
+    state.viewerWebglVersion = 0;
+    state.viewerFallbackReason = fallbackReason;
+    try { showNotification('WebGL 初始化失败，切换 Host Render...', 2600); } catch (e2) {}
+    initRemoteViewer(fallbackReason);
+    return;
+  }
 }
 
 function formatLenNm(nm) {

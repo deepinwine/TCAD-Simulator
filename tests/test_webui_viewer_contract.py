@@ -97,6 +97,9 @@ console.log(JSON.stringify({{ webgl1, failed, calls }}));
 
 class ViewerInitializationContractTests(unittest.TestCase):
     def test_renderer_failure_falls_back_without_probing_the_real_canvas(self):
+        normalize_reason = _extract_function(
+            "_normalizeViewerFallbackReason", "_updateViewerBackendUI"
+        )
         init_viewer = _extract_function("initViewer", "formatLenNm")
         result = _run_node(
             f"""
@@ -123,6 +126,7 @@ function showNotification() {{}}
 function requestWebglRender() {{}}
 function updateRuler3d() {{}}
 function _updateViewerBackendUI() {{}}
+{normalize_reason}
 {init_viewer}
 initViewer();
 console.log(JSON.stringify({{ events, state, rendererIsNull: renderer === null }}));
@@ -154,7 +158,7 @@ const THREE = window.THREE = {{
   WebGLRenderer: function () {{
     events.push(`renderer:backend=${{state.viewerBackend}}`);
     this.domElement = actualCanvas;
-    this.capabilities = {{ isWebGL2: true }};
+    this.capabilities = {{ isWebGL2: false }};
     this.shadowMap = {{}};
     this.info = {{}};
     this.setPixelRatio = function () {{}};
@@ -178,7 +182,7 @@ const THREE = window.THREE = {{
 let renderer = null, scene = null, camera = null, meshGroup = null, loader = null, controls = null;
 let _viewerResizeHandler = null;
 function $(id) {{ if (id !== 'viewer-canvas') throw new Error(`unexpected ${{id}}`); return actualCanvas; }}
-function webglCapability() {{ events.push('capability'); return {{ ok: true, version: 1, reason: '' }}; }}
+function webglCapability() {{ events.push('capability'); return {{ ok: true, version: 2, reason: '' }}; }}
 function getClientPerf() {{ return {{ onDemand: false, antialias: true, dprCap: 1, damping: false }}; }}
 function getRenderQuality() {{ return 'high'; }}
 function _autoFallbackEnabled() {{ return true; }}
@@ -196,9 +200,133 @@ console.log(JSON.stringify({{ events, state }}));
 
         self.assertIn("renderer:backend=pending", result["events"])
         self.assertEqual(result["state"]["viewerBackend"], "webgl")
-        self.assertEqual(result["state"]["viewerWebglVersion"], 2)
+        self.assertEqual(result["state"]["viewerWebglVersion"], 1)
         self.assertEqual(result["state"]["viewerFallbackReason"], "")
         self.assertTrue(result["state"]["viewerReady"])
+
+    def test_post_renderer_initialization_failures_are_atomic(self):
+        normalize_reason = _extract_function(
+            "_normalizeViewerFallbackReason", "_updateViewerBackendUI"
+        )
+        init_viewer = _extract_function("initViewer", "formatLenNm")
+        result = _run_node(
+            f"""
+let state, window, THREE;
+let renderer, scene, camera, meshGroup, loader, controls, _viewerResizeHandler;
+let _webglAnimActive, _webglNeedRender, _webglRenderTimer;
+let events, listeners, failAt, actualCanvas;
+
+function Node() {{ this.position = {{ set() {{}} }}; }}
+Node.prototype.add = function () {{}};
+function $(_id) {{ return actualCanvas; }}
+function webglCapability() {{ return {{ ok: true, version: 2, reason: '' }}; }}
+function getClientPerf() {{ return {{ onDemand: false, antialias: true, dprCap: 1, damping: false }}; }}
+function getRenderQuality() {{ return 'high'; }}
+function _autoFallbackEnabled() {{ return true; }}
+function showNotification() {{}}
+function applySliceViewOffset3d() {{}}
+function scheduleCaptureView3d() {{}}
+function updateRuler3d() {{}}
+function _updateViewerBackendUI() {{}}
+function disposeObject3DDeep() {{ events.push('scene-dispose'); }}
+function initRemoteViewer(reason) {{
+  events.push(`remote:${{reason}}`);
+  state.viewerBackend = 'remote';
+  state.viewerWebglVersion = 0;
+  state.viewerFallbackReason = reason;
+  state.viewerReady = true;
+}}
+function requestWebglRender() {{
+  if (failAt === 'first-render') throw new Error('controlled first render failure');
+}}
+
+{normalize_reason}
+{init_viewer}
+
+function runCase(which) {{
+  failAt = which;
+  events = [];
+  listeners = new Set();
+  state = {{ viewerReady: false, viewerBackend: 'pending', viewerWebglVersion: 0, viewerFallbackReason: '', forceRender: null }};
+  renderer = scene = camera = meshGroup = loader = controls = _viewerResizeHandler = null;
+  _webglAnimActive = true;
+  _webglNeedRender = true;
+  _webglRenderTimer = null;
+  actualCanvas = {{
+    getContext() {{ throw new Error('real canvas must not be probed'); }},
+    getBoundingClientRect() {{ return {{ width: 640, height: 480 }}; }}
+  }};
+  window = {{
+    devicePixelRatio: 1,
+    THREE: null,
+    addEventListener(kind, fn) {{ if (kind === 'resize') listeners.add(fn); }},
+    removeEventListener(kind, fn) {{ if (kind === 'resize') listeners.delete(fn); }}
+  }};
+  THREE = window.THREE = {{
+    WebGLRenderer: function () {{
+      this.domElement = actualCanvas;
+      this.capabilities = {{ isWebGL2: false }};
+      this.shadowMap = {{}};
+      this.info = {{}};
+      this.setPixelRatio = function () {{}};
+      this.setClearColor = function () {{}};
+      this.setSize = function () {{}};
+      this.dispose = function () {{ events.push('renderer-dispose'); }};
+      this.forceContextLoss = function () {{ events.push('renderer-force-loss'); }};
+    }},
+    STLLoader: function () {{}},
+    Object3D: {{ DEFAULT_UP: {{ set() {{}} }} }},
+    Scene: function () {{
+      if (failAt === 'scene') throw new Error('controlled scene failure');
+      this.add = function () {{}};
+    }},
+    Color: function () {{}},
+    PerspectiveCamera: function () {{
+      this.up = {{ set() {{}} }};
+      this.position = {{ set() {{}} }};
+      this.updateProjectionMatrix = function () {{}};
+    }},
+    Group: function () {{}},
+    HemisphereLight: Node,
+    DirectionalLight: Node,
+    AmbientLight: Node,
+    OrbitControls: function () {{
+      this.addEventListener = function () {{}};
+      this.dispose = function () {{ events.push('controls-dispose'); }};
+    }},
+    ACESFilmicToneMapping: 1,
+    sRGBEncoding: 2,
+    SRGBColorSpace: 3
+  }};
+
+  initViewer();
+  return {{
+    events: events.slice(),
+    listenerCount: listeners.size,
+    refsCleared: [renderer, scene, camera, meshGroup, loader, controls, _viewerResizeHandler].every((v) => v === null),
+    state: {{ ...state }}
+  }};
+}}
+
+const sceneFailure = runCase('scene');
+const lateFailure = runCase('first-render');
+console.log(JSON.stringify({{ sceneFailure, lateFailure }}));
+"""
+        )
+
+        for name in ("sceneFailure", "lateFailure"):
+            with self.subTest(case=name):
+                case = result[name]
+                self.assertIn("renderer-dispose", case["events"])
+                self.assertIn("renderer-force-loss", case["events"])
+                self.assertTrue(any(item.startswith("remote:") for item in case["events"]))
+                self.assertEqual(case["listenerCount"], 0)
+                self.assertTrue(case["refsCleared"])
+                self.assertEqual(case["state"]["viewerBackend"], "remote")
+                self.assertEqual(case["state"]["viewerWebglVersion"], 0)
+                self.assertTrue(case["state"]["viewerReady"])
+        self.assertNotIn("controls-dispose", result["sceneFailure"]["events"])
+        self.assertIn("controls-dispose", result["lateFailure"]["events"])
 
     def test_remote_status_is_visible_and_webgl_only_cutaway_is_disabled(self):
         normalize_reason = _extract_function(
