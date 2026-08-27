@@ -8136,42 +8136,58 @@ class ProcessModel:
             raise ValueError("Thinning target thickness must be a positive finite number.")
         target_layers = max(1, int(math.ceil(target_nm / float(self.voxel_size_nm))))
 
-        material_by_z = np.any(self.grid == np.uint16(material_id), axis=(0, 1))
-        material_z = np.flatnonzero(material_by_z)
-        if material_z.size == 0:
-            return 0
-
         active_side = self._normalize_active_side(getattr(self, "active_side", "top"))
         backside_is_low_z = active_side == "top"
-        segment_edge = int(material_z[0] if backside_is_low_z else material_z[-1])
-        segment_stop = segment_edge
-        step = 1 if backside_is_low_z else -1
-        next_z = segment_edge + step
         nz = int(self.grid.shape[2])
-        while 0 <= next_z < nz and bool(material_by_z[next_z]):
-            segment_stop = next_z
-            next_z += step
+        material_value = np.uint16(material_id)
+        plane_mask = np.empty(self.grid.shape[:2], dtype=bool)
+        scan_z = range(nz) if backside_is_low_z else range(nz - 1, -1, -1)
+        segment_edge: Optional[int] = None
+        segment_stop: Optional[int] = None
+        for z in scan_z:
+            np.equal(self.grid[:, :, z], material_value, out=plane_mask)
+            present = bool(np.any(plane_mask))
+            if segment_edge is None:
+                if not present:
+                    continue
+                segment_edge = z
+                segment_stop = z
+            elif present:
+                segment_stop = z
+            else:
+                break
+        if segment_edge is None or segment_stop is None:
+            return 0
 
         segment_layers = abs(segment_stop - segment_edge) + 1
         if target_layers >= segment_layers:
             return 0
         remove_layers = segment_layers - target_layers
         if backside_is_low_z:
-            remove_start = segment_edge
-            remove_stop = segment_edge + remove_layers
+            removal_z = range(segment_edge, segment_edge + remove_layers)
         else:
-            remove_start = segment_edge - remove_layers + 1
-            remove_stop = segment_edge + 1
+            removal_z = range(segment_edge, segment_edge - remove_layers, -1)
 
-        roi = (slice(None), slice(None), slice(remove_start, remove_stop))
-        removal_mask = self.grid[roi] == np.uint16(material_id)
-        removed_cells = int(np.count_nonzero(removal_mask))
+        removed_cells = 0
+        for z in removal_z:
+            np.equal(self.grid[:, :, z], material_value, out=plane_mask)
+            removed_cells += int(np.count_nonzero(plane_mask))
         if removed_cells <= 0:
             return 0
 
         spatial_arrays = self._require_writable_spatial_volumes("Thinning")
-        self.grid[roi][removal_mask] = np.uint16(0)
-        self._clear_spatial_volume_mask(roi, removal_mask, arrays=spatial_arrays)
+        layer_mask = plane_mask[..., np.newaxis]
+        for z in removal_z:
+            material_layer = self.grid[:, :, z]
+            np.equal(material_layer, material_value, out=plane_mask)
+            material_layer[plane_mask] = np.uint16(0)
+            layer_roi = (slice(None), slice(None), slice(z, z + 1))
+            self._clear_spatial_volume_mask(
+                layer_roi,
+                layer_mask,
+                arrays=spatial_arrays,
+            )
+        self.active_side = active_side
         self._rebuild_height_map([material_id])
         backside = "bottom (low Z)" if backside_is_low_z else "top (high Z)"
         self._log(
@@ -19810,6 +19826,10 @@ class ThinningStep(ProcessStep):
                 "enum",
                 "Silicon",
                 choices=materials,
+                tooltip=(
+                    "Selectively removes only this material from backside-facing layers; "
+                    "non-target cap material is preserved."
+                ),
             ),
         )
 

@@ -1121,6 +1121,56 @@ class ThinningTests(unittest.TestCase):
         self.assertFalse(np.any(model.grid[:, :, :2]))
         self.assertTrue(np.all(model.grid[:, :, 2:5] == silicon_id))
 
+    def test_scanning_and_removal_reuse_only_one_two_dimensional_compare_buffer(self):
+        db, model = make_model((7, 8, 96))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, 8:88] = np.uint16(silicon_id)
+        model._rebuild_height_map()
+        original_equal = np.equal
+        out_shapes = []
+        out_ids = []
+
+        def recording_equal(left, right, *, out=None, **kwargs):
+            self.assertIsNotNone(out)
+            out_shapes.append(out.shape)
+            out_ids.append(id(out))
+            return original_equal(left, right, out=out, **kwargs)
+
+        with mock.patch.object(tcad.np, "equal", side_effect=recording_equal):
+            removed = model.thin_wafer(20.0, "Silicon")
+
+        self.assertEqual(removed, 7 * 8 * 78)
+        self.assertGreater(len(out_shapes), model.grid.shape[2])
+        self.assertEqual(set(out_shapes), {model.grid.shape[:2]})
+        self.assertEqual(len(set(out_ids)), 1)
+
+    def test_invalid_active_side_is_normalized_after_successful_commit(self):
+        db, model = make_model((3, 3, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, 1:5] = np.uint16(silicon_id)
+        model.active_side = "sideways"
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(20.0, "Silicon")
+
+        self.assertEqual(removed, 3 * 3 * 2)
+        self.assertEqual(model.active_side, "top")
+
+    def test_noop_does_not_normalize_invalid_active_side(self):
+        db, model = make_model((3, 3, 8))
+        self.addCleanup(model.parallel.shutdown)
+        silicon_id = db.id_for("Silicon")
+        model.grid[:, :, 1:5] = np.uint16(silicon_id)
+        model.active_side = "sideways"
+        model._rebuild_height_map()
+
+        removed = model.thin_wafer(40.0, "Silicon")
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(model.active_side, "sideways")
+
     def test_invalid_target_and_material_values_are_rejected(self):
         _db, model = make_model((3, 3, 8))
         self.addCleanup(model.parallel.shutdown)
@@ -1288,4 +1338,5 @@ class ThinningTests(unittest.TestCase):
         self.assertEqual(specs["target_thickness_nm"].type, "float")
         self.assertEqual(specs["material"].type, "enum")
         self.assertNotIn("Void", [choice[0] for choice in specs["material"].choices])
+        self.assertRegex(specs["material"].tooltip.lower(), r"selective|cap")
         self.assertNotIn("Thinning", [item.name for item in tcad._webui_default_recipe(db)])
