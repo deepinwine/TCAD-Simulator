@@ -32313,6 +32313,209 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     return step
 
 
+def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Return fresh, portable definitions for the built-in Process CAD demos."""
+
+    def _step(
+        name: str,
+        instance_name: str,
+        params: Optional[Dict[str, Any]] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        step = PROCESS_STEP_FACTORIES[name](material_db)
+        if isinstance(params, dict):
+            step.params.update(copy.deepcopy(params))
+        blob: Dict[str, Any] = {
+            "name": name,
+            "instance_name": _normalize_step_instance_name(instance_name, name),
+            "enabled": True,
+            "params": copy.deepcopy(step.params),
+        }
+        blob.update(copy.deepcopy(extra))
+        return blob
+
+    mask_size = 32
+    trench_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    trench_mask[12:20, :] = 1
+    core_clear_mask = np.ones((mask_size, mask_size), dtype=np.uint8)
+    core_clear_mask[12:20, :] = 0
+
+    basic_steps = [
+        _step("Initialize Wafer", "300 nm silicon wafer", {"thickness_nm": 300.0}),
+        _step(
+            "Oxidation/Nitridation",
+            "20 nm pad oxide",
+            {
+                "reaction": "Oxidation",
+                "target": "Silicon",
+                "ambient": "Dry O2",
+                "coverage": "Full wafer",
+                "target_thickness": 20.0,
+            },
+        ),
+        _step("Spin Resist", "Trench photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose center trench",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Center trench",
+                "dose": 80.0,
+            },
+            custom_mask=trench_mask.tolist(),
+            mask_name="Center trench",
+        ),
+        _step(
+            "Resist Develop",
+            "Open trench resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Anisotropic oxide trench etch",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+                "pressure": 8.0,
+                "rf_bias": 240.0,
+                "passivation": 0.4,
+            },
+        ),
+        _step("Strip", "Strip trench resist", {"materials": "Photoresist"}),
+    ]
+
+    spacer_steps = [
+        _step("Initialize Wafer", "200 nm silicon wafer", {"thickness_nm": 200.0}),
+        _step(
+            "Deposition",
+            "Deposit polysilicon core",
+            {
+                "material": "Polysilicon",
+                "thickness": 80.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+                "directionality": 0.9,
+            },
+        ),
+        _step("Spin Resist", "Core photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose outside core",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Center core",
+                "dose": 80.0,
+            },
+            custom_mask=core_clear_mask.tolist(),
+            mask_name="Center core",
+        ),
+        _step(
+            "Resist Develop",
+            "Develop core pattern",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Pattern polysilicon core",
+            {
+                "material": "Polysilicon",
+                "chemistry": "Dry",
+                "time": 80.0,
+                "rate_override": 1500.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip core resist", {"materials": "Photoresist"}),
+        _step(
+            "Deposition",
+            "Conformal silicon nitride ALD",
+            {
+                "material": "Silicon Nitride",
+                "thickness": 30.0,
+                "method": "ALD",
+                "coverage": "Full wafer",
+                "directionality": 0.0,
+            },
+        ),
+        _step(
+            "Etch",
+            "Directional nitride etch-back",
+            {
+                "material": "Silicon Nitride",
+                "chemistry": "Dry",
+                "time": 30.0,
+                "rate_override": 600.0,
+                "selectivity": 50.0,
+                "sidewall": 90.0,
+                "pressure": 5.0,
+                "rf_bias": 300.0,
+                "passivation": 0.8,
+            },
+        ),
+        _step("Strip", "Selective core removal", {"materials": "Polysilicon"}),
+    ]
+
+    bonding_steps = [
+        _step("Initialize Wafer", "400 nm device silicon", {"thickness_nm": 400.0}),
+        _step(
+            "Oxidation/Nitridation",
+            "20 nm front-side oxide",
+            {
+                "reaction": "Oxidation",
+                "target": "Silicon",
+                "ambient": "Dry O2",
+                "coverage": "Full wafer",
+                "target_thickness": 20.0,
+            },
+        ),
+        _step("Wafer Flip", "Flip to bond side"),
+        _step(
+            "Bonding",
+            "Oxide bond to silicon handle",
+            {
+                "handle_material": "Silicon",
+                "handle_thickness_nm": 200.0,
+                "bonding_material": "Silicon Dioxide",
+                "bonding_layer_nm": 10.0,
+            },
+        ),
+        _step(
+            "Thinning",
+            "Thin device silicon to 80 nm",
+            {"material": "Silicon", "target_thickness_nm": 80.0},
+        ),
+    ]
+
+    domain = {"grid_shape": [64, 64, 96], "voxel_size_nm": 10.0, "threads": 1}
+    return {
+        "Basic Trench": {
+            "name": "Basic Trench",
+            "description": "Pattern and anisotropically etch a trench opening through pad oxide.",
+            "domain": copy.deepcopy(domain),
+            "steps": basic_steps,
+        },
+        "Spacer Formation": {
+            "name": "Spacer Formation",
+            "description": "Pattern a sacrificial core, coat it conformally, etch back, and remove the core.",
+            "domain": copy.deepcopy(domain),
+            "steps": spacer_steps,
+        },
+        "Bonding + Thinning": {
+            "name": "Bonding + Thinning",
+            "description": "Flip a device wafer, oxide-bond a silicon handle, and thin only the device wafer.",
+            "domain": copy.deepcopy(domain),
+            "steps": bonding_steps,
+        },
+    }
+
+
 def _infer_exposure_advanced_enable(params: Any) -> int:
     """Infer Mask Exposure advanced toggle for legacy recipes.
 
@@ -61503,6 +61706,7 @@ def _webui_worker_main(
                     "present_material_ids": _present_material_ids(),
                     "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
+                    "demo_recipes": _webui_demo_recipes(material_db),
                     "history": history_index,
                     "recipes": history_index,
                     "exports": exports_list,
@@ -81503,8 +81707,6 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                   <label>Demo Recipes（替换当前 Recipe）</label>
                   <select id="demo-recipe-select">
                     <option value="" selected>-- Select --</option>
-                    <option value="demo_trench_lpcvd">Demo：深孔/沟槽沉积（LPCVD/CVD）</option>
-                    <option value="demo_trench_ald">Demo：深孔/沟槽沉积（ALD）</option>
                   </select>
                 </div>
                 <div class="form-group" style="width:160px">
@@ -84150,6 +84352,7 @@ _WEBUI_SCRIPT_JS = r"""// TCAD Simulator WebUI
 const state = {
   recipe: [],
   recipeFactories: [],
+  demoRecipes: {},
   recipes: [],
   exports: [],
   currentRecipe: { name: 'Untitled' },
@@ -84785,6 +84988,7 @@ function applyUiFeaturesFromServer() {
   const demoBtn = $('demo-recipe-load-btn');
   if (demoSel) { try { demoSel.disabled = !feats.demoRecipes; } catch (e) {} }
   if (demoBtn) { try { demoBtn.disabled = !feats.demoRecipes; } catch (e) {} }
+  try { renderDemoRecipes(); } catch (e) {}
   try { renderPresetSequences(); } catch (e) {}
 
   // Variant selector + badges are rendered dynamically; re-render to reflect toggles.
@@ -92788,6 +92992,8 @@ async function refreshAll(doPreview, retry = 0) {
     }
     if (state.waiting) exitWaiting();
     state.recipe = init.result.recipe || [];
+    state.demoRecipes = init.result.demo_recipes || {};
+    try { renderDemoRecipes(); } catch (e) {}
     state.recipes = init.result.recipes || init.result.history || [];
     state.exports = init.result.exports || [];
     state.recipeFactories = init.result.recipe_factories || [];
@@ -98633,28 +98839,32 @@ async function importRecipeFromFile(file) {
   }
 }
 
+function renderDemoRecipes() {
+  const select = $('demo-recipe-select');
+  if (!select) return;
+  const selected = String(select.value || '');
+  select.textContent = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '-- Select --';
+  select.appendChild(placeholder);
+  const demos = (state.demoRecipes && typeof state.demoRecipes === 'object') ? state.demoRecipes : {};
+  for (const [key, recipe] of Object.entries(demos)) {
+    const option = document.createElement('option');
+    option.value = String(key);
+    const description = (recipe && typeof recipe === 'object') ? String(recipe.description || '').trim() : '';
+    option.textContent = description ? `${key} — ${description}` : String(key);
+    select.appendChild(option);
+  }
+  if (Object.prototype.hasOwnProperty.call(demos, selected)) select.value = selected;
+}
+
 function _buildDemoRecipe(key) {
   const k = String(key || '').trim();
-  if (!k) return null;
-  const domain = { grid_shape: [192, 192, 240], voxel_size_nm: 5.0, threads: 4 };
-  const base = [
-    { name: 'Initialize Wafer', enabled: true, params: { wafer_type: 'Bulk', material: 'Silicon', thickness_nm: 700.0, orientation: '100', initial_temperature: 25.0 } },
-    { name: 'Spin Resist', enabled: true, params: { material: 'Photoresist', thickness_nm: 220.0, resist_type: 'positive', softbake_temp: 110.0, softbake_time: 60.0 } },
-    { name: 'Mask Exposure', enabled: true, params: { mask_mode: 'Procedural', pattern: 'Vias', critical_dimension: 120.0, pitch: 260.0, orientation: 0.0, wavelength: 193.0, na: 0.70, sigma: 0.30, focus: 0.0, dose: 32.0 } },
-    { name: 'Post-Exposure Bake', enabled: true, params: { temperature: 110.0, time: 60.0 } },
-    { name: 'Resist Develop', enabled: true, params: { time: 60.0, rate: 250.0, contrast: 2.5, threshold: 20.0 } },
-    // Deep trench/hole etch: use override_rate for a clear geometry difference within reasonable runtime.
-    { name: 'Etch', enabled: true, params: { material: 'Silicon', chemistry: 'Dry', rate_model: 'Advanced', time: 90.0, bias: 0.0, rate_override: 2500.0, selectivity: 6.0, sidewall: 88.0 } },
-  ];
-  const lpcvd = { name: 'Deposition', enabled: true, params: { variant_id: 'lpcvd', material: 'Silicon Dioxide', thickness: 160.0, method: 'CVD', coverage: 'Full wafer', temperature: 700.0, directionality: 0.30, gap_fill_bias: 0.0 } };
-  const ald = { name: 'Deposition', enabled: true, params: { variant_id: 'ald', material: 'Silicon Dioxide', thickness: 160.0, method: 'ALD', coverage: 'Full wafer', temperature: 250.0, directionality: 0.0, gap_fill_bias: 0.0 } };
-  if (k === 'demo_trench_lpcvd') {
-    return { name: 'Demo_Trench_Deposition_LPCVD', domain, steps: base.concat([lpcvd]) };
-  }
-  if (k === 'demo_trench_ald') {
-    return { name: 'Demo_Trench_Deposition_ALD', domain, steps: base.concat([ald]) };
-  }
-  return null;
+  const demos = (state.demoRecipes && typeof state.demoRecipes === 'object') ? state.demoRecipes : {};
+  const recipe = k ? demos[k] : null;
+  if (!recipe || typeof recipe !== 'object') return null;
+  try { return JSON.parse(JSON.stringify(recipe)); } catch (e) { return null; }
 }
 
 async function loadDemoRecipeFromSelect() {
