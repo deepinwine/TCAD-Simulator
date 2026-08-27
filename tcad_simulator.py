@@ -93630,7 +93630,7 @@ const STANDARD_VIEWS = {
   BACK:   { direction: [0, 1, 0], up: [0, 0, 1] },
   LEFT:   { direction: [-1, 0, 0], up: [0, 0, 1] },
   RIGHT:  { direction: [1, 0, 0], up: [0, 0, 1] },
-  ISO:    { direction: [1, -1, 1], up: [0, 0, 1] },
+  ISO:    { direction: [1, -1, 0.8], up: [0, 0, 1] },
 };
 
 function _viewerCameraBounds(object3d) {
@@ -93639,10 +93639,37 @@ function _viewerCameraBounds(object3d) {
     size: new THREE.Vector3(1, 1, 1),
     radius: Math.sqrt(3) * 0.5,
   };
-  if (typeof THREE === 'undefined' || !THREE.Box3 || !object3d) return fallback;
+  if (typeof THREE === 'undefined' || !THREE.Box3 || !THREE.Vector3 || !object3d) return fallback;
   try {
-    const box = new THREE.Box3().setFromObject(object3d);
-    if (!box || box.isEmpty()) return fallback;
+    if (typeof object3d.traverseVisible !== 'function') return fallback;
+    try {
+      if (typeof object3d.updateWorldMatrix === 'function') object3d.updateWorldMatrix(true, true);
+      else if (typeof object3d.updateMatrixWorld === 'function') object3d.updateMatrixWorld(true);
+    } catch (e) {}
+    const box = new THREE.Box3();
+    if (typeof box.makeEmpty === 'function') box.makeEmpty();
+    let haveGeometry = false;
+    object3d.traverseVisible((node) => {
+      try {
+        const geometry = node && node.geometry;
+        if (!geometry) return;
+        if (!geometry.boundingBox && typeof geometry.computeBoundingBox === 'function') geometry.computeBoundingBox();
+        const localBox = geometry.boundingBox;
+        if (!localBox || (typeof localBox.isEmpty === 'function' && localBox.isEmpty())) return;
+        const worldBox = (typeof localBox.clone === 'function') ? localBox.clone() : null;
+        if (!worldBox) return;
+        if (node.matrixWorld && typeof worldBox.applyMatrix4 === 'function') worldBox.applyMatrix4(node.matrixWorld);
+        const values = [
+          worldBox.min && worldBox.min.x, worldBox.min && worldBox.min.y, worldBox.min && worldBox.min.z,
+          worldBox.max && worldBox.max.x, worldBox.max && worldBox.max.y, worldBox.max && worldBox.max.z,
+        ].map(Number);
+        if (!values.every(Number.isFinite)) return;
+        if (typeof box.union !== 'function') return;
+        box.union(worldBox);
+        haveGeometry = true;
+      } catch (e) {}
+    });
+    if (!haveGeometry || !box || box.isEmpty()) return fallback;
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
     box.getCenter(center);
@@ -93651,6 +93678,7 @@ function _viewerCameraBounds(object3d) {
     const sy = Math.max(0, Number(size.y) || 0);
     const sz = Math.max(0, Number(size.z) || 0);
     if (![center.x, center.y, center.z, sx, sy, sz].every(Number.isFinite)) return fallback;
+    if (!(Math.hypot(sx, sy, sz) > 1e-9)) return fallback;
     const radius = Math.max(Math.hypot(sx, sy, sz) * 0.5, 0.0005);
     return { center, size: new THREE.Vector3(sx, sy, sz), radius };
   } catch (e) {
@@ -97966,8 +97994,7 @@ function setViewerMode(mode, refreshNow = true) {
         const rect = c3d.getBoundingClientRect();
             if (!rect || rect.width <= 0 || rect.height <= 0) return;
             renderer.setSize(rect.width, rect.height, false);
-            camera.aspect = rect.width / rect.height;
-            camera.updateProjectionMatrix();
+            _resizeViewerCameras(rect.width, rect.height);
             try { applySliceViewOffset3d(); } catch (e) {}
           } catch (e) {}
         });
@@ -98061,25 +98088,22 @@ function applySliceViewOffset3d() {
   const h = Math.max(2, Math.round(rect.height || 0));
   const enabled = (state.viewerMode === '3d' && !!state.sliceOverlay);
   if (!enabled) {
+    _resizeViewerCameras(w, h);
     try { if (camera.clearViewOffset) camera.clearViewOffset(); } catch (e) {}
-    try { camera.aspect = w / h; } catch (e) {}
-    try { camera.updateProjectionMatrix(); } catch (e) {}
     return;
   }
   const reserve = sliceInsetReservedCssPx();
   if (!(reserve > 1)) {
+    _resizeViewerCameras(w, h);
     try { if (camera.clearViewOffset) camera.clearViewOffset(); } catch (e) {}
-    try { camera.aspect = w / h; } catch (e) {}
-    try { camera.updateProjectionMatrix(); } catch (e) {}
     return;
   }
       const fullW = Math.max(w + 2, Math.round(w + reserve));
       const fullH = h;
-      try { camera.aspect = fullW / fullH; } catch (e) {}
+      _resizeViewerCameras(fullW, fullH);
       // Render the right tile of a wider frustum so the scene shifts LEFT (making room for the right-side slice inset).
       const offX = Math.max(0, Math.round(fullW - w));
       try { if (camera.setViewOffset) camera.setViewOffset(fullW, fullH, offX, 0, w, h); } catch (e) {}
-      try { camera.updateProjectionMatrix(); } catch (e) {}
     }
 
     function syncSliceControls(triggerRefresh = false, source = null) {

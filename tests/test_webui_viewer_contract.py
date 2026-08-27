@@ -419,13 +419,33 @@ class Vector3 {
   distanceTo(v) { return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z); }
 }
 class Box3 {
-  setFromObject(obj) { this.box = obj && obj.__box ? obj.__box : null; return this; }
-  isEmpty() { return !this.box; }
+  constructor(min = null, max = null) {
+    this.min = min ? min.clone() : new Vector3(Infinity, Infinity, Infinity);
+    this.max = max ? max.clone() : new Vector3(-Infinity, -Infinity, -Infinity);
+  }
+  makeEmpty() {
+    this.min.set(Infinity, Infinity, Infinity);
+    this.max.set(-Infinity, -Infinity, -Infinity);
+    return this;
+  }
+  setFromObject(obj) {
+    this.makeEmpty();
+    if (obj && obj.__box) this.union(new Box3(obj.__box.min, obj.__box.max));
+    return this;
+  }
+  isEmpty() { return this.max.x < this.min.x || this.max.y < this.min.y || this.max.z < this.min.z; }
+  clone() { return new Box3(this.min, this.max); }
+  applyMatrix4() { return this; }
+  union(box) {
+    this.min.set(Math.min(this.min.x, box.min.x), Math.min(this.min.y, box.min.y), Math.min(this.min.z, box.min.z));
+    this.max.set(Math.max(this.max.x, box.max.x), Math.max(this.max.y, box.max.y), Math.max(this.max.z, box.max.z));
+    return this;
+  }
   getCenter(out) {
-    return out.set((this.box.min.x + this.box.max.x) / 2, (this.box.min.y + this.box.max.y) / 2, (this.box.min.z + this.box.max.z) / 2);
+    return out.set((this.min.x + this.max.x) / 2, (this.min.y + this.max.y) / 2, (this.min.z + this.max.z) / 2);
   }
   getSize(out) {
-    return out.set(this.box.max.x - this.box.min.x, this.box.max.y - this.box.min.y, this.box.max.z - this.box.min.z);
+    return out.set(this.max.x - this.min.x, this.max.y - this.min.y, this.max.z - this.min.z);
   }
 }
 function makeCamera(kind) {
@@ -448,7 +468,14 @@ let camera = perspectiveCamera;
 let cameraMode = 'perspective';
 let meshGroup = {
   children: [{}],
-  __box: { min: new Vector3(2, 4, 6), max: new Vector3(10, 14, 18) }
+  __box: { min: new Vector3(2, 4, 6), max: new Vector3(10, 14, 18) },
+  updateMatrixWorld() {},
+  traverseVisible(fn) {
+    fn({
+      geometry: { boundingBox: new Box3(this.__box.min, this.__box.max) },
+      matrixWorld: null
+    });
+  }
 };
 const controls = {
   object: camera,
@@ -506,6 +533,69 @@ console.log(JSON.stringify(results));
                         self.assertAlmostEqual(component, 0, places=8)
                     else:
                         self.assertGreater(component * sign, 0)
+        iso_delta = [result["ISO"]["position"][i] - center[i] for i in range(3)]
+        self.assertAlmostEqual(iso_delta[1] / iso_delta[0], -1.0, places=8)
+        self.assertAlmostEqual(iso_delta[2] / iso_delta[0], 0.8, places=8)
+
+    def test_camera_bounds_ignore_hidden_geometry_and_use_three_r145_world_bounds(self):
+        result = _run_node(
+            r"""
+const THREE = require('./three.js');
+let perspectiveCamera = null, orthographicCamera = null, camera = null, controls = null;
+let cameraMode = 'perspective', meshGroup = null;
+const state = { viewerBackend: 'webgl' };
+function $() { return null; }
+function requestWebglRender() {}
+function applySliceViewOffset3d() {}
+function updateRuler3d() {}
+function scheduleCaptureView3d() {}
+"""
+            + _camera_contract_source()
+            + r"""
+function compact(bounds) {
+  return {
+    center: bounds.center.toArray(),
+    size: bounds.size.toArray(),
+    radius: bounds.radius
+  };
+}
+
+const root = new THREE.Group();
+const near = new THREE.Mesh(new THREE.BoxGeometry(2, 4, 6));
+near.position.set(4, 5, 6);
+root.add(near);
+
+const farHidden = new THREE.Mesh(new THREE.BoxGeometry(40, 40, 40));
+farHidden.position.set(1000, 1000, 1000);
+farHidden.visible = false;
+root.add(farHidden);
+
+const hiddenParent = new THREE.Group();
+hiddenParent.visible = false;
+const hiddenChild = new THREE.Mesh(new THREE.BoxGeometry(30, 30, 30));
+hiddenChild.position.set(-900, -900, -900);
+hiddenParent.add(hiddenChild);
+root.add(hiddenParent);
+
+const visibleOnly = compact(_viewerCameraBounds(root));
+const empty = compact(_viewerCameraBounds(new THREE.Group()));
+const pointGeometry = new THREE.BufferGeometry();
+pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute([7, 8, 9], 3));
+const degenerate = compact(_viewerCameraBounds(new THREE.Mesh(pointGeometry)));
+near.position.set(Infinity, 0, 0);
+const invalid = compact(_viewerCameraBounds(root));
+console.log(JSON.stringify({ visibleOnly, empty, degenerate, invalid, revision: THREE.REVISION }));
+"""
+        )
+
+        self.assertEqual(result["revision"], "145")
+        self.assertEqual(result["visibleOnly"]["center"], [4, 5, 6])
+        self.assertEqual(result["visibleOnly"]["size"], [2, 4, 6])
+        for key in ("empty", "degenerate", "invalid"):
+            with self.subTest(case=key):
+                self.assertEqual(result[key]["center"], [0, 0, 0])
+                self.assertEqual(result[key]["size"], [1, 1, 1])
+                self.assertAlmostEqual(result[key]["radius"], 3 ** 0.5 / 2)
 
     def test_projection_switch_preserves_visible_scale_and_controls_object(self):
         result = _run_node(
@@ -551,6 +641,159 @@ console.log(JSON.stringify({
         self.assertAlmostEqual(result["perspectiveAspect"], 2)
         self.assertAlmostEqual(result["orthoAspect"], 2)
         self.assertEqual(result["updates"], [1, 1])
+
+    def test_viewer_mode_resize_entry_updates_both_camera_frustums(self):
+        resize_cameras = _extract_function(
+            "_resizeViewerCameras", "_setCameraClipRange"
+        )
+        set_mode = _extract_function("setViewerMode", "sliceInsetReservedCssPx")
+        result = _run_node(
+            r"""
+function makeCamera(kind) {
+  return {
+    kind,
+    isOrthographicCamera: kind === 'orthographic',
+    aspect: 1,
+    left: -3,
+    right: 3,
+    top: 3,
+    bottom: -3,
+    projectionUpdates: 0,
+    updateProjectionMatrix() { this.projectionUpdates += 1; }
+  };
+}
+let perspectiveCamera = makeCamera('perspective');
+let orthographicCamera = makeCamera('orthographic');
+let camera = orthographicCamera;
+const state = { viewerMode: '2d', viewerBackend: 'webgl', previewStyle: 'solid', materials: [], meshes: new Map() };
+const canvas = { style: {}, getBoundingClientRect() { return { width: 900, height: 450 }; } };
+function $(id) { return id === 'viewer-canvas' ? canvas : null; }
+const renderer = { sizes: [], setSize(w, h, css) { this.sizes.push([w, h, css]); } };
+const calls = [];
+function requestAnimationFrame(fn) { fn(); }
+function applySliceViewOffset3d() { calls.push('slice-offset'); }
+function drawSliceFromCache() {}
+function _elementLegendVisible() {}
+function syncSliceControls() {}
+function applySliceOverlayUI() {}
+function applySlice2dMultiUI() {}
+function updateRuler3d() {}
+function renderLegend() {}
+function applyPreviewStyle() {}
+function refreshSlice() {}
+function refreshPreview() {}
+"""
+            + resize_cameras
+            + set_mode
+            + r"""
+setViewerMode('3d', false);
+console.log(JSON.stringify({
+  perspectiveAspect: perspectiveCamera.aspect,
+  orthoAspect: (orthographicCamera.right - orthographicCamera.left) / (orthographicCamera.top - orthographicCamera.bottom),
+  orthoHalfHeight: (orthographicCamera.top - orthographicCamera.bottom) / 2,
+  updates: [perspectiveCamera.projectionUpdates, orthographicCamera.projectionUpdates],
+  sizes: renderer.sizes,
+  calls
+}));
+"""
+        )
+
+        self.assertEqual(result["perspectiveAspect"], 2)
+        self.assertEqual(result["orthoAspect"], 2)
+        self.assertEqual(result["orthoHalfHeight"], 3)
+        self.assertEqual(result["updates"], [1, 1])
+        self.assertEqual(result["sizes"], [[900, 450, False]])
+        self.assertEqual(result["calls"], ["slice-offset"])
+
+    def test_slice_offset_entry_syncs_full_frustum_before_touching_active_camera(self):
+        resize_cameras = _extract_function(
+            "_resizeViewerCameras", "_setCameraClipRange"
+        )
+        source = tcad._WEBUI_SCRIPT_JS
+        offset_start = source.find("function applySliceViewOffset3d(")
+        offset_end = source.find("function syncSliceControls(", offset_start)
+        if offset_start < 0 or offset_end < 0:
+            self.fail("could not extract applySliceViewOffset3d")
+        apply_offset = source[offset_start:offset_end]
+        result = _run_node(
+            r"""
+const events = [];
+function makeCamera(kind) {
+  return {
+    kind,
+    aspect: 1,
+    left: -5,
+    right: 5,
+    top: 5,
+    bottom: -5,
+    updateProjectionMatrix() { events.push(`update:${this.kind}`); },
+    clearViewOffset() { events.push(`clear:${this.kind}`); },
+    setViewOffset(...args) { events.push(`set:${this.kind}:${args.join(',')}`); }
+  };
+}
+let perspectiveCamera = makeCamera('perspective');
+let orthographicCamera = makeCamera('orthographic');
+let camera = orthographicCamera;
+let reserve = 0;
+let rect = { width: 800, height: 400 };
+const state = { viewerBackend: 'webgl', viewerMode: '3d', sliceOverlay: false };
+const canvas = { getBoundingClientRect() { return rect; } };
+function $(id) { return id === 'viewer-canvas' ? canvas : null; }
+function sliceInsetReservedCssPx() { return reserve; }
+"""
+            + resize_cameras
+            + apply_offset
+            + r"""
+function snapshot(label) {
+  return {
+    label,
+    perspectiveAspect: perspectiveCamera.aspect,
+    orthoAspect: (orthographicCamera.right - orthographicCamera.left) / (orthographicCamera.top - orthographicCamera.bottom),
+    orthoHalfHeight: (orthographicCamera.top - orthographicCamera.bottom) / 2,
+    events: events.splice(0)
+  };
+}
+
+applySliceViewOffset3d();
+const noOverlay = snapshot('no-overlay');
+
+state.sliceOverlay = true;
+rect = { width: 900, height: 300 };
+reserve = 0;
+applySliceViewOffset3d();
+const noReserve = snapshot('no-reserve');
+
+rect = { width: 800, height: 400 };
+reserve = 100;
+applySliceViewOffset3d();
+const withOverlay = snapshot('with-overlay');
+console.log(JSON.stringify({ noOverlay, noReserve, withOverlay }));
+"""
+        )
+
+        self.assertEqual(result["noOverlay"]["perspectiveAspect"], 2)
+        self.assertEqual(result["noOverlay"]["orthoAspect"], 2)
+        self.assertEqual(
+            result["noOverlay"]["events"],
+            ["update:perspective", "update:orthographic", "clear:orthographic"],
+        )
+        self.assertEqual(result["noReserve"]["perspectiveAspect"], 3)
+        self.assertEqual(result["noReserve"]["orthoAspect"], 3)
+        self.assertEqual(
+            result["noReserve"]["events"],
+            ["update:perspective", "update:orthographic", "clear:orthographic"],
+        )
+        self.assertAlmostEqual(result["withOverlay"]["perspectiveAspect"], 2.25)
+        self.assertAlmostEqual(result["withOverlay"]["orthoAspect"], 2.25)
+        self.assertEqual(result["withOverlay"]["orthoHalfHeight"], 5)
+        self.assertEqual(
+            result["withOverlay"]["events"],
+            [
+                "update:perspective",
+                "update:orthographic",
+                "set:orthographic:900,400,100,0,800,400",
+            ],
+        )
 
     def test_remote_disables_camera_controls_and_webgl_restores_them(self):
         normalize_reason = _extract_function(
