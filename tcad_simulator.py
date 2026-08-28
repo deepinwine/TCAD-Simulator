@@ -87989,6 +87989,9 @@ function _applyMaterialColorOverridesToMaterials() {
       if (!m) continue;
       const id = parseInt(m.id) || 0;
       if (!(id > 0)) continue;
+      if (!Array.isArray(m._tcadPhysicalColor) && Array.isArray(m.color) && m.color.length >= 3) {
+        m._tcadPhysicalColor = [Number(m.color[0]), Number(m.color[1]), Number(m.color[2])];
+      }
       const ov = overrides[String(id)];
       if (!Array.isArray(ov) || ov.length < 3) continue;
       const rgb = [_clamp01(ov[0]), _clamp01(ov[1]), _clamp01(ov[2])];
@@ -97246,40 +97249,99 @@ function applyCutawayNow(requestRender = true) {
   return updateAxisClippingPlanes(requestRender);
 }
 
-function _materialVisualForMesh(mesh) {
+function _materialVisualForMesh(mesh, canonicalFallback = null) {
   const item = (mesh && typeof mesh === 'object') ? mesh : {};
-  const raw = (item.visual && typeof item.visual === 'object') ? item.visual : {};
-  const clamp = (value, fallback) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
-  };
-  const legacyColor = (Array.isArray(item.color) && item.color.length >= 3) ? item.color : [0.8, 0.8, 0.8];
-  const rawColor = (Array.isArray(raw.color) && raw.color.length >= 3) ? raw.color : legacyColor;
-  let color = [
-    clamp(rawColor[0], clamp(legacyColor[0], 0.8)),
-    clamp(rawColor[1], clamp(legacyColor[1], 0.8)),
-    clamp(rawColor[2], clamp(legacyColor[2], 0.8)),
-  ];
-  // A live browser color choice is the effective presentation override until the debounced
-  // preference reaches the worker and appears in a later canonical manifest.
+  const matId = parseInt(item.mat_id != null ? item.mat_id : (item.visual && item.visual.material_id)) || 0;
+  let canonical = (canonicalFallback && typeof canonicalFallback === 'object') ? canonicalFallback : null;
+  // Existing groups hold the latest canonical manifest value.  Prefer it over a legacy-only
+  // item so local redraws cannot fall back to stale physical palette data.
+  if (!canonical) {
+    try {
+      const group = state.meshes && typeof state.meshes.get === 'function' ? state.meshes.get(matId) : null;
+      canonical = group && group.userData && group.userData._tcadVisual ? group.userData._tcadVisual : null;
+    } catch (e) { canonical = null; }
+  }
+  if (!canonical) canonical = _canonicalMaterialVisualForMesh(item);
+  const effective = _cloneMaterialVisual(canonical);
+  // A live browser color choice overlays canonical presentation state but is never written back
+  // into it.  Clearing the live map therefore restores the latest manifest color immediately.
   try {
-    const localColor = _materialColorOverride01(item.mat_id != null ? item.mat_id : raw.material_id);
+    const localColor = _materialColorOverride01(matId);
     if (Array.isArray(localColor) && localColor.length >= 3) {
-      color = [clamp(localColor[0], color[0]), clamp(localColor[1], color[1]), clamp(localColor[2], color[2])];
+      effective.color = [
+        _materialVisualClamp(localColor[0], effective.color[0]),
+        _materialVisualClamp(localColor[1], effective.color[1]),
+        _materialVisualClamp(localColor[2], effective.color[2]),
+      ];
     }
   } catch (e) {}
+  return effective;
+}
+
+function _materialVisualClamp(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+}
+
+function _materialPhysicalVisualFallback(matId) {
+  const id = parseInt(matId) || 0;
+  try {
+    const mats = Array.isArray(state.materials) ? state.materials : [];
+    for (const material of mats) {
+      if (!material || (parseInt(material.id) || 0) !== id) continue;
+      return {
+        name: String(material.name != null ? material.name : '').trim(),
+        color: (Array.isArray(material._tcadPhysicalColor) && material._tcadPhysicalColor.length >= 3)
+          ? material._tcadPhysicalColor
+          : (Array.isArray(material.color) && material.color.length >= 3)
+            ? material.color
+          : [0.8, 0.8, 0.8],
+      };
+    }
+  } catch (e) {}
+  return { name: '', color: [0.8, 0.8, 0.8] };
+}
+
+function _canonicalMaterialVisualForMesh(mesh) {
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const raw = (item.visual && typeof item.visual === 'object') ? item.visual : {};
   const fallbackId = parseInt(item.mat_id) || 0;
   const materialId = parseInt(raw.material_id);
-  const legacyName = String(item.name != null ? item.name : '').trim();
-  const displayName = String(raw.display_name != null ? raw.display_name : legacyName).trim() || legacyName || `Mat ${fallbackId}`;
+  const physical = _materialPhysicalVisualFallback(fallbackId);
+  const legacyName = String(item.name != null ? item.name : physical.name).trim();
+  const displayName = String(raw.display_name != null ? raw.display_name : legacyName).trim()
+    || legacyName
+    || physical.name
+    || `Mat ${fallbackId}`;
+  const legacyColor = (Array.isArray(item.color) && item.color.length >= 3) ? item.color : physical.color;
+  const rawColor = (Array.isArray(raw.color) && raw.color.length >= 3) ? raw.color : legacyColor;
+  const color = [
+    _materialVisualClamp(rawColor[0], _materialVisualClamp(legacyColor[0], 0.8)),
+    _materialVisualClamp(rawColor[1], _materialVisualClamp(legacyColor[1], 0.8)),
+    _materialVisualClamp(rawColor[2], _materialVisualClamp(legacyColor[2], 0.8)),
+  ];
   return {
     material_id: Number.isFinite(materialId) ? materialId : fallbackId,
     display_name: displayName,
     color,
-    opacity: clamp(raw.opacity, 1.0),
-    metallic: clamp(raw.metallic, 0.0),
-    roughness: clamp(raw.roughness, 0.72),
+    opacity: _materialVisualClamp(raw.opacity, 1.0),
+    metallic: _materialVisualClamp(raw.metallic, 0.0),
+    roughness: _materialVisualClamp(raw.roughness, 0.72),
     visible: (typeof raw.visible === 'boolean') ? raw.visible : true,
+  };
+}
+
+function _cloneMaterialVisual(visual) {
+  const source = (visual && typeof visual === 'object') ? visual : {};
+  const color = (Array.isArray(source.color) && source.color.length >= 3) ? source.color : [0.8, 0.8, 0.8];
+  return {
+    material_id: parseInt(source.material_id) || 0,
+    display_name: String(source.display_name != null ? source.display_name : '').trim(),
+    color: [Number(color[0]), Number(color[1]), Number(color[2])],
+    opacity: Number(source.opacity),
+    metallic: Number(source.metallic),
+    roughness: Number(source.roughness),
+    visible: source.visible !== false,
   };
 }
 
@@ -97287,17 +97349,18 @@ function _createMaterialMeshGroup(mesh, geometry) {
   if (!window.THREE || !geometry) return null;
   const item = (mesh && typeof mesh === 'object') ? mesh : {};
   const matId = parseInt(item.mat_id) || 0;
-  const visual = _materialVisualForMesh(item);
+  const canonical = _canonicalMaterialVisualForMesh(item);
+  const visual = _materialVisualForMesh(item, canonical);
   const col = new THREE.Color(visual.color[0], visual.color[1], visual.color[2]);
   try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
   const group = new THREE.Group();
   group.userData.mat_id = matId;
   group.userData.name = visual.display_name;
-  group.userData._tcadVisual = visual;
-  group.userData._tcadBaseVisible = !!visual.visible;
+  group.userData._tcadVisual = _cloneMaterialVisual(canonical);
+  group.userData._tcadBaseVisible = !!canonical.visible;
 
   const dispMode = getResolvedMaterialDisplay(matId);
-  const on = !!visual.visible && dispMode !== 'off';
+  const on = !!canonical.visible && dispMode !== 'off';
   const wantSolid = dispMode === 'solid';
   group.visible = on;
 
@@ -97310,12 +97373,12 @@ function _createMaterialMeshGroup(mesh, geometry) {
     } catch (e) {}
     return material;
   };
-  const solidTransparent = visual.opacity < 0.999;
+  const solidTransparent = canonical.opacity < 0.999;
   const matSolid = inheritClipping(new THREE.MeshStandardMaterial({
     color: col,
-    opacity: visual.opacity,
-    metalness: visual.metallic,
-    roughness: visual.roughness,
+    opacity: canonical.opacity,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
     transparent: solidTransparent,
     side: THREE.FrontSide,
     flatShading: false,
@@ -97332,13 +97395,13 @@ function _createMaterialMeshGroup(mesh, geometry) {
   // deliberately stable: back faces use 18% and front faces 38% of canonical opacity.
   const frontColor = col.clone();
   const backColor = col.clone().multiplyScalar(0.82);
-  const backOpacity = Number((visual.opacity * 0.18).toFixed(6));
-  const frontOpacity = Number((visual.opacity * 0.38).toFixed(6));
+  const backOpacity = Number((canonical.opacity * 0.18).toFixed(6));
+  const frontOpacity = Number((canonical.opacity * 0.38).toFixed(6));
   const matBack = inheritClipping(new THREE.MeshStandardMaterial({
     color: backColor,
     opacity: backOpacity,
-    metalness: visual.metallic,
-    roughness: visual.roughness,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
     transparent: true,
     side: THREE.BackSide,
     depthWrite: false,
@@ -97347,8 +97410,8 @@ function _createMaterialMeshGroup(mesh, geometry) {
   const matFront = inheritClipping(new THREE.MeshStandardMaterial({
     color: frontColor,
     opacity: frontOpacity,
-    metalness: visual.metallic,
-    roughness: visual.roughness,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
     transparent: true,
     side: THREE.FrontSide,
     depthWrite: false,
@@ -97370,9 +97433,9 @@ function _createMaterialMeshGroup(mesh, geometry) {
     if (faceCount > 0 && faceCount <= 90000) {
       const edgeGeometry = new THREE.EdgesGeometry(geometry, 55);
       const edgeMaterial = inheritClipping(new THREE.LineBasicMaterial({
-        color: 0xffffff,
+        color: frontColor.clone(),
         transparent: true,
-        opacity: Number((visual.opacity * 0.08).toFixed(6)),
+        opacity: Number((canonical.opacity * 0.08).toFixed(6)),
         depthWrite: false,
       }));
       edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
@@ -97384,7 +97447,130 @@ function _createMaterialMeshGroup(mesh, geometry) {
 
   group.userData._tcadSolidMesh = meshSolid;
   group.userData._tcadXray = { back: meshBack, front: meshFront, edges };
+  group.userData._tcadXrayOrig = {
+    back: backColor.clone(),
+    front: frontColor.clone(),
+    edge: frontColor.clone(),
+  };
   return group;
+}
+
+function _materialColorChanged(material, color) {
+  if (!material || !material.color || !color) return false;
+  const before = [Number(material.color.r), Number(material.color.g), Number(material.color.b)];
+  try { material.color.copy(color); } catch (e) { return false; }
+  return Math.abs(before[0] - Number(material.color.r)) > 1e-9
+    || Math.abs(before[1] - Number(material.color.g)) > 1e-9
+    || Math.abs(before[2] - Number(material.color.b)) > 1e-9;
+}
+
+function _syncMeshStandardVisual(material, visual, options = null) {
+  if (!material || !visual) return false;
+  const opts = (options && typeof options === 'object') ? options : {};
+  const transparent = (opts.transparent != null) ? !!opts.transparent : visual.opacity < 0.999;
+  const depthWrite = (opts.depthWrite != null) ? !!opts.depthWrite : !transparent;
+  const opacity = (opts.opacity != null) ? Number(opts.opacity) : Number(visual.opacity);
+  let changed = false;
+  let programChanged = false;
+  const assign = (key, value) => {
+    if (material[key] !== value) {
+      material[key] = value;
+      changed = true;
+    }
+  };
+  if (!!material.transparent !== transparent) programChanged = true;
+  if (!!material.depthWrite !== depthWrite) programChanged = true;
+  assign('opacity', opacity);
+  assign('metalness', Number(visual.metallic));
+  assign('roughness', Number(visual.roughness));
+  assign('transparent', transparent);
+  assign('depthWrite', depthWrite);
+  if (programChanged) {
+    try { material.needsUpdate = true; } catch (e) {}
+  }
+  return changed;
+}
+
+function _materialVisibilitySignature(group) {
+  if (!group || !group.userData) return '';
+  const solid = group.userData._tcadSolidMesh;
+  const xray = group.userData._tcadXray || {};
+  return [group.visible, solid && solid.visible, xray.back && xray.back.visible, xray.front && xray.front.visible, xray.edges && xray.edges.visible]
+    .map((value) => value ? '1' : '0')
+    .join('');
+}
+
+function _syncMaterialVisualManifest(meshes) {
+  const items = Array.isArray(meshes) ? meshes : [];
+  const incomingIds = items.map((item) => parseInt(item && item.mat_id) || 0).filter((id) => id > 0);
+  const currentIds = Array.from((state.meshes || new Map()).keys()).map((id) => parseInt(id) || 0).filter((id) => id > 0);
+  const incomingUnique = Array.from(new Set(incomingIds)).sort((a, b) => a - b);
+  const currentUnique = Array.from(new Set(currentIds)).sort((a, b) => a - b);
+  if (incomingIds.length !== items.length
+      || incomingUnique.length !== items.length
+      || incomingUnique.length !== currentUnique.length
+      || incomingUnique.some((id, index) => id !== currentUnique[index])) {
+    return { ok: false, reason: 'material-set-changed', visualChanged: false, visibilityChanged: false };
+  }
+
+  let visualChanged = false;
+  let visibilityChanged = false;
+  const wantElements = String(state.previewStyle || '').toLowerCase() === 'elements';
+  for (const item of items) {
+    const matId = parseInt(item.mat_id) || 0;
+    const group = state.meshes.get(matId);
+    if (!group || !group.userData) {
+      return { ok: false, reason: 'material-set-changed', visualChanged, visibilityChanged };
+    }
+    const beforeVisibility = _materialVisibilitySignature(group);
+    const beforeCanonical = group.userData._tcadVisual ? JSON.stringify(group.userData._tcadVisual) : '';
+    const canonical = _canonicalMaterialVisualForMesh(item);
+    const effective = _materialVisualForMesh(item, canonical);
+    group.userData._tcadVisual = _cloneMaterialVisual(canonical);
+    group.userData._tcadBaseVisible = !!canonical.visible;
+    group.userData.name = canonical.display_name;
+    if (beforeCanonical !== JSON.stringify(group.userData._tcadVisual)) visualChanged = true;
+
+    const color = new THREE.Color(effective.color[0], effective.color[1], effective.color[2]);
+    try { if (color && typeof color.convertSRGBToLinear === 'function') color.convertSRGBToLinear(); } catch (e) {}
+    const frontColor = color.clone();
+    const backColor = color.clone().multiplyScalar(0.82);
+    const edgeColor = frontColor.clone();
+    const solid = group.userData._tcadSolidMesh;
+    const xray = group.userData._tcadXray || {};
+    if (solid) {
+      try { solid.userData.name = canonical.display_name; } catch (e) {}
+      if (_materialColorChanged(solid.material, color)) visualChanged = true;
+      if (_syncMeshStandardVisual(solid.material, canonical)) visualChanged = true;
+    }
+    const backOpacity = Number((canonical.opacity * 0.18).toFixed(6));
+    const frontOpacity = Number((canonical.opacity * 0.38).toFixed(6));
+    if (xray.back) {
+      if (!wantElements && _materialColorChanged(xray.back.material, backColor)) visualChanged = true;
+      if (_syncMeshStandardVisual(xray.back.material, canonical, { transparent: true, depthWrite: false, opacity: backOpacity })) visualChanged = true;
+    }
+    if (xray.front) {
+      if (!wantElements && _materialColorChanged(xray.front.material, frontColor)) visualChanged = true;
+      if (_syncMeshStandardVisual(xray.front.material, canonical, { transparent: true, depthWrite: false, opacity: frontOpacity })) visualChanged = true;
+    }
+    if (xray.edges && xray.edges.material) {
+      if (!wantElements && _materialColorChanged(xray.edges.material, edgeColor)) visualChanged = true;
+      const edgeOpacity = Number((canonical.opacity * 0.08).toFixed(6));
+      if (xray.edges.material.opacity !== edgeOpacity) {
+        xray.edges.material.opacity = edgeOpacity;
+        visualChanged = true;
+      }
+      try { xray.edges.material.transparent = true; xray.edges.material.depthWrite = false; } catch (e) {}
+    }
+    group.userData._tcadXrayOrig = {
+      back: backColor.clone(),
+      front: frontColor.clone(),
+      edge: edgeColor.clone(),
+    };
+    _applyMaterialModeToGroup(group, getResolvedMaterialDisplay(matId));
+    if (beforeVisibility !== _materialVisibilitySignature(group)) visibilityChanged = true;
+  }
+  return { ok: true, reason: '', visualChanged, visibilityChanged };
 }
 
 function clearMeshes() {
@@ -97675,7 +97861,9 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
     if (!group || !group.userData) return;
     const id = parseInt(mid) || 0;
     if (!(id > 0)) return;
-    const rgb = _materialColorOverride01(id) || byId.get(id);
+    const canonical = group.userData._tcadVisual;
+    const canonicalColor = canonical && Array.isArray(canonical.color) ? canonical.color : null;
+    const rgb = _materialColorOverride01(id) || canonicalColor || byId.get(id);
     if (!rgb) return;
     const col = new THREE.Color(rgb[0], rgb[1], rgb[2]);
     try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
@@ -97683,7 +97871,6 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
     const backColor = col.clone().multiplyScalar(0.82);
     // Solid mesh
     try {
-      if (group.userData._tcadVisual) group.userData._tcadVisual.color = [Number(rgb[0]), Number(rgb[1]), Number(rgb[2])];
       const solidMesh = group.userData._tcadSolidMesh;
       if (solidMesh && solidMesh.material) {
         if (solidMesh.material.color) solidMesh.material.color.copy(col);
@@ -97697,6 +97884,7 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
         if (!wantElements) {
           if (xray.front.material && xray.front.material.color) xray.front.material.color.copy(frontColor);
           if (xray.back.material && xray.back.material.color) xray.back.material.color.copy(backColor);
+          if (xray.edges && xray.edges.material && xray.edges.material.color) xray.edges.material.color.copy(frontColor);
           try { if (xray.front.material && xray.front.material.emissive) xray.front.material.emissive.copy(frontColor).multiplyScalar(0.04); } catch (e) {}
           try { if (xray.back.material && xray.back.material.emissive) xray.back.material.emissive.copy(backColor).multiplyScalar(0.05); } catch (e) {}
         }
@@ -97704,6 +97892,7 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
         if (group.userData._tcadXrayOrig) {
           group.userData._tcadXrayOrig.front = frontColor.clone();
           group.userData._tcadXrayOrig.back = backColor.clone();
+          group.userData._tcadXrayOrig.edge = frontColor.clone();
         }
       }
     } catch (e) {}
@@ -98296,10 +98485,19 @@ async function refreshPreview() {
   const meshes = manifest.result.meshes || [];
   const key = `mesh:${meshMode}:rev${rev}:f${faceLimit}`;
   if (state.previewKey === key && meshes.length && state.meshes.size) {
-    try { renderLegend(meshes); } catch (e) {}
-    try { applyPreviewStyle(false); } catch (e) {}
-    showNotification('预览已是最新');
-    return;
+    const synced = _syncMaterialVisualManifest(meshes);
+    if (synced && synced.ok) {
+      try { applyPreviewStyle(false); } catch (e) {}
+      if (synced.visibilityChanged) {
+        try { applyAxisClippingAfterMeshRefresh(false); } catch (e) {}
+      }
+      try { renderLegend(meshes); } catch (e) {}
+      if (synced.visualChanged) {
+        try { requestWebglRender(0); } catch (e) {}
+      }
+      showNotification('预览已是最新');
+      return;
+    }
   }
   try { invalidateSliceCaches('preview updated'); } catch (e) {}
   clearMeshes();

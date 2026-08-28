@@ -290,7 +290,9 @@ const beforeToggle = {{
 _applyMaterialModeToGroup(group, 'solid');
 const afterToggle = {{ groupVisible: group.visible, geometryStillPresent: solid.geometry === geometry }};
 const legacy = _materialVisualForMesh({{ mat_id: 9, name: 'Legacy', color: [0.4, 0.5, 0.6] }});
-console.log(JSON.stringify({{ beforeToggle, afterToggle, legacy }}));
+state.materials = [{{ id: 10, name: 'Physical Fallback', color: [0.95, 0.95, 0.95], _tcadPhysicalColor: [0.15, 0.25, 0.35] }}];
+const physicalFallback = _materialVisualForMesh({{ mat_id: 10 }});
+console.log(JSON.stringify({{ beforeToggle, afterToggle, legacy, physicalFallback }}));
 """
         )
 
@@ -314,6 +316,8 @@ console.log(JSON.stringify({{ beforeToggle, afterToggle, legacy }}));
         self.assertEqual(result["legacy"]["color"], [0.4, 0.5, 0.6])
         self.assertEqual(result["legacy"]["opacity"], 1)
         self.assertTrue(result["legacy"]["visible"])
+        self.assertEqual(result["physicalFallback"]["display_name"], "Physical Fallback")
+        self.assertEqual(result["physicalFallback"]["color"], [0.15, 0.25, 0.35])
 
     def test_local_display_toggle_does_not_fetch_and_refreshes_clipping(self):
         apply_mode = _extract_function("_applyMaterialModeToGroup", "applyMaterialDisplayWebGL")
