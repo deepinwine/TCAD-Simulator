@@ -84125,14 +84125,21 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   text-overflow: ellipsis;
   pointer-events: none;
 }
-.viewer-backend-status[data-backend="webgl"] {
+#viewer-backend-status[data-backend="webgl"] {
+  left: auto;
+  right: 10px;
+  max-width: min(calc(100% - 20px), 96px);
+  box-sizing: border-box;
   color: #ccfbf1;
   padding: 5px 9px;
   border-radius: 999px;
   background: rgba(6, 78, 59, 0.78);
   border: 1px solid rgba(45, 212, 191, 0.50);
 }
-.viewer-backend-status[data-backend="remote"] {
+#viewer-backend-status[data-backend="remote"] {
+  left: 10px;
+  right: auto;
+  max-width: min(72%, 720px);
   color: #fef3c7;
   padding: 7px 11px;
   border-radius: 8px;

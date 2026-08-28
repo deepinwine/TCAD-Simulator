@@ -1037,12 +1037,37 @@ console.log(JSON.stringify({{ webgl2, remote, webgl1, pending }}));
             all(item["aria"] == "false" for item in pending["controls"][1:])
         )
 
-        self.assertIn(
-            '.viewer-backend-status[data-backend="webgl"]', tcad._WEBUI_STYLE_CSS
+        def css_declarations(selector):
+            match = re.search(
+                rf"{re.escape(selector)}\s*\{{(?P<body>[^}}]*)\}}",
+                tcad._WEBUI_STYLE_CSS,
+            )
+            self.assertIsNotNone(match, f"missing CSS rule for {selector}")
+            return {
+                name.strip(): value.strip()
+                for declaration in match.group("body").split(";")
+                if ":" in declaration
+                for name, value in [declaration.split(":", 1)]
+            }
+
+        base_css = css_declarations(".viewer-backend-status")
+        webgl_css = css_declarations(
+            '#viewer-backend-status[data-backend="webgl"]'
         )
-        self.assertIn(
-            '.viewer-backend-status[data-backend="remote"]', tcad._WEBUI_STYLE_CSS
+        remote_css = css_declarations(
+            '#viewer-backend-status[data-backend="remote"]'
         )
+        hidden_css = css_declarations(".viewer-backend-status[hidden]")
+        self.assertEqual(base_css["position"], "absolute")
+        self.assertEqual(base_css["top"], "10px")
+        self.assertEqual(base_css["pointer-events"], "none")
+        self.assertEqual(webgl_css.get("left"), "auto")
+        self.assertEqual(webgl_css.get("right"), "10px")
+        self.assertIn("100% - 20px", webgl_css.get("max-width", ""))
+        self.assertIn("96px", webgl_css.get("max-width", ""))
+        self.assertEqual(remote_css.get("left"), "10px")
+        self.assertEqual(remote_css.get("right"), "auto")
+        self.assertEqual(hidden_css["display"], "none !important")
 
 
 class CameraContractTests(unittest.TestCase):
