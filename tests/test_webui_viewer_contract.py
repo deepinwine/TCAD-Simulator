@@ -66,6 +66,15 @@ def _material_visual_contract_source():
     return source[start:end]
 
 
+def _refresh_preview_source():
+    source = tcad._WEBUI_SCRIPT_JS
+    start = source.find("async function refreshPreview(")
+    end = source.find("\nfunction invalidateSliceCaches(", start)
+    if start < 0 or end < 0:
+        raise AssertionError("could not extract refreshPreview contract source")
+    return source[start:end]
+
+
 class MaterialManifestTests(unittest.TestCase):
     def test_material_visual_payload_has_all_render_fields(self):
         db = tcad.MaterialDatabase()
@@ -178,6 +187,7 @@ class Color {
     }
   }
   clone() { return new Color(this.r, this.g, this.b); }
+  copy(other) { this.r = other.r; this.g = other.g; this.b = other.b; return this; }
   multiplyScalar(v) { this.r *= v; this.g *= v; this.b *= v; return this; }
   convertSRGBToLinear() { return this; }
 }
@@ -416,6 +426,140 @@ console.log(JSON.stringify({{
         )
 
         self.assertEqual(result, {"geometry": 1, "sharedMaterial": 1, "uniqueMaterial": 1})
+
+    def test_cache_hit_syncs_canonical_visual_without_geometry_work(self):
+        material_source = _material_visual_contract_source()
+        apply_mode = _extract_function("_applyMaterialModeToGroup", "applyMaterialDisplayWebGL")
+        apply_colors = _extract_function(
+            "applyMaterialColorOverridesWebGL", "setMaterialColorOverride"
+        )
+        refresh_preview = _refresh_preview_source()
+        result = _run_node(
+            self._node_prelude()
+            + f"""
+{material_source}
+{apply_mode}
+{apply_colors}
+{refresh_preview}
+let apiCount = 0;
+let geometryFetches = 0;
+let parseCount = 0;
+let clearCount = 0;
+let clippingRefreshes = 0;
+let renderRequests = 0;
+let styleCalls = 0;
+let legendSnapshot = null;
+const geometry = {{ identity: 'original', getIndex() {{ return {{ count: 24 }}; }} }};
+const firstItem = {{
+  mat_id: 7, name: 'Legacy One', color: [0.7, 0.7, 0.7],
+  visual: {{ material_id: 7, display_name: 'Original', color: [0.1, 0.2, 0.3], opacity: 1, metallic: 0.1, roughness: 0.8, visible: true }}
+}};
+const group = _createMaterialMeshGroup(firstItem, geometry);
+state.meshes.set(7, group);
+state.viewerReady = true;
+state.viewerMode = '3d';
+state.previewStyle = 'solid';
+state.previewKey = 'mesh:solid:rev11:f40000';
+state.materials = [{{ id: 7, name: 'Physical Copper', color: [0.25, 0.25, 0.25] }}];
+state.materialColors = {{ '7': [0.9, 0.1, 0.2] }};
+const secondItem = {{
+  mat_id: 7, name: 'Legacy Two', color: [0.6, 0.6, 0.6],
+  visual: {{ material_id: 7, display_name: 'Updated Canonical', color: [0.4, 0.5, 0.6], opacity: 0.45, metallic: 0.8, roughness: 0.2, visible: false }}
+}};
+function initViewer() {{}}
+function previewFaceLimit() {{ return 40000; }}
+async function apiGet() {{ apiCount += 1; return {{ ok: true, result: {{ rev: 11, mode: 'solid', meshes: [secondItem] }} }}; }}
+async function fetch() {{ geometryFetches += 1; throw new Error('cache hit fetched geometry'); }}
+const loader = {{ parse() {{ parseCount += 1; }} }};
+function clearMeshes() {{ clearCount += 1; }}
+function invalidateSliceCaches() {{ throw new Error('cache hit invalidated geometry'); }}
+function showNotification() {{}}
+function applyPreviewStyle() {{ styleCalls += 1; return false; }}
+function renderLegend(items) {{
+  const v = _materialVisualForMesh(items[0]);
+  legendSnapshot = {{ name: v.display_name, color: v.color.slice() }};
+}}
+function applyAxisClippingAfterMeshRefresh() {{ clippingRefreshes += 1; return true; }}
+function requestWebglRender() {{ renderRequests += 1; }}
+function _cutawayActive3d() {{ return false; }}
+(async () => {{
+  await refreshPreview();
+  const solid = group.userData._tcadSolidMesh;
+  const xray = group.userData._tcadXray;
+  const afterCacheHit = {{
+    canonical: group.userData._tcadVisual,
+    baseVisible: group.userData._tcadBaseVisible,
+    groupVisible: group.visible,
+    geometrySame: solid.geometry === geometry && xray.front.geometry === geometry && xray.back.geometry === geometry,
+    solid: {{ color: [solid.material.color.r, solid.material.color.g, solid.material.color.b], opacity: solid.material.opacity, metalness: solid.material.metalness, roughness: solid.material.roughness, transparent: solid.material.transparent, depthWrite: solid.material.depthWrite }},
+    xrayOpacity: [xray.back.material.opacity, xray.front.material.opacity],
+    clippingCount: solid.material.clippingPlanes.length,
+    restore: group.userData._tcadXrayOrig ? [group.userData._tcadXrayOrig.front.r, group.userData._tcadXrayOrig.front.g, group.userData._tcadXrayOrig.front.b] : null
+  }};
+  state.materialColors = {{}};
+  applyMaterialColorOverridesWebGL(7);
+  const restoredCanonicalColor = [solid.material.color.r, solid.material.color.g, solid.material.color.b];
+  state.materialDisplaySolid['7'] = 'fast';
+  const visibleItem = {{ ...secondItem, visual: {{ ...secondItem.visual, visible: true }} }};
+  const restoreResult = _syncMaterialVisualManifest([visibleItem]);
+  console.log(JSON.stringify({{
+    apiCount, geometryFetches, parseCount, clearCount, clippingRefreshes, renderRequests, styleCalls,
+    legendSnapshot, afterCacheHit, restoredCanonicalColor,
+    restoreResult,
+    restoredVisible: group.visible,
+    restoredFast: xray.front.visible,
+    geometryIdentity: solid.geometry.identity
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        )
+
+        self.assertEqual(result["apiCount"], 1)
+        self.assertEqual(result["geometryFetches"], 0)
+        self.assertEqual(result["parseCount"], 0)
+        self.assertEqual(result["clearCount"], 0)
+        self.assertEqual(result["clippingRefreshes"], 1)
+        self.assertGreaterEqual(result["renderRequests"], 1)
+        self.assertEqual(result["styleCalls"], 1)
+        self.assertEqual(result["legendSnapshot"]["name"], "Updated Canonical")
+        self.assertEqual(result["legendSnapshot"]["color"], [0.9, 0.1, 0.2])
+        hit = result["afterCacheHit"]
+        self.assertEqual(hit["canonical"]["color"], [0.4, 0.5, 0.6])
+        self.assertEqual(hit["canonical"]["display_name"], "Updated Canonical")
+        self.assertFalse(hit["baseVisible"])
+        self.assertFalse(hit["groupVisible"])
+        self.assertTrue(hit["geometrySame"])
+        self.assertEqual(hit["solid"]["color"], [0.9, 0.1, 0.2])
+        self.assertEqual(hit["solid"]["opacity"], 0.45)
+        self.assertEqual(hit["solid"]["metalness"], 0.8)
+        self.assertEqual(hit["solid"]["roughness"], 0.2)
+        self.assertTrue(hit["solid"]["transparent"])
+        self.assertFalse(hit["solid"]["depthWrite"])
+        self.assertEqual(hit["xrayOpacity"], [0.081, 0.171])
+        self.assertEqual(hit["clippingCount"], 2)
+        self.assertEqual(hit["restore"], [0.9, 0.1, 0.2])
+        self.assertEqual(result["restoredCanonicalColor"], [0.4, 0.5, 0.6])
+        self.assertTrue(result["restoreResult"]["ok"])
+        self.assertTrue(result["restoreResult"]["visibilityChanged"])
+        self.assertTrue(result["restoredVisible"])
+        self.assertTrue(result["restoredFast"])
+        self.assertEqual(result["geometryIdentity"], "original")
+
+    def test_cache_guard_rejects_same_key_with_changed_material_ids(self):
+        material_source = _material_visual_contract_source()
+        result = _run_node(
+            self._node_prelude()
+            + f"""
+{material_source}
+const geometry = {{ getIndex() {{ return {{ count: 3 }}; }} }};
+state.meshes.set(7, _createMaterialMeshGroup({{ mat_id: 7, name: 'A', color: [0.1, 0.2, 0.3] }}, geometry));
+const result = _syncMaterialVisualManifest([{{ mat_id: 8, name: 'B', color: [0.2, 0.3, 0.4] }}]);
+console.log(JSON.stringify(result));
+"""
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "material-set-changed")
 
 
 class WebGLCapabilityContractTests(unittest.TestCase):
