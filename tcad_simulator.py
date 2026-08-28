@@ -96173,6 +96173,11 @@ function updateSlicePlane3d() {
 
 // ---- X/Y/Z independent WebGL clipping ----
 const CLIP_AXES = ['X', 'Y', 'Z'];
+let axisClippingCapSlice = null;
+let axisClippingCapSliceKey = '';
+let axisClippingCapRequestSeq = 0;
+let axisClippingCapRequestAbort = null;
+let axisClippingCapInFlightKey = '';
 
 function _defaultClipPlanes3d() {
   return {
@@ -96219,6 +96224,139 @@ function _serializeClipPlanes3d() {
 function _activeAxisClippingAxes() {
   const clean = _ensureClipPlanes3dState();
   return CLIP_AXES.filter((axis) => !!clean[axis].enabled);
+}
+
+function _axisClippingCenterOffsetComponent(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  const component = { X: 'x', Y: 'y', Z: 'z' }[axis];
+  if (!component) return 0;
+  try {
+    if (meshCenterOffset && meshCenterOffset.isVector3 && Number.isFinite(Number(meshCenterOffset[component]))) {
+      return Number(meshCenterOffset[component]);
+    }
+  } catch (e) {}
+  try {
+    const fallback = _sliceCenterOffsetUmFallback();
+    const index = { X: 0, Y: 1, Z: 2 }[axis];
+    const value = fallback && Number(fallback[index]);
+    if (Number.isFinite(value)) return value;
+  } catch (e) {}
+  return 0;
+}
+
+function _axisClippingSliceIndex(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis)) return null;
+  const meta = activeAxisClippingMeta && activeAxisClippingMeta[axis];
+  const worldPointUm = meta ? Number(meta.point) : NaN;
+  if (!Number.isFinite(worldPointUm)) return null;
+  let voxelNm = 5.0;
+  try {
+    const value = Number(state && state.model && state.model.voxel_size_nm);
+    if (Number.isFinite(value) && value > 0) voxelNm = value;
+  } catch (e) {}
+  const voxelUm = Math.max(1e-12, voxelNm / 1000.0);
+  const domainUm = worldPointUm + _axisClippingCenterOffsetComponent(axis);
+  // Slice planes are located at voxel centres: world = (index + 0.5) * voxel - centreOffset.
+  const rawIndex = Math.round(domainUm / voxelUm - 0.5);
+  return Math.max(0, Math.min(Math.max(0, axisMax(axis)), rawIndex));
+}
+
+function _axisClippingCapNormal(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!window.THREE || !CLIP_AXES.includes(axis)) return null;
+  const meta = activeAxisClippingMeta && activeAxisClippingMeta[axis];
+  try {
+    if (meta && meta.plane && meta.plane.normal && typeof meta.plane.normal.clone === 'function') {
+      return meta.plane.normal.clone();
+    }
+  } catch (e) {}
+  const config = _ensureClipPlanes3dState()[axis];
+  const normal = new THREE.Vector3(axis === 'X' ? 1 : 0, axis === 'Y' ? 1 : 0, axis === 'Z' ? 1 : 0);
+  if (config.invert || (meta && meta.invert)) normal.multiplyScalar(-1);
+  return normal;
+}
+
+function _axisClippingModelRevision() {
+  try {
+    if (state.previewRev != null && String(state.previewRev) !== '') return String(state.previewRev);
+    if (state.model && state.model.revision != null) return String(state.model.revision);
+  } catch (e) {}
+  return 'none';
+}
+
+function _axisClippingCapDataKey(axis0, index0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  const index = Math.max(0, Number(index0) || 0);
+  return `axis=${axis}|index=${index}|rev=${_axisClippingModelRevision()}`;
+}
+
+function _cancelAxisClippingCapRequest(clearCache = false) {
+  axisClippingCapRequestSeq += 1;
+  try { if (axisClippingCapRequestAbort) axisClippingCapRequestAbort.abort(); } catch (e) {}
+  axisClippingCapRequestAbort = null;
+  axisClippingCapInFlightKey = '';
+  if (clearCache) {
+    axisClippingCapSlice = null;
+    axisClippingCapSliceKey = '';
+  }
+}
+
+async function _requestAxisClippingCapSlice(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis) || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+  const activeAxes = _activeAxisClippingAxes();
+  if (activeAxes.length !== 1 || activeAxes[0] !== axis) return false;
+  const index = _axisClippingSliceIndex(axis);
+  if (index == null) return false;
+  const key = _axisClippingCapDataKey(axis, index);
+  if (axisClippingCapSlice && axisClippingCapSliceKey === key) {
+    try { return !!_axisClippingRenderCapSlice(axisClippingCapSlice); } catch (e) { return false; }
+  }
+  if (axisClippingCapInFlightKey === key) return false;
+
+  _cancelAxisClippingCapRequest(false);
+  axisClippingCapSlice = null;
+  axisClippingCapSliceKey = '';
+  // Never leave a cap from the previous physical plane visible while its replacement is loading.
+  // This also disposes the previous cap geometry/material/texture before a model revision is fetched.
+  try { _clearCutawayCaps(); } catch (e) {}
+  const seq = ++axisClippingCapRequestSeq;
+  axisClippingCapInFlightKey = key;
+  axisClippingCapRequestAbort = window.AbortController ? new window.AbortController() : null;
+  const signal = axisClippingCapRequestAbort ? axisClippingCapRequestAbort.signal : undefined;
+  const isCurrent = () => {
+    if (seq !== axisClippingCapRequestSeq || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+    const axes = _activeAxisClippingAxes();
+    return axes.length === 1 && axes[0] === axis && _axisClippingCapDataKey(axis, _axisClippingSliceIndex(axis)) === key;
+  };
+  try {
+    const response = await apiGet(
+      `/api/slice?axis=${encodeURIComponent(axis)}&index=${encodeURIComponent(index)}&kind=material`,
+      0,
+      signal ? { signal } : null
+    );
+    if (!isCurrent() || !response || !response.ok) return false;
+    const result = response.result || {};
+    const shape = Array.isArray(result.shape) ? result.shape : [0, 0];
+    const height = parseInt(shape[0], 10) || 0;
+    const width = parseInt(shape[1], 10) || 0;
+    const bytes = _b64ToBytes(result.data_b64 || '');
+    if (!(height > 0 && width > 0) || !bytes || bytes.byteLength < height * width * 2) return false;
+    const view = new Uint16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+    const slice = { axis, index, w: width, h: height, data: view.slice(0, height * width), rev: _axisClippingModelRevision() };
+    if (!isCurrent()) return false;
+    axisClippingCapSlice = slice;
+    axisClippingCapSliceKey = key;
+    return !!_axisClippingRenderCapSlice(slice);
+  } catch (e) {
+    return false;
+  } finally {
+    if (seq === axisClippingCapRequestSeq) {
+      axisClippingCapRequestAbort = null;
+      axisClippingCapInFlightKey = '';
+    }
+  }
 }
 
 function _cutawayActive3d() {
@@ -96308,12 +96446,14 @@ function _updateAxisClippingCapPolicy(activeAxes) {
   const signature = _axisClippingCapSignature(activeAxes);
   const changed = signature !== axisClippingCapKey;
   if (!activeAxes.length) {
+    _cancelAxisClippingCapRequest(true);
     if (changed || axisClippingCapMode !== 'none') { try { _clearCutawayCaps(); } catch (e) {} }
     axisClippingCapMode = 'none';
     axisClippingCapKey = signature;
     return;
   }
   if (activeAxes.length > 1) {
+    _cancelAxisClippingCapRequest(true);
     if (changed || axisClippingCapMode !== 'multi-disabled') { try { _clearCutawayCaps(); } catch (e) {} }
     axisClippingCapMode = 'multi-disabled';
     axisClippingCapKey = signature;
@@ -96376,12 +96516,6 @@ function _setAxisClippingState(axis0, patch, persistDelay = 0) {
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'invert')) next.invert = !!patch.invert;
   clean[axis] = next;
   state.clipPlanes3d = clean;
-  if (next.enabled) {
-    try {
-      state.sliceAxis = axis;
-      state.sliceIndex = Math.round(next.position * Math.max(0, axisMax(axis)));
-    } catch (e) {}
-  }
   state.sliceCutaway = _activeAxisClippingAxes().length > 0;
   try { updateAxisClippingPlanes(true); } catch (e) {}
   try { scheduleUiStatePersist(persistDelay); } catch (e) {}
@@ -96499,6 +96633,7 @@ function applyAxisClippingAfterMeshRefresh(requestRender = true) {
 }
 
 function resetAxisClippingRuntime() {
+  try { _cancelAxisClippingCapRequest(true); } catch (e) {}
   try { _applyAxisClippingToMaterials(null); } catch (e) {}
   activeClippingPlanes = [];
   activeAxisClippingBounds = null;
@@ -96968,7 +97103,9 @@ function _ensureCutawayCapMesh(which, slice) {
   }
 
   // Position + orientation
-  const normal = (axis === 'X') ? new THREE.Vector3(1, 0, 0) : (axis === 'Y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
+  const normal = _axisClippingCapNormal(axis) || ((axis === 'X')
+    ? new THREE.Vector3(1, 0, 0)
+    : (axis === 'Y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1)));
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
   try { mesh.quaternion.copy(q); } catch (e) {}
   let pos = null;
@@ -96995,23 +97132,22 @@ function _ensureCutawayCapMesh(which, slice) {
 function _ensureSingleAxisClippingCap(axis0) {
   const axis = String(axis0 || '').trim().toUpperCase();
   if (!CLIP_AXES.includes(axis) || axisClippingCapMode !== 'single') return false;
-  const config = _ensureClipPlanes3dState()[axis];
-  const max = Math.max(0, axisMax(axis));
-  const index = Math.round(_clip01(config.position, 0.5) * max);
-  state.sliceAxis = axis;
-  state.sliceIndex = index;
-  const cached = state.sliceLast;
-  const cacheMatches = !!(cached && String(cached.axis || '').toUpperCase() === axis && Number(cached.index) === index);
-  if (!cacheMatches) {
-    try { if (cutawayCapsGroup) cutawayCapsGroup.visible = false; } catch (e) {}
-    try {
-      const pending = refreshSlice(true, 'primary');
-      if (pending && typeof pending.catch === 'function') pending.catch(() => {});
-    } catch (e) {}
-    return false;
-  }
+  try {
+    const pending = _requestAxisClippingCapSlice(axis);
+    if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+  } catch (e) {}
+  return true;
+}
+
+function _axisClippingRenderCapSlice(slice) {
+  if (!slice || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+  const activeAxes = _activeAxisClippingAxes();
+  if (activeAxes.length !== 1 || activeAxes[0] !== String(slice.axis || '').toUpperCase()) return false;
+  const currentIndex = _axisClippingSliceIndex(activeAxes[0]);
+  const key = _axisClippingCapDataKey(activeAxes[0], currentIndex);
+  if (currentIndex == null || key !== axisClippingCapSliceKey || Number(slice.index) !== currentIndex) return false;
   if (!_ensureCutawayCapsGroup()) return false;
-  const mesh = _ensureCutawayCapMesh(1, cached);
+  const mesh = _ensureCutawayCapMesh(1, slice);
   try { cutawayCapsGroup.visible = !!mesh; } catch (e) {}
   try { if (cutawayCapMesh1) cutawayCapMesh1.visible = !!mesh; } catch (e) {}
   try { if (cutawayCapMesh2) cutawayCapMesh2.visible = false; } catch (e) {}
@@ -97019,6 +97155,7 @@ function _ensureSingleAxisClippingCap(axis0) {
     try { cutawayCapMat1.clippingPlanes = null; } catch (e) {}
     try { cutawayCapMat1.clipIntersection = false; } catch (e) {}
   }
+  try { requestWebglRender(0); } catch (e) {}
   return !!mesh;
 }
 
@@ -98110,6 +98247,7 @@ let _sliceReqAbort = null;
 function invalidateSliceCaches(reason = '') {
   // Invalidate cached 2D slices and 3D cutaway cap textures. This prevents stale textures after
   // model/preview updates and keeps "刷新切片" reliable.
+  try { _cancelAxisClippingCapRequest(true); } catch (e) {}
   try { _sliceReqSeq += 1; } catch (e) {}
   try { if (_sliceReqAbort) _sliceReqAbort.abort(); } catch (e) {}
   _sliceReqAbort = null;

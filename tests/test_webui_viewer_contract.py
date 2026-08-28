@@ -1177,10 +1177,15 @@ const state = {
   meshes: new Map(),
   sliceCutaway: false,
   sliceAxis: 'X',
-  sliceIndex: 0
+  sliceIndex: 7,
+  sliceLast: { axis: 'X', index: 7, marker: '2d-cache' },
+  sliceOverlay: false,
+  model: { voxel_size_nm: 1000 },
+  previewRev: 11
 };
 let renderer = { localClippingEnabled: false };
 let meshGroup = new THREE.Group();
+let meshCenterOffset = new THREE.Vector3(0, 0, 0);
 let elementPointsGroup = null;
 let activeClippingPlanes = [];
 let activeAxisClippingBounds = null;
@@ -1439,6 +1444,195 @@ console.log(JSON.stringify({
             {"count": 0, "renderer": False, "materialPlanes": None, "bounds": None, "metaKeys": [], "capMode": "none"},
         )
         self.assertEqual(result["stateStillSerializable"]["X"]["enabled"], True)
+
+    def test_cap_index_uses_world_plane_position_without_mutating_slice_ui(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+meshCenterOffset.set(10, 20, 50);
+axisMax = () => 99;
+const partialDomainMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(2, 2, 20),
+  new THREE.MeshBasicMaterial()
+);
+partialDomainMesh.position.z = 30;
+meshGroup.add(partialDomainMesh);
+meshCenterOffset.set(0, 0, 0);
+state.clipPlanes3d.Z = { enabled: true, position: 0.5, invert: false };
+updateAxisClippingPlanes(false);
+const partialDomain = {
+  min: activeAxisClippingBounds.min.z,
+  max: activeAxisClippingBounds.max.z,
+  point: activeAxisClippingMeta.Z.point,
+  index: _axisClippingSliceIndex('Z')
+};
+state.clipPlanes3d.Z.enabled = false;
+meshGroup.remove(partialDomainMesh);
+meshCenterOffset.set(10, 20, 50);
+activeAxisClippingMeta = {
+  X: { point: 20, invert: false },
+  Y: { point: 10, invert: false },
+  Z: { point: -20, invert: false }
+};
+const indices = {
+  X: _axisClippingSliceIndex('X'),
+  Y: _axisClippingSliceIndex('Y'),
+  Z: _axisClippingSliceIndex('Z')
+};
+const normal = _axisClippingCapNormal('Z').toArray();
+activeAxisClippingMeta.Z.invert = true;
+state.clipPlanes3d.Z.invert = true;
+const inverted = _axisClippingSliceIndex('Z');
+const invertedNormal = _axisClippingCapNormal('Z').toArray();
+activeAxisClippingMeta.X.point = -1000;
+const low = _axisClippingSliceIndex('X');
+activeAxisClippingMeta.X.point = 1000;
+const high = _axisClippingSliceIndex('X');
+const before = { axis: state.sliceAxis, index: state.sliceIndex, last: state.sliceLast };
+_setAxisClippingState('Z', { enabled: true, position: 0.73, invert: true }, 0);
+const after = { axis: state.sliceAxis, index: state.sliceIndex, last: state.sliceLast };
+console.log(JSON.stringify({ partialDomain, indices, normal, inverted, invertedNormal, low, high, before, after }));
+"""
+        )
+
+        self.assertEqual(result["partialDomain"], {"min": 20, "max": 40, "point": 30, "index": 30})
+        self.assertEqual(result["indices"], {"X": 30, "Y": 30, "Z": 30})
+        self.assertEqual(result["normal"], [0, 0, 1])
+        self.assertEqual(result["inverted"], 30)
+        self.assertEqual(result["invertedNormal"], [0, 0, -1])
+        self.assertEqual(result["low"], 0)
+        self.assertEqual(result["high"], 99)
+        self.assertEqual(result["after"], result["before"])
+
+    def test_dedicated_cap_fetch_works_without_slice_overlay_and_rejects_stale_response(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+class FakeAbortController {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+}
+window.AbortController = FakeAbortController;
+axisMax = () => 99;
+const pending = [];
+function apiGet(path, timeout, extra) {
+  return new Promise((resolve) => pending.push({ path, timeout, signal: extra && extra.signal, resolve }));
+}
+function _b64ToBytes() { return new Uint8Array([1, 0, 2, 0, 3, 0, 4, 0]); }
+const rendered = [];
+function _axisClippingRenderCapSlice(slice) { rendered.push({ axis: slice.axis, index: slice.index, data: Array.from(slice.data) }); return true; }
+
+(async () => {
+  state.clipPlanes3d.Z.enabled = true;
+  activeAxisClippingMeta = { Z: { point: 30, position: 0.3, invert: false } };
+  axisClippingCapMode = 'single';
+  const first = _requestAxisClippingCapSlice('Z');
+  activeAxisClippingMeta.Z.point = 40;
+  const second = _requestAxisClippingCapSlice('Z');
+  const firstWasAborted = pending[0].signal.aborted;
+  pending[0].resolve({ ok: true, result: { axis: 'Z', index: 30, shape: [2, 2], data_b64: 'ignored' } });
+  await first;
+  const renderedAfterStale = rendered.slice();
+  pending[1].resolve({ ok: true, result: { axis: 'Z', index: 40, shape: [2, 2], data_b64: 'ignored' } });
+  await second;
+  const requestsBeforeInvert = pending.length;
+  state.clipPlanes3d.Z.invert = true;
+  activeAxisClippingMeta.Z.invert = true;
+  const inverted = await _requestAxisClippingCapSlice('Z');
+  const requestsAfterInvert = pending.length;
+  state.previewRev = 12;
+  const revised = _requestAxisClippingCapSlice('Z');
+  const requestsAfterRevision = pending.length;
+  pending[2].resolve({ ok: true, result: { axis: 'Z', index: 40, shape: [2, 2], data_b64: 'ignored' } });
+  await revised;
+  console.log(JSON.stringify({
+    paths: pending.map((item) => item.path),
+    firstWasAborted,
+    renderedAfterStale,
+    rendered,
+    requestsBeforeInvert,
+    requestsAfterInvert,
+    requestsAfterRevision,
+    inverted,
+    sliceOverlay: state.sliceOverlay,
+    sliceAxis: state.sliceAxis,
+    sliceIndex: state.sliceIndex,
+    sliceLast: state.sliceLast,
+    cacheKey: axisClippingCapSliceKey,
+    clearedOldCaps: events.filter((event) => event === 'clear-caps').length
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        )
+
+        self.assertIn("axis=Z", result["paths"][0])
+        self.assertIn("index=30", result["paths"][0])
+        self.assertIn("index=40", result["paths"][1])
+        self.assertTrue(result["firstWasAborted"])
+        self.assertEqual(result["renderedAfterStale"], [])
+        self.assertEqual(result["rendered"][-1]["index"], 40)
+        self.assertEqual(result["requestsAfterInvert"], result["requestsBeforeInvert"])
+        self.assertEqual(result["requestsAfterRevision"], result["requestsAfterInvert"] + 1)
+        self.assertTrue(result["inverted"])
+        self.assertFalse(result["sliceOverlay"])
+        self.assertEqual(result["sliceAxis"], "X")
+        self.assertEqual(result["sliceIndex"], 7)
+        self.assertEqual(result["sliceLast"]["marker"], "2d-cache")
+        self.assertIn("rev=12", result["cacheKey"])
+        self.assertEqual(result["clearedOldCaps"], 3)
+
+    def test_multi_axis_disable_and_fallback_abort_and_clear_dedicated_cap_cache(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+class FakeAbortController {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+}
+window.AbortController = FakeAbortController;
+axisMax = () => 99;
+const pending = [];
+function apiGet(path, timeout, extra) {
+  return new Promise((resolve) => pending.push({ path, signal: extra && extra.signal, resolve }));
+}
+function _b64ToBytes() { return new Uint8Array([1, 0]); }
+const rendered = [];
+function _axisClippingRenderCapSlice(slice) { rendered.push(slice.index); return true; }
+
+(async () => {
+  state.clipPlanes3d.X.enabled = true;
+  activeAxisClippingMeta = { X: { point: 2, position: 0.2, invert: false } };
+  axisClippingCapMode = 'single';
+  const first = _requestAxisClippingCapSlice('X');
+  const firstSignal = pending[0].signal;
+  state.clipPlanes3d.Y.enabled = true;
+  _updateAxisClippingCapPolicy(['X', 'Y']);
+  const multiCleared = { aborted: firstSignal.aborted, slice: axisClippingCapSlice, key: axisClippingCapSliceKey };
+  pending[0].resolve({ ok: true, result: { axis: 'X', index: 2, shape: [1, 1], data_b64: 'ignored' } });
+  await first;
+
+  state.clipPlanes3d.Y.enabled = false;
+  activeAxisClippingMeta = { X: { point: 3, position: 0.3, invert: false } };
+  axisClippingCapMode = 'single';
+  const second = _requestAxisClippingCapSlice('X');
+  const secondSignal = pending[1].signal;
+  state.viewerBackend = 'remote';
+  resetAxisClippingRuntime();
+  const fallbackCleared = { aborted: secondSignal.aborted, slice: axisClippingCapSlice, key: axisClippingCapSliceKey };
+  pending[1].resolve({ ok: false, error: 'late controlled failure' });
+  await second;
+  console.log(JSON.stringify({ multiCleared, fallbackCleared, rendered, requestCount: pending.length }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        )
+
+        self.assertEqual(result["multiCleared"], {"aborted": True, "slice": None, "key": ""})
+        self.assertEqual(result["fallbackCleared"], {"aborted": True, "slice": None, "key": ""})
+        self.assertEqual(result["rendered"], [])
+        self.assertEqual(result["requestCount"], 2)
 
 
 if __name__ == "__main__":
