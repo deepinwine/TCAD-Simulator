@@ -59893,9 +59893,29 @@ def _webui_worker_main(
             preview_mesh_cache[mode] = {"rev": int(model_revision), "face_limit": int(target_faces), "voxel_um": float(voxel_um), "meshes": mesh_items}
 
         # Return mesh metadata (the browser fetches actual geometry via `/api/preview/geom`).
+        # Geometry metadata is revision-cached, while visual preferences are attached on every
+        # response.  User color preferences can change without a model revision and therefore
+        # must never be captured inside the geometry cache.
         pack = preview_mesh_cache.get(mode, {}) if isinstance(preview_mesh_cache.get(mode, {}), dict) else {}
         meshes = pack.get("meshes", []) if isinstance(pack.get("meshes", []), list) else []
-        return {"rev": int(model_revision), "mode": mode, "meshes": meshes}
+        meshes_out: List[Dict[str, Any]] = []
+        for item in meshes:
+            if not isinstance(item, dict):
+                continue
+            item_out = dict(item)
+            mat_id = int(item_out.get("mat_id", 0))
+            visual_override: Dict[str, Any] = {}
+            # `user_material_colors` is a presentation preference.  Runtime solid/fast/off
+            # maps intentionally stay client-local and are not physical MaterialVisual data.
+            if isinstance(user_material_colors, dict):
+                color_override = user_material_colors.get(str(mat_id), user_material_colors.get(mat_id))
+                if color_override is not None:
+                    visual_override["color"] = color_override
+            item_out["visual"] = model.material_db.material_visual(
+                mat_id, visual_override or None
+            ).as_dict()
+            meshes_out.append(item_out)
+        return {"rev": int(model_revision), "mode": mode, "meshes": meshes_out}
 
     def _cache_put(cache: Dict[str, Dict[str, Any]], key: str, value: Dict[str, Any], *, max_items: int = 6) -> None:
         cache[key] = value
@@ -95386,15 +95406,30 @@ function disposeObject3D(obj) {
 
 function disposeObject3DDeep(obj) {
   if (!obj) return;
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
   try {
     obj.traverse((node) => {
-      try { if (node.geometry) node.geometry.dispose(); } catch (e) {}
+      try {
+        if (node.geometry && !geometries.has(node.geometry)) {
+          geometries.add(node.geometry);
+          node.geometry.dispose();
+        }
+      } catch (e) {}
       try {
         const mat = node.material;
         if (!mat) return;
         const mats = Array.isArray(mat) ? mat : [mat];
         mats.forEach((m) => {
-          try { if (m.map) m.map.dispose(); } catch (e) {}
+          if (!m || materials.has(m)) return;
+          materials.add(m);
+          try {
+            if (m.map && !textures.has(m.map)) {
+              textures.add(m.map);
+              m.map.dispose();
+            }
+          } catch (e) {}
           try { m.dispose(); } catch (e) {}
         });
       } catch (e) {}
@@ -97211,6 +97246,147 @@ function applyCutawayNow(requestRender = true) {
   return updateAxisClippingPlanes(requestRender);
 }
 
+function _materialVisualForMesh(mesh) {
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const raw = (item.visual && typeof item.visual === 'object') ? item.visual : {};
+  const clamp = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+  };
+  const legacyColor = (Array.isArray(item.color) && item.color.length >= 3) ? item.color : [0.8, 0.8, 0.8];
+  const rawColor = (Array.isArray(raw.color) && raw.color.length >= 3) ? raw.color : legacyColor;
+  let color = [
+    clamp(rawColor[0], clamp(legacyColor[0], 0.8)),
+    clamp(rawColor[1], clamp(legacyColor[1], 0.8)),
+    clamp(rawColor[2], clamp(legacyColor[2], 0.8)),
+  ];
+  // A live browser color choice is the effective presentation override until the debounced
+  // preference reaches the worker and appears in a later canonical manifest.
+  try {
+    const localColor = _materialColorOverride01(item.mat_id != null ? item.mat_id : raw.material_id);
+    if (Array.isArray(localColor) && localColor.length >= 3) {
+      color = [clamp(localColor[0], color[0]), clamp(localColor[1], color[1]), clamp(localColor[2], color[2])];
+    }
+  } catch (e) {}
+  const fallbackId = parseInt(item.mat_id) || 0;
+  const materialId = parseInt(raw.material_id);
+  const legacyName = String(item.name != null ? item.name : '').trim();
+  const displayName = String(raw.display_name != null ? raw.display_name : legacyName).trim() || legacyName || `Mat ${fallbackId}`;
+  return {
+    material_id: Number.isFinite(materialId) ? materialId : fallbackId,
+    display_name: displayName,
+    color,
+    opacity: clamp(raw.opacity, 1.0),
+    metallic: clamp(raw.metallic, 0.0),
+    roughness: clamp(raw.roughness, 0.72),
+    visible: (typeof raw.visible === 'boolean') ? raw.visible : true,
+  };
+}
+
+function _createMaterialMeshGroup(mesh, geometry) {
+  if (!window.THREE || !geometry) return null;
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const matId = parseInt(item.mat_id) || 0;
+  const visual = _materialVisualForMesh(item);
+  const col = new THREE.Color(visual.color[0], visual.color[1], visual.color[2]);
+  try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
+  const group = new THREE.Group();
+  group.userData.mat_id = matId;
+  group.userData.name = visual.display_name;
+  group.userData._tcadVisual = visual;
+  group.userData._tcadBaseVisible = !!visual.visible;
+
+  const dispMode = getResolvedMaterialDisplay(matId);
+  const on = !!visual.visible && dispMode !== 'off';
+  const wantSolid = dispMode === 'solid';
+  group.visible = on;
+
+  const inheritClipping = (material) => {
+    try {
+      const planes = (typeof activeClippingPlanes !== 'undefined' && Array.isArray(activeClippingPlanes))
+        ? activeClippingPlanes
+        : [];
+      _assignAxisClippingMaterial(material, planes);
+    } catch (e) {}
+    return material;
+  };
+  const solidTransparent = visual.opacity < 0.999;
+  const matSolid = inheritClipping(new THREE.MeshStandardMaterial({
+    color: col,
+    opacity: visual.opacity,
+    metalness: visual.metallic,
+    roughness: visual.roughness,
+    transparent: solidTransparent,
+    side: THREE.FrontSide,
+    flatShading: false,
+    depthWrite: !solidTransparent,
+    depthTest: true,
+  }));
+  const meshSolid = new THREE.Mesh(geometry, matSolid);
+  meshSolid.userData.mat_id = matId;
+  meshSolid.userData.name = visual.display_name;
+  meshSolid.visible = on && wantSolid;
+  group.add(meshSolid);
+
+  // X-ray keeps the canonical PBR response and derives only shell tint/alpha.  The factors are
+  // deliberately stable: back faces use 18% and front faces 38% of canonical opacity.
+  const frontColor = col.clone();
+  const backColor = col.clone().multiplyScalar(0.82);
+  const backOpacity = Number((visual.opacity * 0.18).toFixed(6));
+  const frontOpacity = Number((visual.opacity * 0.38).toFixed(6));
+  const matBack = inheritClipping(new THREE.MeshStandardMaterial({
+    color: backColor,
+    opacity: backOpacity,
+    metalness: visual.metallic,
+    roughness: visual.roughness,
+    transparent: true,
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: true,
+  }));
+  const matFront = inheritClipping(new THREE.MeshStandardMaterial({
+    color: frontColor,
+    opacity: frontOpacity,
+    metalness: visual.metallic,
+    roughness: visual.roughness,
+    transparent: true,
+    side: THREE.FrontSide,
+    depthWrite: false,
+    depthTest: true,
+  }));
+  const meshBack = new THREE.Mesh(geometry, matBack);
+  const meshFront = new THREE.Mesh(geometry, matFront);
+  meshBack.renderOrder = 0;
+  meshFront.renderOrder = 1;
+  meshBack.visible = on && !wantSolid;
+  meshFront.visible = on && !wantSolid;
+  group.add(meshBack);
+  group.add(meshFront);
+
+  let edges = null;
+  try {
+    const index = geometry && geometry.getIndex ? geometry.getIndex() : null;
+    const faceCount = index && index.count ? Math.floor(index.count / 3) : 0;
+    if (faceCount > 0 && faceCount <= 90000) {
+      const edgeGeometry = new THREE.EdgesGeometry(geometry, 55);
+      const edgeMaterial = inheritClipping(new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: Number((visual.opacity * 0.08).toFixed(6)),
+        depthWrite: false,
+      }));
+      edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+      edges.renderOrder = 2;
+      edges.visible = on && !wantSolid;
+      group.add(edges);
+    }
+  } catch (e) { edges = null; }
+
+  group.userData._tcadSolidMesh = meshSolid;
+  group.userData._tcadXray = { back: meshBack, front: meshFront, edges };
+  return group;
+}
+
 function clearMeshes() {
   if (!meshGroup) return;
   state.meshes.clear();
@@ -97369,7 +97545,14 @@ function _legendMeshesFromIds(ids) {
     const name = mm ? String(mm.name || '') : (`Mat ${id}`);
     const color = (mm && Array.isArray(mm.color)) ? mm.color : [0.8, 0.8, 0.8];
     if (!name) continue;
-    meshes.push({ mat_id: id, name, color });
+    let visual = null;
+    try {
+      const group = state.meshes && typeof state.meshes.get === 'function' ? state.meshes.get(id) : null;
+      visual = group && group.userData && group.userData._tcadVisual
+        ? group.userData._tcadVisual
+        : null;
+    } catch (e) { visual = null; }
+    meshes.push({ mat_id: id, name, color, ...(visual ? { visual } : {}) });
   }
   return meshes;
 }
@@ -97431,7 +97614,8 @@ function _applyMaterialModeToGroup(group, mode) {
   if (!group) return false;
   const m = (mode === 'solid' || mode === 'fast' || mode === 'off') ? mode : 'solid';
   let changed = false;
-  const on = (m !== 'off');
+  const baseVisible = !(group.userData && group.userData._tcadBaseVisible === false);
+  const on = baseVisible && (m !== 'off');
   if (typeof group.visible === 'boolean' && group.visible !== on) { group.visible = on; changed = true; }
   if (!group.userData) return changed;
   const solidMesh = group.userData._tcadSolidMesh;
@@ -97499,6 +97683,7 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
     const backColor = col.clone().multiplyScalar(0.82);
     // Solid mesh
     try {
+      if (group.userData._tcadVisual) group.userData._tcadVisual.color = [Number(rgb[0]), Number(rgb[1]), Number(rgb[2])];
       const solidMesh = group.userData._tcadSolidMesh;
       if (solidMesh && solidMesh.material) {
         if (solidMesh.material.color) solidMesh.material.color.copy(col);
@@ -97664,6 +97849,7 @@ function renderLegend(meshes) {
   const legend = $('materials-legend');
   legend.innerHTML = '';
   for (const m of meshes) {
+    const visual = _materialVisualForMesh(m);
     const row = document.createElement('div');
     row.className = 'legend-item';
     const toggle = document.createElement('div');
@@ -97702,9 +97888,7 @@ function renderLegend(meshes) {
     color.tabIndex = 0;
     let hex = '#cccccc';
     try {
-      const ov = _materialColorOverride01(m.mat_id);
-      const src = ov || m.color || [0.8, 0.8, 0.8];
-      hex = _rgb01ToHex(src);
+      hex = _rgb01ToHex(visual.color);
     } catch (e) {}
     try { color.style.background = hex; } catch (e) {}
     color.title = '点击自定义材质颜色（自动保存为本用户默认）';
@@ -97715,7 +97899,7 @@ function renderLegend(meshes) {
       if (k === 'enter' || k === ' ' || k === 'spacebar') { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} open(); }
     });
     const name = document.createElement('div');
-    name.textContent = m.name;
+    name.textContent = visual.display_name;
     row.appendChild(toggle);
     row.appendChild(color);
     row.appendChild(name);
@@ -98135,11 +98319,6 @@ async function refreshPreview() {
       const buf = await resp.arrayBuffer();
       geomRaw = loader.parse(buf);
     }
-    const srcRgb = _materialColorOverride01(m.mat_id) || m.color;
-    const col = new THREE.Color(srcRgb[0], srcRgb[1], srcRgb[2]);
-    // Material colors are authored in sRGB (same as GUI/Matplotlib). Three.js lighting runs in
-    // linear space; convert once so WebGL and host-assisted previews match visually.
-    try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
     // Ensure we have indexed geometry + normals for good shading; server-generated `.geom` already has both.
     let geom = geomRaw;
     const hasIndex = !!(geom && geom.getIndex && geom.getIndex());
@@ -98152,89 +98331,12 @@ async function refreshPreview() {
       geom = geomRaw;
     }
     if (!hasNormal) { try { geom.computeVertexNormals(); } catch (e) {} }
-    try { if (geom !== geomRaw && geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
-    const group = new THREE.Group();
-    group.userData.mat_id = m.mat_id;
-    group.userData.name = m.name;
-    // Build both styles once, then toggle visibility client-side (no host work after load).
-    const dispMode = getResolvedMaterialDisplay(m.mat_id);
-    const on = (dispMode !== 'off');
-    const wantSolid = (dispMode === 'solid');
-    group.visible = on;
-
-    // Use Lambert shading (diffuse) to keep Host Render (G-buffer) and WebGL previews visually consistent
-    // while reducing client GPU cost (no specular BRDF divergence vs CPU compositor).
-    // Share material parameters for memory efficiency
-    const materialParams = {
-      transparent: false,
-      opacity: 1.0,
-      side: THREE.FrontSide,
-      flatShading: false,  // Smooth shading for better visuals
-      depthWrite: true,
-      depthTest: true
-    };
-    const matSolid = new THREE.MeshLambertMaterial({
-      ...materialParams,
-      color: col,
-      emissive: col.clone().multiplyScalar(0.03)
-    });
-    const meshSolid = new THREE.Mesh(geom, matSolid);
-    meshSolid.userData.mat_id = m.mat_id;
-    meshSolid.userData.name = m.name;
-    meshSolid.visible = on && wantSolid;
-    group.add(meshSolid);
-
-    // Two-pass transparent shell: render backfaces first, then frontfaces.
-    // This improves depth perception and makes interior structures easier to observe.
-    const frontColor = col.clone();
-    const backColor = col.clone().multiplyScalar(0.82);
-
-    const matBack = new THREE.MeshLambertMaterial({
-      color: backColor,
-      emissive: backColor.clone().multiplyScalar(0.05),
-      transparent: true,
-      opacity: 0.18,
-      side: THREE.BackSide,
-      depthWrite: false,
-    });
-    const matFront = new THREE.MeshLambertMaterial({
-      color: frontColor,
-      emissive: frontColor.clone().multiplyScalar(0.04),
-      transparent: true,
-      opacity: 0.38,
-      side: THREE.FrontSide,
-      depthWrite: false,
-    });
-
-    const meshBack = new THREE.Mesh(geom, matBack);
-    const meshFront = new THREE.Mesh(geom, matFront);
-    meshBack.renderOrder = 0;
-    meshFront.renderOrder = 1;
-    meshBack.visible = on && !wantSolid;
-    meshFront.visible = on && !wantSolid;
-    group.add(meshBack);
-    group.add(meshFront);
-
-    let edges = null;
-    try {
-      const idx = geom && geom.getIndex ? geom.getIndex() : null;
-      const faceCount = idx && idx.count ? Math.floor(idx.count / 3) : 0;
-      if (faceCount > 0 && faceCount <= 90000) {
-        const egeom = new THREE.EdgesGeometry(geom, 55);
-        const lmat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 });
-        try { lmat.depthWrite = false; } catch (e) {}
-        edges = new THREE.LineSegments(egeom, lmat);
-        edges.renderOrder = 2;
-        edges.visible = on && !wantSolid;
-        group.add(edges);
-      }
-    } catch (e) { edges = null; }
-
-    try {
-      group.userData._tcadSolidMesh = meshSolid;
-      group.userData._tcadXray = { back: meshBack, front: meshFront, edges: edges };
-    } catch (e) {}
-
+    try { if (geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
+    const group = _createMaterialMeshGroup(m, geom);
+    if (!group) {
+      try { geom.dispose(); } catch (e) {}
+      continue;
+    }
     meshGroup.add(group);
     state.meshes.set(m.mat_id, group);
   }
@@ -100343,55 +100445,17 @@ async function loadPreviewFromManifest(manifest) {
       const buf = await fetch(url, apiFetchInit({})).then(r => r.arrayBuffer());
       geomRaw = loader.parse(buf);
     }
-    const srcRgb = _materialColorOverride01(m.mat_id) || m.color;
-    const col = new THREE.Color(srcRgb[0], srcRgb[1], srcRgb[2]);
-    try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
     let geom = geomRaw;
     const hasIndex = !!(geom && geom.getIndex && geom.getIndex());
     const hasNormal = !!(geom && geom.getAttribute && geom.getAttribute('normal'));
     if (!hasIndex) geom = weldGeometryPositions(geomRaw, previewWeldToleranceUm());
     if (!hasNormal) { try { geom.computeVertexNormals(); } catch (e) {} }
     try { if (geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
-    const group = new THREE.Group();
-    group.userData.mat_id = m.mat_id;
-    group.userData.name = m.name;
-    const dispMode = getResolvedMaterialDisplay(m.mat_id);
-    const on = (dispMode !== 'off');
-    const wantSolid = (dispMode === 'solid');
-    group.visible = on;
-
-    const matSolid = new THREE.MeshLambertMaterial({ color: col, emissive: col.clone().multiplyScalar(0.03), transparent: false, opacity: 1.0, side: THREE.FrontSide });
-    const meshSolid = new THREE.Mesh(geom, matSolid);
-    meshSolid.visible = on && wantSolid;
-    group.add(meshSolid);
-
-    const frontColor = col.clone();
-    const backColor = col.clone().multiplyScalar(0.82);
-    const matBack = new THREE.MeshLambertMaterial({ color: backColor, emissive: backColor.clone().multiplyScalar(0.05), transparent: true, opacity: 0.18, side: THREE.BackSide, depthWrite: false });
-    const matFront = new THREE.MeshLambertMaterial({ color: frontColor, emissive: frontColor.clone().multiplyScalar(0.04), transparent: true, opacity: 0.38, side: THREE.FrontSide, depthWrite: false });
-    const meshBack = new THREE.Mesh(geom, matBack);
-    const meshFront = new THREE.Mesh(geom, matFront);
-    meshBack.renderOrder = 0;
-    meshFront.renderOrder = 1;
-    meshBack.visible = on && !wantSolid;
-    meshFront.visible = on && !wantSolid;
-    group.add(meshBack);
-    group.add(meshFront);
-    let edges = null;
-    try {
-      const idx = geom && geom.getIndex ? geom.getIndex() : null;
-      const faceCount = idx && idx.count ? Math.floor(idx.count / 3) : 0;
-      if (faceCount > 0 && faceCount <= 90000) {
-        const egeom = new THREE.EdgesGeometry(geom, 55);
-        const lmat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 });
-        try { lmat.depthWrite = false; } catch (e) {}
-        edges = new THREE.LineSegments(egeom, lmat);
-        edges.renderOrder = 2;
-        edges.visible = on && !wantSolid;
-        group.add(edges);
-      }
-    } catch (e) { edges = null; }
-    try { group.userData._tcadSolidMesh = meshSolid; group.userData._tcadXray = { back: meshBack, front: meshFront, edges: edges }; } catch (e) {}
+    const group = _createMaterialMeshGroup(m, geom);
+    if (!group) {
+      try { geom.dispose(); } catch (e) {}
+      continue;
+    }
     meshGroup.add(group);
     state.meshes.set(m.mat_id, group);
   }
