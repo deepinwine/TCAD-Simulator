@@ -32188,6 +32188,45 @@ def _invalidate_step_statuses(statuses: Any, start_index: int, recipe_length: in
     return out
 
 
+def _snapshot_timeline_manifest(
+    recipe_length: int,
+    valid_snapshot_indices: Any,
+    statuses: Any,
+    current_index: int,
+) -> List[Dict[str, Any]]:
+    """Timeline items for the CAD shell: per-step state plus snapshot validity.
+
+    ``state`` mirrors the runtime status, except the currently viewed step which
+    is reported as ``current``. ``snapshot_valid`` marks steps whose cached
+    snapshot can be restored without recomputation.
+    """
+    normalized = _normalize_step_statuses(statuses, recipe_length)
+    valid = set()
+    try:
+        for v in list(valid_snapshot_indices or []):
+            try:
+                valid.add(int(v))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        current = int(current_index)
+    except Exception:
+        current = -1
+    items: List[Dict[str, Any]] = []
+    for index, status in enumerate(normalized):
+        items.append(
+            {
+                "index": int(index),
+                "state": "current" if index == current else status,
+                "runtime_status": status,
+                "snapshot_valid": index in valid,
+            }
+        )
+    return items
+
+
 def _run_model_transaction(model: ProcessModel, operation: Callable[[], Any]) -> Dict[str, Any]:
     """Run one model mutation and restore a dense snapshot when it raises."""
     try:
@@ -36808,11 +36847,49 @@ def _webui_worker_main(
         nonlocal step_runtime_statuses
         step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, start_index, len(steps))
 
+    # Timeline viewing position: -1 = derive from the latest valid snapshot.
+    # Any successful run resets the override so the timeline follows execution again.
+    timeline_current_index: int = -1
+
     def _set_step_runtime_status(index: int, status: str) -> None:
-        nonlocal step_runtime_statuses
+        nonlocal step_runtime_statuses, timeline_current_index
         step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
         if 0 <= int(index) < len(step_runtime_statuses) and status in _STEP_RUNTIME_STATES:
             step_runtime_statuses[int(index)] = status
+            if status == "done":
+                timeline_current_index = -1
+
+    def _timeline_valid_snapshot_indices() -> set:
+        try:
+            if step_cache_ctx_sig != _loop_cache_context_signature():
+                return set()
+        except Exception:
+            return set()
+        out = set()
+        try:
+            for idx, status in enumerate(step_runtime_statuses):
+                if status == "done" and int(idx) in step_cache_step_states:
+                    out.add(int(idx))
+        except Exception:
+            return set()
+        return out
+
+    def _timeline_current_index(valid_indices: set) -> int:
+        try:
+            if timeline_current_index in valid_indices:
+                return int(timeline_current_index)
+        except Exception:
+            pass
+        try:
+            return max(valid_indices) if valid_indices else -1
+        except Exception:
+            return -1
+
+    def _timeline_manifest_payload() -> Dict[str, Any]:
+        valid_indices = _timeline_valid_snapshot_indices()
+        current = _timeline_current_index(valid_indices)
+        items = _snapshot_timeline_manifest(len(steps), valid_indices, step_runtime_statuses, current)
+        return {"items": items, "current": int(current)}
 
     # Normalize any "material" role params to mat_id ints so recipes persist stably across renames.
     pending_warnings: List[str] = []
@@ -70925,6 +71002,56 @@ def _webui_worker_main(
                 conn.send({"ok": True, "result": _serialize_step_for_client(index), "rid": rid})
                 continue
 
+            if cmd == "timeline_get":
+                conn.send({"ok": True, "result": _timeline_manifest_payload(), "rid": rid})
+                continue
+
+            if cmd == "timeline_restore":
+                index = int(payload.get("index", -1))
+                valid_indices = _timeline_valid_snapshot_indices()
+                if index not in valid_indices:
+                    conn.send({
+                        "ok": False,
+                        "error": "该步骤没有可恢复的有效快照（Dirty/Error/Ready 状态不隐式重算）",
+                        "code": "no_valid_snapshot",
+                        "rid": rid,
+                    })
+                    continue
+                snap_ref = step_cache_step_states.get(int(index))
+                snap = _snap_load(snap_ref) if snap_ref is not None else None
+                if not isinstance(snap, dict):
+                    conn.send({
+                        "ok": False,
+                        "error": "快照数据不可用或已被换出",
+                        "code": "snapshot_unavailable",
+                        "rid": rid,
+                    })
+                    continue
+                try:
+                    model.restore_state(snap, emit_log=True, log_prefix="[timeline] ")
+                except Exception as exc:
+                    conn.send({
+                        "ok": False,
+                        "error": f"快照恢复失败：{exc}",
+                        "code": "restore_failed",
+                        "rid": rid,
+                    })
+                    continue
+                timeline_current_index = int(index)
+                model_revision += 1
+                preview_ready.clear()
+                conn.send({
+                    "ok": True,
+                    "result": {
+                        "timeline": _timeline_manifest_payload(),
+                        "model": _webui_model_summary(model),
+                        "log": model.history[-120:],
+                        "recipe": _serialize_recipe_for_client(),
+                    },
+                    "rid": rid,
+                })
+                continue
+
             if cmd == "apply_domain":
                 def _as_int(value: Any, default: int) -> int:
                     try:
@@ -73592,6 +73719,18 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/recipe/rename-step":
             payload = self._read_json()
             resp = sess.rpc("recipe_rename_step", payload)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/timeline/get":
+            payload = self._read_json()
+            resp = sess.rpc("timeline_get", payload)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/timeline/restore":
+            payload = self._read_json()
+            resp = sess.rpc("timeline_restore", payload, timeout_s=300.0)
             self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
@@ -82836,6 +82975,14 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
       </section>
     </main>
 	
+  <footer class="cad-timeline" id="cad-timeline" aria-label="Process timeline">
+    <button class="btn btn-sm" id="timeline-prev" title="回看上一个有效快照">‹ Prev</button>
+    <div class="cad-timeline-position" id="timeline-position">Step - / -</div>
+    <button class="btn btn-sm" id="timeline-next" title="前进到下一个有效快照">Next ›</button>
+    <input type="range" id="timeline-range" class="cad-timeline-range" min="0" max="0" value="0" step="1" aria-label="步骤时间线" />
+    <span class="cad-timeline-label" id="timeline-label">无有效快照</span>
+  </footer>
+
 	      <div id="dock-split-hint" class="dock-split-hint" style="display:none" aria-hidden="true"></div>
 	      <div id="floating-panels" class="floating-panels" aria-label="Floating panels"></div>
 	
@@ -83138,6 +83285,32 @@ header p { font-size: 12px; opacity: 1; color: var(--header-subtext); }
   top: 8px;
   left: 8px;
   z-index: 24;
+}
+.cad-timeline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(255,255,255,0.66);
+  flex: 0 0 auto;
+}
+.cad-timeline-position {
+  font-size: 12px;
+  font-weight: 800;
+  color: #1e3a5f;
+  min-width: 110px;
+  text-align: center;
+  white-space: nowrap;
+}
+.cad-timeline-range { flex: 1; min-width: 120px; }
+.cad-timeline-label {
+  font-size: 12px;
+  color: rgba(71,85,105,0.9);
+  min-width: 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .main-container.drawer-collapsed .left-panel { width: 42px; }
 .main-container.drawer-collapsed .left-panel .left-frame { padding: 8px 4px; }
@@ -93358,6 +93531,7 @@ async function refreshAll(doPreview, retry = 0) {
     state.recipe = init.result.recipe || [];
     state.demoRecipes = init.result.demo_recipes || {};
     try { renderDemoRecipes(); } catch (e) {}
+    try { refreshTimeline(); } catch (e) {}
     state.recipes = init.result.recipes || init.result.history || [];
     state.exports = init.result.exports || [];
     state.recipeFactories = init.result.recipe_factories || [];
@@ -100232,6 +100406,96 @@ async function moveStep(direction) {
   }
 }
 
+let _timelineData = null;
+
+async function refreshTimeline() {
+  const posEl = $('timeline-position');
+  const rangeEl = $('timeline-range');
+  const labelEl = $('timeline-label');
+  const prevBtn = $('timeline-prev');
+  const nextBtn = $('timeline-next');
+  if (!posEl || !rangeEl || !labelEl) return;
+  let data = null;
+  try {
+    const resp = await apiPost('/api/timeline/get', {});
+    if (resp.ok && resp.result) data = resp.result;
+  } catch (e) { data = null; }
+  _timelineData = data;
+  const items = (data && Array.isArray(data.items)) ? data.items : [];
+  const current = (data && Number.isInteger(data.current)) ? data.current : -1;
+  const total = items.length;
+  const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+  const validBelow = valid.filter(i => i < current);
+  const validAbove = valid.filter(i => i > current);
+  const name = (i) => {
+    const st = (state.recipe || [])[i];
+    return st ? String(st.instance_name || st.name || '') : '';
+  };
+  if (current >= 0 && total > 0) {
+    posEl.textContent = `Step ${current + 1} / ${total}`;
+    labelEl.textContent = `快照 ${current + 1}/${total} · ${name(current)}`;
+  } else {
+    posEl.textContent = `Step - / ${total || '-'}`;
+    labelEl.textContent = total ? '无有效快照（先运行步骤）' : '空配方';
+  }
+  rangeEl.min = 0;
+  rangeEl.max = Math.max(0, total - 1);
+  rangeEl.value = (current >= 0 && current < total) ? current : 0;
+  rangeEl.disabled = !valid.length;
+  if (prevBtn) prevBtn.disabled = !validBelow.length;
+  if (nextBtn) nextBtn.disabled = !validAbove.length;
+}
+
+async function restoreTimelineStep(index) {
+  if (!Number.isInteger(index) || index < 0) return;
+  showNotification(`回看步骤 ${index + 1} 快照...`);
+  const resp = await apiPost('/api/timeline/restore', { index });
+  if (!resp.ok) {
+    showNotification('回看失败：' + (resp.error || 'unknown'), 4200, 'error');
+    await refreshTimeline();
+    return;
+  }
+  const result = resp.result || {};
+  if (result.recipe) state.recipe = result.recipe;
+  if (result.model) { state.model = result.model; try { setHeaderStats(state.model); } catch (e) {} }
+  if (result.log) setLog(result.log);
+  state.selectedIndex = Math.max(0, Math.min(index, (state.recipe || []).length - 1));
+  renderRecipe();
+  renderParams();
+  try { await refreshPreview(); } catch (e) {}
+  const tl = result.timeline;
+  if (tl && Array.isArray(tl.items)) {
+    _timelineData = tl;
+    const total = tl.items.length;
+    $('timeline-position').textContent = `Step ${index + 1} / ${total}`;
+    const st = (state.recipe || [])[index];
+    $('timeline-label').textContent = `快照 ${index + 1}/${total} · ${st ? String(st.instance_name || st.name || '') : ''}`;
+    const rangeEl = $('timeline-range');
+    if (rangeEl) { rangeEl.value = index; rangeEl.disabled = !tl.items.some(it => it && it.snapshot_valid); }
+  }
+  try {
+    const prevBtn = $('timeline-prev');
+    const nextBtn = $('timeline-next');
+    const items = (tl && tl.items) || [];
+    const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+    if (prevBtn) prevBtn.disabled = !valid.some(i => i < index);
+    if (nextBtn) nextBtn.disabled = !valid.some(i => i > index);
+  } catch (e) {}
+}
+
+function _timelineNearestValid(direction) {
+  const items = (_timelineData && Array.isArray(_timelineData.items)) ? _timelineData.items : [];
+  const current = (_timelineData && Number.isInteger(_timelineData.current)) ? _timelineData.current : -1;
+  const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+  if (!valid.length) return -1;
+  if (direction < 0) {
+    const below = valid.filter(i => i < current);
+    return below.length ? Math.max(...below) : -1;
+  }
+  const above = valid.filter(i => i > current);
+  return above.length ? Math.min(...above) : -1;
+}
+
 async function moveRecipeStep(from, to) {
   const lastIdx = Math.max(0, (state.recipe || []).length - 1);
   const f = clampInt(from, 0, lastIdx);
@@ -101931,6 +102195,37 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('run-step-btn').addEventListener('click', runSelected);
   $('run-to-btn').addEventListener('click', runToSelected);
   $('run-all-btn').addEventListener('click', runAll);
+  // Process timeline: Previous/Next jump between valid snapshots; the range
+  // updates only its label while dragging and restores on change.
+  const tlPrev = $('timeline-prev');
+  if (tlPrev) tlPrev.addEventListener('click', async () => {
+    const idx = _timelineNearestValid(-1);
+    if (idx >= 0) await restoreTimelineStep(idx);
+  });
+  const tlNext = $('timeline-next');
+  if (tlNext) tlNext.addEventListener('click', async () => {
+    const idx = _timelineNearestValid(1);
+    if (idx >= 0) await restoreTimelineStep(idx);
+  });
+  const tlRange = $('timeline-range');
+  if (tlRange) {
+    tlRange.addEventListener('input', () => {
+      try {
+        const v = parseInt(tlRange.value, 10);
+        const st = (state.recipe || [])[v];
+        $('timeline-label').textContent = `步骤 ${v + 1} · ${st ? String(st.instance_name || st.name || '') : ''}`;
+      } catch (e) {}
+    });
+    tlRange.addEventListener('change', async () => {
+      try {
+        const v = parseInt(tlRange.value, 10);
+        const items = (_timelineData && Array.isArray(_timelineData.items)) ? _timelineData.items : [];
+        const item = items[v];
+        if (item && item.snapshot_valid) await restoreTimelineStep(v);
+        else showNotification('该步骤没有有效快照，不能回看');
+      } catch (e) {}
+    });
+  }
   $('add-step-select').addEventListener('change', addStepFromSelect);
   const demoLoadBtn = $('demo-recipe-load-btn');
   if (demoLoadBtn) demoLoadBtn.addEventListener('click', loadDemoRecipeFromSelect);

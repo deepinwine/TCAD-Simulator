@@ -15,6 +15,28 @@ class CadShellMarkupTests(unittest.TestCase):
         self.assertIn(expected, css)
 
 
+class TimelineStateTests(unittest.TestCase):
+    def test_snapshot_manifest_marks_valid_dirty_and_current(self):
+        result = tcad._snapshot_timeline_manifest(
+            recipe_length=4,
+            valid_snapshot_indices={0, 1},
+            statuses=["done", "done", "dirty", "dirty"],
+            current_index=1,
+        )
+        self.assertEqual([item["state"] for item in result], ["done", "current", "dirty", "dirty"])
+
+    def test_snapshot_manifest_reports_validity_and_normalized_statuses(self):
+        result = tcad._snapshot_timeline_manifest(
+            recipe_length=3,
+            valid_snapshot_indices=[2],
+            statuses=["weird", None, "DONE"],
+            current_index=-1,
+        )
+        self.assertEqual([item["runtime_status"] for item in result], ["ready", "ready", "done"])
+        self.assertEqual([item["snapshot_valid"] for item in result], [False, False, True])
+        self.assertEqual([item["index"] for item in result], [0, 1, 2])
+
+
 class CadShellInteractionContractTests(unittest.TestCase):
     def test_recipe_items_support_drag_and_rename(self):
         source = tcad._WEBUI_SCRIPT_JS
