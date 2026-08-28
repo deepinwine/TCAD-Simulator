@@ -82476,9 +82476,9 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                         <input id="slice-overlay-toggle" type="checkbox" />
                         切片
                       </label>
-                  <label class="check slice-toggle slot-hidden" id="slice-cutaway-toggle-wrap" title="切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）">
+                  <label class="check slice-toggle" id="slice-cutaway-toggle-wrap" title="兼容开关：沿当前切片轴启用或关闭三维裁剪">
                     <input id="slice-cutaway-toggle" type="checkbox" />
-                    切开
+                    裁剪
                   </label>
                       <button class="btn btn-sm" id="toggle-ruler3d-btn" title="切换 3D 标尺：网格 → 数值 → Off（循环）">标尺: Off</button>
                       <div class="viewer-camera-controls" id="viewer-camera-controls" role="group" aria-label="WebGL 相机与标准视图">
@@ -82498,6 +82498,28 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                       <button class="btn btn-sm slot-hidden" id="refresh-slice-3d-btn">刷新切片</button>
                     </div>
                     <div class="viewer-actions-bottom" id="viewer-actions-3d-bottom" aria-label="3D slice controls">
+                      <div class="axis-clipping-toolbar" id="axis-clipping-toolbar" role="group" aria-label="三维 X Y Z 独立裁剪">
+                        <span class="slice-chip-title">三维裁剪</span>
+                        <div class="axis-clipping-chip" data-clip-axis="X">
+                          <label title="启用 X 轴裁剪"><input id="clip-x-enabled" type="checkbox" aria-label="启用 X 轴裁剪" />X</label>
+                          <input id="clip-x-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="X 轴裁剪位置" title="X 轴裁剪位置（0 到 1）" />
+                          <input id="clip-x-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="X 轴裁剪位置数值" title="X 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 X 轴保留方向"><input id="clip-x-invert" type="checkbox" aria-label="反转 X 轴裁剪方向" />反向</label>
+                        </div>
+                        <div class="axis-clipping-chip" data-clip-axis="Y">
+                          <label title="启用 Y 轴裁剪"><input id="clip-y-enabled" type="checkbox" aria-label="启用 Y 轴裁剪" />Y</label>
+                          <input id="clip-y-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Y 轴裁剪位置" title="Y 轴裁剪位置（0 到 1）" />
+                          <input id="clip-y-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="Y 轴裁剪位置数值" title="Y 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 Y 轴保留方向"><input id="clip-y-invert" type="checkbox" aria-label="反转 Y 轴裁剪方向" />反向</label>
+                        </div>
+                        <div class="axis-clipping-chip" data-clip-axis="Z">
+                          <label title="启用 Z 轴裁剪"><input id="clip-z-enabled" type="checkbox" aria-label="启用 Z 轴裁剪" />Z</label>
+                          <input id="clip-z-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Z 轴裁剪位置" title="Z 轴裁剪位置（0 到 1）" />
+                          <input id="clip-z-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="Z 轴裁剪位置数值" title="Z 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 Z 轴保留方向"><input id="clip-z-invert" type="checkbox" aria-label="反转 Z 轴裁剪方向" />反向</label>
+                        </div>
+                        <span class="axis-clipping-status" id="axis-clipping-status" role="status">未启用裁剪</span>
+                      </div>
                       <div class="slice-style slice-toolbar slot-hidden" id="slice-style-3d" aria-label="切片设置">
                         <div class="slice-chip slice-chip-primary">
                           <span class="slice-chip-title">切片1</span>
@@ -83210,6 +83232,37 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
 
 /* Slice toolbars should shrink and scroll instead of forcing header wrap/reflow. */
 .viewer-card .slice-toolbar { flex: 1 1 auto; min-width: 0; }
+
+.axis-clipping-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border: 1px solid rgba(148,163,184,0.34);
+  border-radius: 14px;
+  background: rgba(248,250,252,0.78);
+  white-space: nowrap;
+}
+.axis-clipping-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border-left: 1px solid rgba(148,163,184,0.28);
+  font-size: 11px;
+  color: #334155;
+}
+.axis-clipping-chip label { display: inline-flex; align-items: center; gap: 2px; cursor: pointer; }
+.axis-clipping-chip input[type="range"] { width: clamp(62px, 7vw, 92px); }
+.axis-clipping-chip input[type="number"] {
+  width: 50px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  background: #fff;
+}
+.axis-clipping-status { font-size: 10px; color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
 
 /* 2D toolbar switches between single/multi without resizing the header. */
 .slice-toolbar-stack {
@@ -84445,7 +84498,12 @@ const state = {
       sliceLast2: null, // { axis, index, w, h, data: Uint16Array } for second slice
       sliceOverlay: false, // show 2D slice inset + 3D slice plane in 3D view
       sliceOverlay2: false, // enable second slice inset/plane (max 2 directions)
-      sliceCutaway: false, // cut away mesh by slice plane(s) to reveal the interior
+      sliceCutaway: false, // legacy mirror of whether any clipPlanes3d axis is enabled
+      clipPlanes3d: {
+        X: { enabled: false, position: 0.5, invert: false },
+        Y: { enabled: false, position: 0.5, invert: false },
+        Z: { enabled: false, position: 0.5, invert: false },
+      },
       sliceStepOverrides: {}, // step_index -> { axis:'X'|'Y'|'Z', index:int } (persisted in recipe config)
       sliceStepOverrides2: {}, // second slice per-step overrides
       // 2D multi-axis slice preview (show X/Y/Z slices simultaneously in a grid).
@@ -88157,6 +88215,25 @@ function applyUiStateFromServer(ui) {
         state.sliceIndex2 = clampInt(idx2, 0, max2);
         changed = true;
       } catch (e) {}
+      try {
+        const hasClipPlanes = Object.prototype.hasOwnProperty.call(ui, 'clipPlanes3d') ||
+          Object.prototype.hasOwnProperty.call(ui, 'clip_planes_3d');
+        if (hasClipPlanes) {
+          state.clipPlanes3d = _sanitizeClipPlanes3d(ui.clipPlanes3d || ui.clip_planes_3d);
+        } else {
+          // One-time migration from the old slice-driven cutaway preference. From this point on,
+          // clipPlanes3d is the only source of truth and sliceCutaway is only a compatibility mirror.
+          state.clipPlanes3d = _sanitizeClipPlanes3d(null);
+          if (state.sliceCutaway) {
+            const axis = _sanitizeSliceAxis(state.sliceAxis);
+            const max = Math.max(1, axisMax(axis));
+            state.clipPlanes3d[axis].enabled = true;
+            state.clipPlanes3d[axis].position = Math.max(0, Math.min(1, Number(state.sliceIndex) / max));
+          }
+        }
+        state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+        changed = true;
+      } catch (e) {}
       // 2D multi-axis slice preview (optional).
       try {
         const has = ('slice2dMulti' in ui) || ('slice_2d_multi' in ui) || ('sliceMulti2d' in ui) || ('slice_multi_2d' in ui);
@@ -88203,6 +88280,7 @@ function applyUiStateFromServer(ui) {
       try { syncSliceControls2dMulti(false); } catch (e) {}
       try { applySliceOverlayUI(false); } catch (e) {}
       try { applySlice2dMultiUI(false); } catch (e) {}
+      try { updateAxisClippingPlanes(false); } catch (e) {}
       // Keep raw server UI state (includes server-managed namespaces like AI Agent metadata).
       try {
         let ui2 = ui;
@@ -88243,7 +88321,8 @@ function collectUiState() {
             uiLayout: (state.uiLayout && typeof state.uiLayout === 'object') ? state.uiLayout : null,
             sliceOverlay: !!state.sliceOverlay,
             sliceOverlay2: !!state.sliceOverlay2,
-            sliceCutaway: !!state.sliceCutaway,
+            sliceCutaway: _activeAxisClippingAxes().length > 0,
+            clipPlanes3d: _serializeClipPlanes3d(),
         sliceAxis: _sanitizeSliceAxis(state.sliceAxis),
         sliceIndex: clampInt(state.sliceIndex, 0, axisMax(state.sliceAxis)),
         sliceAxis2: _sanitizeSliceAxis(state.sliceAxis2),
@@ -93245,15 +93324,16 @@ let slicePlaneVoidTex1 = null;
 let slicePlaneVoidTex2 = null;
 let meshCenterOffset = null; // THREE.Vector3 (pre-centering; in µm) for mapping domain coords -> centered coords
 
-// 3D cutaway: clip the structure by slice plane(s) and render "caps" (cross-sections) so the
-// cut surface stays closed. Planes are updated every frame to always remove the camera-facing side.
-let cutawayPlaneCount = 0; // 0/1/2 currently applied to main meshes
-let cutawayPlane1 = null;
-let cutawayPlane2 = null;
-let cutawayPlane1Front = null; // opposite of keep-plane (camera side)
-let cutawayPlane2Front = null;
-let cutawayPlanes1 = null; // [cutawayPlane1]
-let cutawayPlanes2 = null; // [cutawayPlane1, cutawayPlane2]
+// X/Y/Z WebGL clipping runtime. Serializable settings live only in state.clipPlanes3d;
+// Plane/Box3 instances stay here and are rebuilt from visible world-space geometry.
+let activeClippingPlanes = [];
+let activeAxisClippingBounds = null;
+let activeAxisClippingMeta = {};
+let axisClippingCapMode = 'none'; // 'none' | 'single' | 'multi-disabled'
+let axisClippingCapKey = '';
+
+// Legacy cap resources are reused only for a single active axis. Multi-axis clipping always
+// remains active, but caps are disabled because the old texture algorithm cannot seal corners.
 let cutawayCapsKey = ''; // rebuild key for cap geometry (primary)
 let cutawayCapsKey2 = ''; // rebuild key for cap geometry (secondary)
 let cutawayCapsGroup = null;
@@ -93269,10 +93349,6 @@ let cutawayCapTex1 = null;
 let cutawayCapTex2 = null;
 let cutawayCapTexKey1 = '';
 let cutawayCapTexKey2 = '';
-let cutawayTmpPos1 = null;
-let cutawayTmpPos2 = null;
-let cutawayTmpN1 = null;
-let cutawayTmpN2 = null;
 
 // WebGL render throttling (approximate client CPU limiting by capping FPS/DPR and using on-demand rendering).
 let _webglAnimActive = false;
@@ -93794,6 +93870,7 @@ function setCameraMode(mode) {
   const selector = $('viewer-camera-mode');
   if (selector) selector.value = nextMode;
   try { applySliceViewOffset3d(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
   try { scheduleCaptureView3d(0); } catch (e) {}
   try { requestWebglRender(0); } catch (e) {}
@@ -93831,6 +93908,7 @@ function applyStandardView(name) {
   }
   try { applySliceViewOffset3d(); } catch (e) {}
   try { updateSlicePlane3d(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
   try { scheduleCaptureView3d(0); } catch (e) {}
   try { requestWebglRender(0); } catch (e) {}
@@ -93906,8 +93984,8 @@ function _updateViewerBackendUI() {
   const cutaway = $('slice-cutaway-toggle');
   const cutawayWrap = $('slice-cutaway-toggle-wrap');
   const cutawayReason = remote
-    ? `Host Render 暂不支持“切开”：${reason}`
-    : '切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）';
+    ? `Host Render 暂不支持三维裁剪：${reason}`
+    : '兼容开关：沿当前切片轴启用或关闭三维裁剪';
   if (cutaway) {
     cutaway.disabled = remote;
     cutaway.title = cutawayReason;
@@ -93931,6 +94009,7 @@ function _updateViewerBackendUI() {
       : String((el.dataset && el.dataset.webglTitle) || 'WebGL 标准视图');
     try { el.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
   }
+  try { syncAxisClippingControlsUI(); } catch (e) {}
 }
 
 function _remoteCaptureView() {
@@ -94953,6 +95032,7 @@ function scheduleRemoteRender(highRes = true, delayMs = 120) {
 }
 
 function initRemoteViewer(reason) {
+  try { resetAxisClippingRuntime(); } catch (e) {}
   let canvas = $('viewer-canvas');
   if (!canvas) return;
   const fallbackReason = _normalizeViewerFallbackReason(reason);
@@ -95078,6 +95158,7 @@ function initRemoteViewer(reason) {
 
 function initViewer() {
   if (state.viewerReady) return;
+  try { resetAxisClippingRuntime(); } catch (e) {}
   const forced = String(state.forceRender || '').trim().toLowerCase();
   if (forced === 'remote') {
     initRemoteViewer('Host Render requested');
@@ -95204,6 +95285,7 @@ function initViewer() {
   state.viewerFallbackReason = '';
   state.viewerReady = true;
   try { _updateViewerBackendUI(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
   } catch (e) {
     const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
@@ -95221,6 +95303,7 @@ function initViewer() {
       _webglRenderTimer = null;
     } catch (e2) {}
     try { if (controls && typeof controls.dispose === 'function') controls.dispose(); } catch (e2) {}
+    try { resetAxisClippingRuntime(); } catch (e2) {}
     try { if (scene) disposeObject3DDeep(scene); } catch (e2) {}
     try { if (renderer && typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (e2) {}
     try { if (renderer && typeof renderer.dispose === 'function') renderer.dispose(); } catch (e2) {}
@@ -95418,6 +95501,7 @@ function applyElementVisibility() {
       node.visible = v;
     });
   } catch (e) {}
+  try { applyCutawayNow(false); } catch (e) {}
 }
 
 function _applyElementOutlineMode(enable) {
@@ -96087,142 +96171,344 @@ function updateSlicePlane3d() {
   try { requestWebglRender(0); } catch (e) {}
 }
 
-// ---- 3D cutaway (slice-based clipping with caps) ----
+// ---- X/Y/Z independent WebGL clipping ----
+const CLIP_AXES = ['X', 'Y', 'Z'];
+
+function _defaultClipPlanes3d() {
+  return {
+    X: { enabled: false, position: 0.5, invert: false },
+    Y: { enabled: false, position: 0.5, invert: false },
+    Z: { enabled: false, position: 0.5, invert: false },
+  };
+}
+
+function _clip01(value, fallback = 0.5) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return Math.max(0, Math.min(1, Number(fallback) || 0));
+  return Math.max(0, Math.min(1, number));
+}
+
+function _sanitizeClipPlanes3d(value) {
+  const source = (value && typeof value === 'object') ? value : {};
+  const clean = _defaultClipPlanes3d();
+  for (const axis of CLIP_AXES) {
+    const raw = (source[axis] && typeof source[axis] === 'object')
+      ? source[axis]
+      : ((source[axis.toLowerCase()] && typeof source[axis.toLowerCase()] === 'object') ? source[axis.toLowerCase()] : {});
+    clean[axis] = {
+      enabled: !!raw.enabled,
+      position: _clip01(raw.position, 0.5),
+      invert: !!raw.invert,
+    };
+  }
+  return clean;
+}
+
+function _ensureClipPlanes3dState() {
+  state.clipPlanes3d = _sanitizeClipPlanes3d(state.clipPlanes3d);
+  return state.clipPlanes3d;
+}
+
+function _serializeClipPlanes3d() {
+  const clean = _ensureClipPlanes3dState();
+  const result = {};
+  for (const axis of CLIP_AXES) result[axis] = { ...clean[axis] };
+  return result;
+}
+
+function _activeAxisClippingAxes() {
+  const clean = _ensureClipPlanes3dState();
+  return CLIP_AXES.filter((axis) => !!clean[axis].enabled);
+}
+
 function _cutawayActive3d() {
-  return !!(state && state.viewerBackend === 'webgl' && state.viewerMode === '3d' && state.sliceOverlay && state.sliceCutaway);
+  return !!(state && state.viewerBackend === 'webgl' && state.viewerMode === '3d' && _activeAxisClippingAxes().length);
 }
 
-function _cutawayPlaneCountWanted() {
-  if (!_cutawayActive3d()) return 0;
-  return state.sliceOverlay2 ? 2 : 1;
+function _axisClippingBounds(object3d) {
+  if (!window.THREE || !THREE.Box3 || !object3d || typeof object3d.traverseVisible !== 'function') return null;
+  try {
+    if (typeof object3d.updateWorldMatrix === 'function') object3d.updateWorldMatrix(true, true);
+    else if (typeof object3d.updateMatrixWorld === 'function') object3d.updateMatrixWorld(true);
+  } catch (e) {}
+  const bounds = new THREE.Box3();
+  try { bounds.makeEmpty(); } catch (e) {}
+  let haveVisibleGeometry = false;
+  object3d.traverseVisible((node) => {
+    try {
+      const geometry = node && node.geometry;
+      if (!geometry) return;
+      if (!geometry.boundingBox && typeof geometry.computeBoundingBox === 'function') geometry.computeBoundingBox();
+      if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) return;
+      const worldBox = geometry.boundingBox.clone();
+      if (node.matrixWorld && typeof worldBox.applyMatrix4 === 'function') worldBox.applyMatrix4(node.matrixWorld);
+      const values = [worldBox.min.x, worldBox.min.y, worldBox.min.z, worldBox.max.x, worldBox.max.y, worldBox.max.z].map(Number);
+      if (!values.every(Number.isFinite)) return;
+      bounds.union(worldBox);
+      haveVisibleGeometry = true;
+    } catch (e) {}
+  });
+  if (!haveVisibleGeometry || bounds.isEmpty()) return null;
+  const size = new THREE.Vector3();
+  bounds.getSize(size);
+  if (![size.x, size.y, size.z].map(Number).every(Number.isFinite)) return null;
+  if (!(Math.hypot(size.x, size.y, size.z) > 1e-9)) return null;
+  return bounds;
 }
 
-function _ensureCutawayPlanes() {
-  if (!window.THREE) return false;
-  if (!cutawayPlane1) cutawayPlane1 = new THREE.Plane();
-  if (!cutawayPlane2) cutawayPlane2 = new THREE.Plane();
-  if (!cutawayPlane1Front) cutawayPlane1Front = new THREE.Plane();
-  if (!cutawayPlane2Front) cutawayPlane2Front = new THREE.Plane();
-  if (!cutawayPlanes1) cutawayPlanes1 = [cutawayPlane1];
-  if (!cutawayPlanes2) cutawayPlanes2 = [cutawayPlane1, cutawayPlane2];
-  if (!cutawayTmpPos1) cutawayTmpPos1 = new THREE.Vector3();
-  if (!cutawayTmpPos2) cutawayTmpPos2 = new THREE.Vector3();
-  if (!cutawayTmpN1) cutawayTmpN1 = new THREE.Vector3();
-  if (!cutawayTmpN2) cutawayTmpN2 = new THREE.Vector3();
+function _axisClippingMaterials() {
+  const materials = [];
+  const seen = new Set();
+  const addMaterial = (material) => {
+    if (!material || seen.has(material)) return;
+    seen.add(material);
+    materials.push(material);
+  };
+  const visit = (node) => {
+    const material = node && node.material;
+    if (Array.isArray(material)) material.forEach(addMaterial);
+    else addMaterial(material);
+  };
+  try { if (meshGroup && typeof meshGroup.traverse === 'function') meshGroup.traverse(visit); } catch (e) {}
+  try {
+    if (elementPointsGroup && elementPointsGroup !== meshGroup && typeof elementPointsGroup.traverse === 'function') {
+      elementPointsGroup.traverse(visit);
+    }
+  } catch (e) {}
+  return materials;
+}
+
+function _assignAxisClippingMaterial(material, planes) {
+  if (!material) return;
+  const next = (planes && planes.length) ? planes : null;
+  const previous = material.clippingPlanes || null;
+  const previousLength = previous ? previous.length : 0;
+  const nextLength = next ? next.length : 0;
+  // Three.js only needs a shader recompile when the plane count/intersection mode changes;
+  // moving an existing-count plane updates uniforms and must stay cheap during slider input.
+  const needsProgramUpdate = previousLength !== nextLength || !!material.clipIntersection;
+  try { material.clippingPlanes = next; } catch (e) {}
+  try { material.clipIntersection = false; } catch (e) {}
+  if (needsProgramUpdate) { try { material.needsUpdate = true; } catch (e) {} }
+}
+
+function _applyAxisClippingToMaterials(planes) {
+  for (const material of _axisClippingMaterials()) _assignAxisClippingMaterial(material, planes);
+}
+
+function _axisClippingCapSignature(activeAxes) {
+  if (activeAxes.length !== 1 || !activeAxisClippingBounds) return activeAxes.length ? `multi:${activeAxes.join('')}` : 'none';
+  const axis = activeAxes[0];
+  const cfg = state.clipPlanes3d[axis];
+  const meta = activeAxisClippingMeta[axis] || {};
+  return `${axis}:${Number(cfg.position).toFixed(6)}:${cfg.invert ? 1 : 0}:${Number(meta.point).toFixed(9)}`;
+}
+
+function _updateAxisClippingCapPolicy(activeAxes) {
+  const signature = _axisClippingCapSignature(activeAxes);
+  const changed = signature !== axisClippingCapKey;
+  if (!activeAxes.length) {
+    if (changed || axisClippingCapMode !== 'none') { try { _clearCutawayCaps(); } catch (e) {} }
+    axisClippingCapMode = 'none';
+    axisClippingCapKey = signature;
+    return;
+  }
+  if (activeAxes.length > 1) {
+    if (changed || axisClippingCapMode !== 'multi-disabled') { try { _clearCutawayCaps(); } catch (e) {} }
+    axisClippingCapMode = 'multi-disabled';
+    axisClippingCapKey = signature;
+    return;
+  }
+  if (changed || axisClippingCapMode !== 'single') { try { _clearCutawayCaps(); } catch (e) {} }
+  axisClippingCapMode = 'single';
+  axisClippingCapKey = signature;
+  try { _ensureSingleAxisClippingCap(activeAxes[0]); } catch (e) {}
+}
+
+function syncAxisClippingControlsUI() {
+  const clean = _ensureClipPlanes3dState();
+  const remote = state.viewerBackend === 'remote';
+  const reason = remote ? _normalizeViewerFallbackReason(state.viewerFallbackReason) : '';
+  const activeAxes = CLIP_AXES.filter((axis) => clean[axis].enabled);
+  for (const axis of CLIP_AXES) {
+    const key = axis.toLowerCase();
+    const config = clean[axis];
+    const enabled = $(`clip-${key}-enabled`);
+    const range = $(`clip-${key}-position`);
+    const number = $(`clip-${key}-value`);
+    const invert = $(`clip-${key}-invert`);
+    if (enabled) enabled.checked = !!config.enabled;
+    if (range) range.value = String(config.position);
+    if (number) number.value = String(config.position);
+    if (invert) invert.checked = !!config.invert;
+    for (const control of [enabled, range, number, invert]) {
+      if (!control) continue;
+      control.disabled = remote;
+      const normalTitle = (control.dataset && control.dataset.webglTitle) || control.title || `${axis} 轴裁剪`;
+      if (control.dataset && !control.dataset.webglTitle) control.dataset.webglTitle = normalTitle;
+      control.title = remote ? `Host Render 暂不支持三维裁剪：${reason}` : normalTitle;
+      try { control.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
+    }
+  }
+  const status = $('axis-clipping-status');
+  if (status) {
+    if (remote) status.textContent = `Host Render 不支持三维裁剪 · ${reason}`;
+    else if (!activeAxes.length) status.textContent = '未启用裁剪';
+    else if (activeAxes.length === 1) status.textContent = `${activeAxes[0]} 轴裁剪 · 单轴截面封口`;
+    else status.textContent = `${activeAxes.join('+')} 组合裁剪 · 多轴不封口`;
+    status.title = status.textContent;
+  }
+  const master = $('slice-cutaway-toggle');
+  if (master) {
+    master.disabled = remote;
+    master.checked = remote ? false : activeAxes.length > 0;
+  }
+  state.sliceCutaway = activeAxes.length > 0;
+}
+
+function _setAxisClippingState(axis0, patch, persistDelay = 0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis)) return false;
+  const clean = _ensureClipPlanes3dState();
+  const next = { ...clean[axis] };
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'enabled')) next.enabled = !!patch.enabled;
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'position')) next.position = _clip01(patch.position, next.position);
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'invert')) next.invert = !!patch.invert;
+  clean[axis] = next;
+  state.clipPlanes3d = clean;
+  if (next.enabled) {
+    try {
+      state.sliceAxis = axis;
+      state.sliceIndex = Math.round(next.position * Math.max(0, axisMax(axis)));
+    } catch (e) {}
+  }
+  state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+  try { updateAxisClippingPlanes(true); } catch (e) {}
+  try { scheduleUiStatePersist(persistDelay); } catch (e) {}
   return true;
 }
 
-function _slicePlaneWorldCenter(axis0, idx0, outVec3) {
-  if (!window.THREE) return null;
-  const axis = _sanitizeSliceAxis(axis0);
-  const idx = clampInt(idx0, 0, axisMax(axis));
-  const dimsNm = domainDimsNm();
-  const voxelNm = Number(dimsNm.voxel) || 5.0;
-  const voxelUm = voxelNm / 1000.0;
-  const posUm = (idx + 0.5) * voxelUm;
-  const xUm = (Number(dimsNm.x) || 0) / 1000.0;
-  const yUm = (Number(dimsNm.y) || 0) / 1000.0;
-  const zUm = (Number(dimsNm.z) || 0) / 1000.0;
-
-  let centerOff = null;
-  if (meshCenterOffset && meshCenterOffset.isVector3) centerOff = [meshCenterOffset.x, meshCenterOffset.y, meshCenterOffset.z];
-  else centerOff = _sliceCenterOffsetUmFallback();
-
-  let px = xUm * 0.5, py = yUm * 0.5, pz = zUm * 0.5;
-  if (axis === 'X') px = posUm;
-  else if (axis === 'Y') py = posUm;
-  else pz = posUm;
-
-  const out = outVec3 || new THREE.Vector3();
-  out.set(px - centerOff[0], py - centerOff[1], pz - centerOff[2]);
-  return out;
-}
-
-function _cutawayAxisNormalKeepSide(axis0, planePos, camPos, outVec3) {
-  const axis = _sanitizeSliceAxis(axis0);
-  const n = outVec3 || (window.THREE ? new THREE.Vector3() : null);
-  if (!n) return null;
-  const cp = camPos || (camera ? camera.position : null);
-  if (!cp || !planePos) { n.set(0, 0, 1); return n; }
-  if (axis === 'X') {
-    const s = (cp.x < planePos.x) ? 1 : -1;
-    n.set(s, 0, 0);
-    return n;
+function bindAxisClippingControls() {
+  for (const axis of CLIP_AXES) {
+    const key = axis.toLowerCase();
+    const enabled = $(`clip-${key}-enabled`);
+    const range = $(`clip-${key}-position`);
+    const number = $(`clip-${key}-value`);
+    const invert = $(`clip-${key}-invert`);
+    const bind = (element, kind, handler) => {
+      if (!element || (element.dataset && element.dataset.axisClippingBound === 'true')) return;
+      element.addEventListener(kind, handler);
+      if (element.dataset) element.dataset.axisClippingBound = 'true';
+    };
+    bind(enabled, 'change', () => _setAxisClippingState(axis, { enabled: !!enabled.checked }, 0));
+    bind(range, 'input', () => {
+      if (number) number.value = range.value;
+      _setAxisClippingState(axis, { position: range.value }, 420);
+    });
+    bind(number, 'change', () => {
+      const value = _clip01(number.value, state.clipPlanes3d[axis].position);
+      number.value = String(value);
+      if (range) range.value = String(value);
+      _setAxisClippingState(axis, { position: value }, 0);
+    });
+    bind(invert, 'change', () => _setAxisClippingState(axis, { invert: !!invert.checked }, 0));
   }
-  if (axis === 'Y') {
-    const s = (cp.y < planePos.y) ? 1 : -1;
-    n.set(0, s, 0);
-    return n;
-  }
-  const s = (cp.z < planePos.z) ? 1 : -1;
-  n.set(0, 0, s);
-  return n;
-}
-
-function updateCutawayPlanesFromCamera() {
-  // Update plane orientation so we always clip the camera-facing side (camera lies on the negative side).
-  if (!_cutawayActive3d()) return false;
-  if (!renderer || !scene || !camera) return false;
-  if (!_ensureCutawayPlanes()) return false;
-  const camPos = camera.position;
-
-  const pos1 = _slicePlaneWorldCenter(state.sliceAxis, state.sliceIndex, cutawayTmpPos1);
-  if (!pos1) return false;
-  const n1 = _cutawayAxisNormalKeepSide(state.sliceAxis, pos1, camPos, cutawayTmpN1);
-  if (!n1) return false;
-  cutawayPlane1.setFromNormalAndCoplanarPoint(n1, pos1);
-  cutawayPlane1Front.copy(cutawayPlane1).negate();
-
-  if (state.sliceOverlay2) {
-    const pos2 = _slicePlaneWorldCenter(state.sliceAxis2, state.sliceIndex2, cutawayTmpPos2);
-    if (pos2) {
-      const n2 = _cutawayAxisNormalKeepSide(state.sliceAxis2, pos2, camPos, cutawayTmpN2);
-      if (n2) {
-        cutawayPlane2.setFromNormalAndCoplanarPoint(n2, pos2);
-        cutawayPlane2Front.copy(cutawayPlane2).negate();
+  const master = $('slice-cutaway-toggle');
+  if (master && !(master.dataset && master.dataset.axisClippingBound === 'true')) {
+    master.addEventListener('change', () => {
+      const clean = _ensureClipPlanes3dState();
+      if (!master.checked) {
+        for (const axis of CLIP_AXES) clean[axis].enabled = false;
+      } else if (!_activeAxisClippingAxes().length) {
+        const axis = _sanitizeSliceAxis(state.sliceAxis);
+        const max = Math.max(1, axisMax(axis));
+        clean[axis].enabled = true;
+        clean[axis].position = _clip01(Number(state.sliceIndex) / max, 0.5);
       }
-    }
+      state.clipPlanes3d = clean;
+      state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+      try { updateAxisClippingPlanes(true); } catch (e) {}
+      try { scheduleUiStatePersist(0); } catch (e) {}
+    });
+    if (master.dataset) master.dataset.axisClippingBound = 'true';
   }
+  syncAxisClippingControlsUI();
+}
+
+function updateAxisClippingPlanes(requestRender = true) {
+  const activeAxes = _activeAxisClippingAxes();
+  if (state.viewerBackend !== 'webgl' || !renderer || !meshGroup || !window.THREE) {
+    resetAxisClippingRuntime();
+    syncAxisClippingControlsUI();
+    return false;
+  }
+  if (!activeAxes.length) {
+    _applyAxisClippingToMaterials(null);
+    activeClippingPlanes = [];
+    activeAxisClippingBounds = null;
+    activeAxisClippingMeta = {};
+    try { renderer.localClippingEnabled = false; } catch (e) {}
+    _updateAxisClippingCapPolicy(activeAxes);
+    syncAxisClippingControlsUI();
+    if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
+    return true;
+  }
+  const bounds = _axisClippingBounds(meshGroup);
+  if (!bounds) {
+    _applyAxisClippingToMaterials(null);
+    activeClippingPlanes = [];
+    activeAxisClippingBounds = null;
+    activeAxisClippingMeta = {};
+    try { renderer.localClippingEnabled = false; } catch (e) {}
+    _updateAxisClippingCapPolicy([]);
+    syncAxisClippingControlsUI();
+    return false;
+  }
+  const clean = _ensureClipPlanes3dState();
+  const planes = [];
+  const meta = {};
+  const components = { X: 'x', Y: 'y', Z: 'z' };
+  for (const axis of activeAxes) {
+    const component = components[axis];
+    const config = clean[axis];
+    config.position = _clip01(config.position, 0.5);
+    const minimum = Number(bounds.min[component]);
+    const maximum = Number(bounds.max[component]);
+    const pointValue = minimum + config.position * (maximum - minimum);
+    const normal = new THREE.Vector3(axis === 'X' ? 1 : 0, axis === 'Y' ? 1 : 0, axis === 'Z' ? 1 : 0);
+    if (config.invert) normal.multiplyScalar(-1);
+    const point = new THREE.Vector3();
+    point[component] = pointValue;
+    const plane = new THREE.Plane(normal, -normal.dot(point));
+    planes.push(plane);
+    meta[axis] = { point: pointValue, position: config.position, invert: !!config.invert, plane };
+  }
+  activeClippingPlanes = planes;
+  activeAxisClippingBounds = bounds.clone();
+  activeAxisClippingMeta = meta;
+  _applyAxisClippingToMaterials(activeClippingPlanes);
+  try { renderer.localClippingEnabled = activeClippingPlanes.length > 0; } catch (e) {}
+  _updateAxisClippingCapPolicy(activeAxes);
+  syncAxisClippingControlsUI();
+  if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
   return true;
 }
 
-function _cutawayAssignMaterial(mat, planes, clipIntersection) {
-  if (!mat) return;
-  const p = (planes && planes.length) ? planes : null;
-  const prevLen = (mat.clippingPlanes && mat.clippingPlanes.length) ? mat.clippingPlanes.length : 0;
-  const newLen = p ? p.length : 0;
-  const prevInt = !!mat.clipIntersection;
-  const newInt = !!clipIntersection;
-  const needUpdate = (prevLen !== newLen) || (prevInt !== newInt);
-  try { mat.clippingPlanes = p; } catch (e) {}
-  try { mat.clipIntersection = newInt; } catch (e) {}
-  if (needUpdate) { try { mat.needsUpdate = true; } catch (e) {} }
+function applyAxisClippingAfterMeshRefresh(requestRender = true) {
+  return updateAxisClippingPlanes(requestRender);
 }
 
-function _applyCutawayToWebglMaterials(planes, clipIntersection) {
-  // Apply to all structure materials (solid + xray + edges) and element point materials.
-  try {
-    for (const [, group] of (state.meshes || new Map()).entries()) {
-      if (!group || !group.userData) continue;
-      const solid = group.userData._tcadSolidMesh;
-      const xray = group.userData._tcadXray;
-      if (solid && solid.material) _cutawayAssignMaterial(solid.material, planes, clipIntersection);
-      if (xray && xray.front && xray.front.material) _cutawayAssignMaterial(xray.front.material, planes, clipIntersection);
-      if (xray && xray.back && xray.back.material) _cutawayAssignMaterial(xray.back.material, planes, clipIntersection);
-      if (xray && xray.edges && xray.edges.material) _cutawayAssignMaterial(xray.edges.material, planes, clipIntersection);
-    }
-  } catch (e) {}
-  try {
-    if (elementPointsGroup) {
-      elementPointsGroup.traverse((node) => {
-        if (!node) return;
-        const mat = node.material;
-        if (!mat) return;
-        if (Array.isArray(mat)) mat.forEach((m) => _cutawayAssignMaterial(m, planes, clipIntersection));
-        else _cutawayAssignMaterial(mat, planes, clipIntersection);
-      });
-    }
-  } catch (e) {}
+function resetAxisClippingRuntime() {
+  try { _applyAxisClippingToMaterials(null); } catch (e) {}
+  activeClippingPlanes = [];
+  activeAxisClippingBounds = null;
+  activeAxisClippingMeta = {};
+  axisClippingCapMode = 'none';
+  axisClippingCapKey = '';
+  try { if (renderer) renderer.localClippingEnabled = false; } catch (e) {}
+  try { _clearCutawayCaps(); } catch (e) {}
+  try { if (scene && cutawayCapsGroup) scene.remove(cutawayCapsGroup); } catch (e) {}
+  cutawayCapsGroup = null;
 }
 
 function _cutawayCapOpacity() {
@@ -96265,6 +96551,8 @@ function _clearCutawayCaps() {
   try { if (cutawayCapTex2 && cutawayCapTex2.dispose) cutawayCapTex2.dispose(); } catch (e) {}
   cutawayCapTex1 = null;
   cutawayCapTex2 = null;
+  cutawayCapTexKey1 = '';
+  cutawayCapTexKey2 = '';
   cutawayCapCanvas1 = null;
   cutawayCapCanvas2 = null;
   cutawayCapCtx1 = null;
@@ -96683,7 +96971,15 @@ function _ensureCutawayCapMesh(which, slice) {
   const normal = (axis === 'X') ? new THREE.Vector3(1, 0, 0) : (axis === 'Y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
   try { mesh.quaternion.copy(q); } catch (e) {}
-  const pos = _slicePlaneWorldCenter(axis, slice.index, is2 ? cutawayTmpPos2 : cutawayTmpPos1);
+  let pos = null;
+  try {
+    const meta = activeAxisClippingMeta && activeAxisClippingMeta[axis];
+    const bounds = activeAxisClippingBounds;
+    if (meta && bounds) {
+      pos = bounds.getCenter(new THREE.Vector3());
+      pos[String(axis).toLowerCase()] = Number(meta.point);
+    }
+  } catch (e) { pos = null; }
   if (pos) { try { mesh.position.copy(pos); } catch (e) {} }
 
   // Texture + opacity (sync style changes)
@@ -96696,65 +96992,40 @@ function _ensureCutawayCapMesh(which, slice) {
   return mesh;
 }
 
-function applyCutawayNow(requestRender = true) {
-  // Public entry-point; called after slice refresh and UI toggles.
-  if (state.viewerBackend !== 'webgl') {
-    // Host Render: cutaway is not yet supported.
-    cutawayPlaneCount = 0;
+function _ensureSingleAxisClippingCap(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis) || axisClippingCapMode !== 'single') return false;
+  const config = _ensureClipPlanes3dState()[axis];
+  const max = Math.max(0, axisMax(axis));
+  const index = Math.round(_clip01(config.position, 0.5) * max);
+  state.sliceAxis = axis;
+  state.sliceIndex = index;
+  const cached = state.sliceLast;
+  const cacheMatches = !!(cached && String(cached.axis || '').toUpperCase() === axis && Number(cached.index) === index);
+  if (!cacheMatches) {
     try { if (cutawayCapsGroup) cutawayCapsGroup.visible = false; } catch (e) {}
+    try {
+      const pending = refreshSlice(true, 'primary');
+      if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+    } catch (e) {}
     return false;
   }
-  if (!renderer || !scene || !camera || !window.THREE) return false;
-
-  const active = _cutawayActive3d();
-  const wantCount = _cutawayPlaneCountWanted();
-  if (!active || wantCount <= 0) {
-    if (cutawayPlaneCount) {
-      _applyCutawayToWebglMaterials(null, false);
-      cutawayPlaneCount = 0;
-    }
-    try { if (cutawayCapsGroup) cutawayCapsGroup.visible = false; } catch (e) {}
-    try { renderer.localClippingEnabled = false; } catch (e) {}
-    if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
-    return true;
+  if (!_ensureCutawayCapsGroup()) return false;
+  const mesh = _ensureCutawayCapMesh(1, cached);
+  try { cutawayCapsGroup.visible = !!mesh; } catch (e) {}
+  try { if (cutawayCapMesh1) cutawayCapMesh1.visible = !!mesh; } catch (e) {}
+  try { if (cutawayCapMesh2) cutawayCapMesh2.visible = false; } catch (e) {}
+  if (cutawayCapMat1) {
+    try { cutawayCapMat1.clippingPlanes = null; } catch (e) {}
+    try { cutawayCapMat1.clipIntersection = false; } catch (e) {}
   }
+  return !!mesh;
+}
 
-  // Ensure we have the slice arrays needed for cap textures (best effort; async).
-  try {
-    if (!state.sliceLast) refreshSlice(true, 'primary').catch(() => {});
-    if (state.sliceOverlay2 && !state.sliceLast2) refreshSlice(true, 'secondary').catch(() => {});
-  } catch (e) {}
-
-  try { renderer.localClippingEnabled = true; } catch (e) {}
-  if (!_ensureCutawayPlanes()) return false;
-  updateCutawayPlanesFromCamera();
-
-  const planes = (wantCount >= 2) ? cutawayPlanes2 : cutawayPlanes1;
-  const clipIntersection = (wantCount >= 2);
-  _applyCutawayToWebglMaterials(planes, clipIntersection);
-  cutawayPlaneCount = wantCount;
-
-  // Caps: slice-colored planes aligned to the cut surfaces.
-  if (_ensureCutawayCapsGroup()) {
-    try { cutawayCapsGroup.visible = true; } catch (e) {}
-    try {
-      if (state.sliceLast) _ensureCutawayCapMesh(1, state.sliceLast);
-      if (state.sliceOverlay2 && state.sliceLast2) _ensureCutawayCapMesh(2, state.sliceLast2);
-      try { if (cutawayCapMesh1) cutawayCapMesh1.visible = !!state.sliceLast; } catch (e) {}
-      try { if (cutawayCapMesh2) cutawayCapMesh2.visible = !!(wantCount >= 2 && state.sliceOverlay2 && state.sliceLast2); } catch (e) {}
-      // Restrict caps to the actual removed region when dual-plane cutaway is enabled.
-      if (wantCount >= 2) {
-        if (cutawayCapMat1) { cutawayCapMat1.clippingPlanes = cutawayPlane2Front ? [cutawayPlane2Front] : null; cutawayCapMat1.clipIntersection = false; }
-        if (cutawayCapMat2) { cutawayCapMat2.clippingPlanes = cutawayPlane1Front ? [cutawayPlane1Front] : null; cutawayCapMat2.clipIntersection = false; }
-      } else {
-        if (cutawayCapMat1) { cutawayCapMat1.clippingPlanes = null; cutawayCapMat1.clipIntersection = false; }
-        if (cutawayCapMat2) { cutawayCapMat2.clippingPlanes = null; cutawayCapMat2.clipIntersection = false; }
-      }
-    } catch (e) {}
-  }
-
-  if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
-  return true;
+function applyCutawayNow(requestRender = true) {
+  // Compatibility entry-point retained for existing mesh/slice/material refresh call sites.
+  // The sole state source is state.clipPlanes3d; no worker or geometry rebuild is performed.
+  return updateAxisClippingPlanes(requestRender);
 }
 
 function clearMeshes() {
@@ -97599,7 +97870,6 @@ function _webglAnimate(ts) {
   }
 
   try {
-    try { updateCutawayPlanesFromCamera(); } catch (e) {}
     renderer.autoClear = true;
     renderer.render(scene, camera);
     if (overlayActive) {
@@ -97948,18 +98218,18 @@ function applySliceOverlayUI(triggerRefresh = false) {
           const secBox = $('slice-secondary-3d');
           if (secBox && secBox.classList) secBox.classList.toggle('slot-hidden', !on2);
               const cutWrap = $('slice-cutaway-toggle-wrap');
-              if (cutWrap && cutWrap.classList) cutWrap.classList.toggle('slot-hidden', !active);
               const cutCb = $('slice-cutaway-toggle');
               const canCut = (state.viewerBackend === 'webgl');
               if (cutWrap) {
                 cutWrap.title = canCut
-              ? '切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）'
-              : `Host Render 暂不支持“切开”：${_normalizeViewerFallbackReason(state.viewerFallbackReason)}`;
+              ? '兼容开关：沿当前切片轴启用或关闭三维裁剪'
+              : `Host Render 暂不支持三维裁剪：${_normalizeViewerFallbackReason(state.viewerFallbackReason)}`;
           }
           if (cutCb) {
-            cutCb.checked = !!state.sliceCutaway;
+            cutCb.checked = canCut && _activeAxisClippingAxes().length > 0;
             try { cutCb.disabled = !canCut; } catch (e) {}
           }
+          try { syncAxisClippingControlsUI(); } catch (e) {}
 
       const canvas = $('slice-canvas');
       if (canvas) {
@@ -101111,6 +101381,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (pFast) pFast.addEventListener('change', () => { if (pFast.checked) updatePreviewStyleFromUI(true); });
   if (pElem) pElem.addEventListener('change', () => { if (pElem.checked) updatePreviewStyleFromUI(true); });
   bindViewerCameraControls();
+  bindAxisClippingControls();
   $('refresh-preview-btn').addEventListener('click', restoreDefaultView);
   const rulerBtn = $('toggle-ruler3d-btn');
   if (rulerBtn) rulerBtn.addEventListener('click', () => {
@@ -101234,17 +101505,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.sliceOverlay = !!sliceToggle.checked;
     scheduleUiStatePersist(0);
     try { applySliceOverlayUI(true); } catch (e) {}
-    try { applyCutawayNow(true); } catch (e) {}
-  });
-  const cutToggle = $('slice-cutaway-toggle');
-  if (cutToggle) cutToggle.addEventListener('change', async () => {
-    state.sliceCutaway = !!cutToggle.checked;
-    scheduleUiStatePersist(0);
-    // Cutaway changes how we want to visualize the slice plane (mask fill to void regions).
-    try { updateSlicePlane3d(); } catch (e) {}
-    if (state.viewerMode === '3d' && state.sliceOverlay && state.sliceCutaway && !state.sliceLast) {
-      try { await refreshSlice(true, 'auto'); } catch (e) {}
-    }
     try { applyCutawayNow(true); } catch (e) {}
   });
   const axis3d = $('slice-axis-3d');

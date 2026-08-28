@@ -1163,8 +1163,9 @@ class AxisClippingContractTests(unittest.TestCase):
     @staticmethod
     def _node_prelude():
         return r"""
+globalThis.window = {};
 const THREE = require('./three.js');
-const window = { THREE };
+globalThis.window.THREE = THREE;
 const state = {
   viewerBackend: 'webgl',
   viewerMode: '3d',
@@ -1193,6 +1194,7 @@ let cutawayCapMat2 = null;
 let cutawayCapTex1 = null;
 let cutawayCapTex2 = null;
 let axisClippingCapMode = 'none';
+let axisClippingCapKey = '';
 const elements = {};
 const events = [];
 function $(id) { return elements[id] || null; }
