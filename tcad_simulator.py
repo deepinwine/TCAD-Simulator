@@ -32188,6 +32188,31 @@ def _invalidate_step_statuses(statuses: Any, start_index: int, recipe_length: in
     return out
 
 
+def _record_history_edit(undo_items: List[Any], redo_items: List[Any], entry: Any, max_items: int = 20) -> None:
+    """Append a new edit to the undo stack; any new edit invalidates redo."""
+    undo_items.append(entry)
+    del redo_items[:]
+    limit = max(1, _step_runtime_int(max_items))
+    while len(undo_items) > limit:
+        undo_items.pop(0)
+
+
+def _history_undo(undo_items: List[Any], redo_items: List[Any], current: Any) -> Any:
+    """Pop the newest undo entry; the current state becomes redoable."""
+    if not undo_items:
+        return None
+    redo_items.append(current)
+    return undo_items.pop()
+
+
+def _history_redo(undo_items: List[Any], redo_items: List[Any], current: Any) -> Any:
+    """Pop the newest redo entry; the current state becomes undoable again."""
+    if not redo_items:
+        return None
+    undo_items.append(current)
+    return redo_items.pop()
+
+
 def _snapshot_timeline_manifest(
     recipe_length: int,
     valid_snapshot_indices: Any,
@@ -36821,6 +36846,7 @@ def _webui_worker_main(
     except Exception:
         pass
     step_runtime_statuses = _normalize_step_statuses([], len(steps))
+    step_runtime_errors: Dict[int, Dict[str, Any]] = {}
 
     def _serialize_recipe_for_client() -> List[Dict[str, Any]]:
         nonlocal step_runtime_statuses
@@ -36829,6 +36855,8 @@ def _webui_worker_main(
         for index, step in enumerate(steps):
             blob = _webui_serialize_step(step)
             blob["runtime_status"] = step_runtime_statuses[index]
+            if step_runtime_statuses[index] == "error" and index in step_runtime_errors:
+                blob["runtime_error"] = dict(step_runtime_errors[index])
             result.append(blob)
         return result
 
@@ -36837,25 +36865,40 @@ def _webui_worker_main(
         step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
         blob = _webui_serialize_step(steps[index])
         blob["runtime_status"] = step_runtime_statuses[index]
+        if step_runtime_statuses[index] == "error" and index in step_runtime_errors:
+            blob["runtime_error"] = dict(step_runtime_errors[index])
         return blob
 
     def _reset_step_runtime_statuses() -> None:
-        nonlocal step_runtime_statuses
+        nonlocal step_runtime_statuses, step_runtime_errors
         step_runtime_statuses = _normalize_step_statuses([], len(steps))
+        step_runtime_errors = {}
 
     def _invalidate_step_runtime_statuses(start_index: int) -> None:
-        nonlocal step_runtime_statuses
+        nonlocal step_runtime_statuses, step_runtime_errors
         step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, start_index, len(steps))
+        start = max(0, _step_runtime_int(start_index))
+        step_runtime_errors = {
+            int(index): dict(error)
+            for index, error in step_runtime_errors.items()
+            if int(index) < start and isinstance(error, dict)
+        }
+        try:
+            _clear_redo_history()
+        except Exception:
+            pass
 
     # Timeline viewing position: -1 = derive from the latest valid snapshot.
     # Any successful run resets the override so the timeline follows execution again.
     timeline_current_index: int = -1
 
     def _set_step_runtime_status(index: int, status: str) -> None:
-        nonlocal step_runtime_statuses, timeline_current_index
+        nonlocal step_runtime_statuses, step_runtime_errors, timeline_current_index
         step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
         if 0 <= int(index) < len(step_runtime_statuses) and status in _STEP_RUNTIME_STATES:
             step_runtime_statuses[int(index)] = status
+            if status != "error":
+                step_runtime_errors.pop(int(index), None)
             if status == "done":
                 timeline_current_index = -1
 
@@ -36906,6 +36949,8 @@ def _webui_worker_main(
     except Exception:
         pass
     undo_stack: List[Dict[str, Any]] = []
+    # Redo entries mirror undo tokens (spillable model snapshots, same cap).
+    redo_stack: List[Dict[str, Any]] = []
     max_undo = 20
 
     model_revision = 0
@@ -58002,33 +58047,198 @@ def _webui_worker_main(
     def _snap_drop(obj: Any) -> None:
         _tcad_snapshot_drop_maybe(obj)
 
-    def _push_undo(*, defer_trim: bool = False) -> Any:
+    def _history_recipe_signature() -> str:
+        try:
+            payload = [_webui_serialize_step(step) for step in steps]
+            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            return hashlib.blake2s(raw.encode("utf-8", "ignore"), digest_size=16).hexdigest()
+        except Exception:
+            return ""
+
+    def _history_entry_snapshot(entry: Any) -> Any:
+        if isinstance(entry, dict) and "model_snapshot" in entry:
+            return entry.get("model_snapshot")
+        return entry
+
+    def _history_entry_drop(entry: Any) -> None:
+        try:
+            _snap_drop(_history_entry_snapshot(entry))
+        except Exception:
+            pass
+
+    def _history_clear_stack(stack: List[Any]) -> None:
+        while stack:
+            _history_entry_drop(stack.pop())
+
+    def _clear_redo_history() -> None:
+        _history_clear_stack(redo_stack)
+
+    def _clear_all_history() -> None:
+        _history_clear_stack(undo_stack)
+        _history_clear_stack(redo_stack)
+
+    def _history_capture_entry(kind: str) -> Dict[str, Any]:
         ck = {
             "spill_dir": str(snap_undo_dir),
-            "spill_tag": f"undo_{int(time.time() * 1000):013d}_{secrets.token_hex(3)}",
+            "spill_tag": f"{str(kind)}_{int(time.time() * 1000):013d}_{secrets.token_hex(3)}",
             "spill_threshold_bytes": 48 * 1024 * 1024,
         }
         try:
             snap = model.snapshot_state(compression="dense-zlib", compression_kwargs=ck)
         except Exception:
             snap = model.snapshot_state(compression="dense-zlib")
-        token = _snap_store(snap, kind="undo")
+        return {
+            "model_snapshot": _snap_store(snap, kind=str(kind)),
+            "recipe": [_webui_serialize_step(step) for step in steps],
+            "recipe_name": str(current_recipe_name),
+            "runtime_statuses": list(_normalize_step_statuses(step_runtime_statuses, len(steps))),
+            "runtime_errors": {int(k): dict(v) for k, v in step_runtime_errors.items() if isinstance(v, dict)},
+            "timeline_current_index": int(timeline_current_index),
+            "recipe_signature": _history_recipe_signature(),
+        }
+
+    def _history_build_recipe(entry: Any) -> Optional[List[ProcessStep]]:
+        """Validate and rebuild a recipe before mutating the current history state."""
+        if not isinstance(entry, dict) or "recipe" not in entry:
+            return None
+        raw_recipe = entry.get("recipe")
+        if not isinstance(raw_recipe, list):
+            raise ValueError("History recipe is missing or corrupt.")
+        rebuilt: List[ProcessStep] = []
+        for index, raw_step in enumerate(raw_recipe):
+            if not isinstance(raw_step, dict):
+                raise ValueError(f"History recipe step {index} is invalid.")
+            step = _webui_deserialize_step(dict(raw_step), material_db)
+            if step is None:
+                raise ValueError(f"History recipe step {index} could not be restored.")
+            rebuilt.append(step)
+        return rebuilt
+
+    def _history_trim(stack: List[Any]) -> None:
+        while len(stack) > max_undo:
+            _history_entry_drop(stack.pop(0))
+
+    def _push_undo(*, defer_trim: bool = False) -> Any:
+        token = _history_capture_entry("undo")
         undo_stack.append(token)
         if not defer_trim:
-            while len(undo_stack) > max_undo:
-                _snap_drop(undo_stack.pop(0))
+            _clear_redo_history()
+            _history_trim(undo_stack)
         return token
 
     def _commit_undo(token: Any) -> None:
         if any(item is token for item in undo_stack):
-            while len(undo_stack) > max_undo:
-                _snap_drop(undo_stack.pop(0))
+            _clear_redo_history()
+            _history_trim(undo_stack)
 
     def _abort_undo(token: Any) -> None:
         for index in range(len(undo_stack) - 1, -1, -1):
             if undo_stack[index] is token:
-                _snap_drop(undo_stack.pop(index))
+                _history_entry_drop(undo_stack.pop(index))
                 break
+
+    def _restore_history_metadata(entry: Any) -> None:
+        nonlocal step_runtime_statuses, step_runtime_errors, timeline_current_index, current_recipe_name
+        if not isinstance(entry, dict):
+            _reset_step_runtime_statuses()
+            timeline_current_index = -1
+            return
+        step_runtime_statuses = _normalize_step_statuses(entry.get("runtime_statuses"), len(steps))
+        raw_errors = entry.get("runtime_errors")
+        step_runtime_errors = {}
+        if isinstance(raw_errors, dict):
+            for key, value in raw_errors.items():
+                try:
+                    index = int(key)
+                except Exception:
+                    continue
+                if 0 <= index < len(steps) and step_runtime_statuses[index] == "error" and isinstance(value, dict):
+                    step_runtime_errors[index] = dict(value)
+        try:
+            timeline_current_index = int(entry.get("timeline_current_index", -1))
+        except Exception:
+            timeline_current_index = -1
+        saved_name = entry.get("recipe_name")
+        if isinstance(saved_name, str) and saved_name.strip():
+            current_recipe_name = saved_name.strip()[:80]
+
+    def _perform_history_transition(direction: str) -> Dict[str, Any]:
+        """Atomically move one model/status snapshot between undo and redo stacks."""
+        nonlocal model_revision
+        undoing = str(direction).lower() == "undo"
+        source = undo_stack if undoing else redo_stack
+        target_stack = redo_stack if undoing else undo_stack
+        result_key = "undone" if undoing else "redone"
+        if not source:
+            return {result_key: False, "log": model.history[-250:]}
+
+        target_entry = source[-1]
+        target_snapshot = _snap_load(_history_entry_snapshot(target_entry))
+        if not isinstance(target_snapshot, dict):
+            return {
+                result_key: False,
+                "error": "History snapshot missing or corrupt.",
+                "log": model.history[-250:],
+            }
+        try:
+            target_recipe = _history_build_recipe(target_entry)
+        except Exception as exc:
+            return {result_key: False, "error": str(exc), "log": model.history[-250:]}
+        try:
+            current_entry = _history_capture_entry("redo" if undoing else "undo")
+        except Exception as exc:
+            return {result_key: False, "error": f"Unable to snapshot current state: {exc}", "log": model.history[-250:]}
+        try:
+            current_recipe = _history_build_recipe(current_entry)
+        except Exception as exc:
+            _history_entry_drop(current_entry)
+            return {result_key: False, "error": f"Unable to snapshot current recipe: {exc}", "log": model.history[-250:]}
+
+        try:
+            model.restore_state(target_snapshot)
+            if target_recipe is not None:
+                steps[:] = target_recipe
+        except Exception as exc:
+            rollback_error = ""
+            try:
+                current_snapshot = _snap_load(_history_entry_snapshot(current_entry))
+                if not isinstance(current_snapshot, dict):
+                    raise RuntimeError("current snapshot unavailable")
+                model.restore_state(current_snapshot)
+                if current_recipe is not None:
+                    steps[:] = current_recipe
+            except Exception as rollback_exc:
+                rollback_error = str(rollback_exc)
+            _history_entry_drop(current_entry)
+            return {
+                result_key: False,
+                "error": f"History restore failed: {exc}",
+                "rollback_error": rollback_error,
+                "log": model.history[-250:],
+            }
+
+        source.pop()
+        target_stack.append(current_entry)
+        _history_trim(target_stack)
+        _history_entry_drop(target_entry)
+        try:
+            _invalidate_loop_cache()
+        except Exception:
+            pass
+        _restore_history_metadata(target_entry)
+        try:
+            model._log("Undo: restored the previous state." if undoing else "Redo: re-applied the undone state.")
+        except Exception:
+            pass
+        model_revision += 1
+        preview_ready.clear()
+        _autosave("undo" if undoing else "redo")
+        return {
+            result_key: True,
+            "model": _webui_model_summary(model),
+            "recipe": _serialize_recipe_for_client(),
+            "log": model.history[-250:],
+        }
 
     def _finish_step_failure(
         step: ProcessStep,
@@ -58038,7 +58248,7 @@ def _webui_worker_main(
         undo_token: Any = None,
     ) -> Dict[str, Any]:
         """Abort or retain a pending undo token and build the worker error payload."""
-        nonlocal model_revision
+        nonlocal model_revision, step_runtime_errors
         _set_step_runtime_status(step_index, "error")
         if undo_token is not None:
             if transaction.get("rolled_back") or transaction.get("snapshot_error"):
@@ -58057,11 +58267,23 @@ def _webui_worker_main(
         failure["model"] = _webui_model_summary(model)
         failure["log"] = model.history[-250:]
         failure["model_revision"] = int(model_revision)
+        step_runtime_errors[int(step_index)] = {
+            key: failure.get(key)
+            for key in (
+                "step_index",
+                "step_type",
+                "instance_name",
+                "parameter_path",
+                "error",
+                "error_type",
+                "suggestion",
+                "rolled_back",
+            )
+        }
         return failure
 
     def _begin_step_execution(step: ProcessStep, step_index: int) -> Dict[str, Any]:
         """Run non-mutating preflight and allocate an uncommitted undo snapshot."""
-        _set_step_runtime_status(step_index, "running")
         try:
             warnings = _webui_localize_exposure_mask_file(step)
             if warnings:
@@ -58087,6 +58309,7 @@ def _webui_worker_main(
                 "rolled_back": True,
             }
             return {"ok": False, "failure": _finish_step_failure(step, step_index, transaction)}
+        _set_step_runtime_status(step_index, "running")
         return {"ok": True, "description": description, "undo_token": undo_token}
 
     # WebUI preview caches (per isolated worker).
@@ -58118,18 +58341,22 @@ def _webui_worker_main(
     step_cache_ctx_sig: str = ""
     step_cache_step_sigs: Dict[int, str] = {}
     step_cache_step_states: Dict[int, Any] = {}
+    # Direct run_step checkpoints are valid for timeline viewing, but they are not
+    # necessarily a recipe-prefix state and therefore must not seed incremental reuse.
+    step_cache_step_sources: Dict[int, str] = {}
     # May be adjusted by `_update_cache_policy()` based on domain size.
     step_cache_max_steps: int = int(step_cache_max_steps)
 
     def _invalidate_loop_cache() -> None:
         nonlocal loop_cache_ctx_sig, loop_cache_station_sigs, loop_cache_station_states, loop_cache_station_ends
-        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states
+        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_step_sources
         loop_cache_ctx_sig = ""
         loop_cache_station_sigs = []
         loop_cache_station_states = []
         loop_cache_station_ends = []
         step_cache_ctx_sig = ""
         step_cache_step_sigs = {}
+        step_cache_step_sources = {}
         try:
             for v in list(step_cache_step_states.values()):
                 _snap_drop(v)
@@ -58369,7 +58596,7 @@ def _webui_worker_main(
     def _run_recipe_incremental(upto_step_index: Optional[int], *, autosave_note: str) -> Dict[str, Any]:
         """Run recipe from start to `upto_step_index` (inclusive), using per-step snapshot time-travel cache."""
         nonlocal model_revision, loop_cache_ctx_sig, loop_cache_station_sigs, loop_cache_station_states, loop_cache_station_ends
-        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_max_steps
+        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_step_sources, step_cache_max_steps
 
         # Agent safety: redact any secrets from agent-provided strings before logging/storing run_reports.
         agent_cfg_cache: Optional[Dict[str, Any]] = None
@@ -58467,6 +58694,8 @@ def _webui_worker_main(
                 break
             if int(i) not in step_cache_step_states:
                 break
+            if step_cache_step_sources.get(int(i)) != "incremental":
+                break
             reuse_last_step = int(i)
 
         # Drop any stale suffix cache entries once a mismatch is detected.
@@ -58474,6 +58703,7 @@ def _webui_worker_main(
             for k in list(step_cache_step_sigs.keys()):
                 if int(k) > int(reuse_last_step):
                     step_cache_step_sigs.pop(int(k), None)
+                    step_cache_step_sources.pop(int(k), None)
             for k in list(step_cache_step_states.keys()):
                 if int(k) > int(reuse_last_step):
                     _snap_drop(step_cache_step_states.pop(int(k), None))
@@ -59627,6 +59857,7 @@ def _webui_worker_main(
                     snap_obj = _snap_store(snap_i, kind="step", step_idx=int(i))
                     step_cache_step_sigs[int(i)] = step_sigs_all[int(i)]
                     step_cache_step_states[int(i)] = snap_obj
+                    step_cache_step_sources[int(i)] = "incremental"
                     last_step_snap = snap_obj
                     # Bound memory in pathological runs (very long flows).
                     if int(step_cache_max_steps) > 0 and len(step_cache_step_states) > int(step_cache_max_steps):
@@ -59634,6 +59865,7 @@ def _webui_worker_main(
                         for k in drop:
                             _snap_drop(step_cache_step_states.pop(int(k), None))
                             step_cache_step_sigs.pop(int(k), None)
+                            step_cache_step_sources.pop(int(k), None)
                 except Exception:
                     pass
             # Loop-station snapshots are intentionally disabled: per-step snapshots already enable
@@ -69976,12 +70208,7 @@ def _webui_worker_main(
                         current_ui_state.pop("dock_layout", None)
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 preview_ready.clear()
                 model_revision += 1
                 _manual_save("import library recipe")
@@ -70998,6 +71225,7 @@ def _webui_worker_main(
                 if not instance_name or len(instance_name) > 80:
                     raise ValueError("Step name must contain 1-80 characters")
                 steps[index].instance_name = _normalize_step_instance_name(instance_name, steps[index].name)
+                _clear_redo_history()
                 _autosave("rename step")
                 conn.send({"ok": True, "result": _serialize_step_for_client(index), "rid": rid})
                 continue
@@ -71027,13 +71255,17 @@ def _webui_worker_main(
                         "rid": rid,
                     })
                     continue
-                try:
-                    model.restore_state(snap, emit_log=True, log_prefix="[timeline] ")
-                except Exception as exc:
+                restored = _run_model_transaction(
+                    model,
+                    lambda: model.restore_state(snap, emit_log=True, log_prefix="[timeline] "),
+                )
+                if not restored.get("ok"):
                     conn.send({
                         "ok": False,
-                        "error": f"快照恢复失败：{exc}",
+                        "error": f"快照恢复失败：{restored.get('error', 'unknown error')}",
                         "code": "restore_failed",
+                        "rolled_back": bool(restored.get("rolled_back", False)),
+                        "rollback_error": str(restored.get("rollback_error", "") or ""),
                         "rid": rid,
                     })
                     continue
@@ -71114,33 +71346,13 @@ def _webui_worker_main(
                 continue
 
             if cmd == "undo":
-                if not undo_stack:
-                    try:
-                        model._log("Nothing to undo.")
-                    except Exception:
-                        pass
-                    conn.send({"ok": True, "result": {"undone": False, "log": model.history[-250:]}, "rid": rid})
-                    continue
-                ref = undo_stack.pop()
-                snap0 = _snap_load(ref)
-                if not isinstance(snap0, dict):
-                    try:
-                        model._log("Undo snapshot missing/corrupt; skipping.")
-                    except Exception:
-                        pass
-                    conn.send({"ok": True, "result": {"undone": False, "log": model.history[-250:]}, "rid": rid})
-                    continue
-                model.restore_state(snap0)
-                # Drop the popped snapshot file (lossless; disk cache is an implementation detail).
-                _snap_drop(ref)
-                try:
-                    model._log("Reverted last completed step.")
-                except Exception:
-                    pass
-                model_revision += 1
-                preview_ready.clear()
-                _autosave("undo")
-                conn.send({"ok": True, "result": {"undone": True, "model": _webui_model_summary(model), "log": model.history[-250:]}, "rid": rid})
+                result = _perform_history_transition("undo")
+                conn.send({"ok": True, "result": result, "rid": rid})
+                continue
+
+            if cmd == "redo":
+                result = _perform_history_transition("redo")
+                conn.send({"ok": True, "result": result, "rid": rid})
                 continue
 
             if cmd == "run_step":
@@ -71179,6 +71391,42 @@ def _webui_worker_main(
                         pass
                 model_revision += 1
                 preview_ready.clear()
+                # A direct single-step run is also a valid timeline checkpoint. Replace any
+                # cached state for this step and discard the now-stale suffix so time travel
+                # cannot silently restore a model produced by older parameters.
+                try:
+                    ctx_sig = _loop_cache_context_signature()
+                    if step_cache_ctx_sig != ctx_sig:
+                        _invalidate_loop_cache()
+                    step_cache_ctx_sig = ctx_sig
+                    for cache_index in list(step_cache_step_sigs.keys()):
+                        if int(cache_index) > int(idx):
+                            step_cache_step_sigs.pop(int(cache_index), None)
+                            step_cache_step_sources.pop(int(cache_index), None)
+                    for cache_index in list(step_cache_step_states.keys()):
+                        if int(cache_index) > int(idx):
+                            _snap_drop(step_cache_step_states.pop(int(cache_index), None))
+                    try:
+                        ck_step = {
+                            "spill_dir": str(snap_step_dir),
+                            "spill_tag": f"step_{int(idx):06d}",
+                            "spill_threshold_bytes": 48 * 1024 * 1024,
+                        }
+                        step_snapshot = model.snapshot_state(
+                            compression="dense-zlib", compression_kwargs=ck_step
+                        )
+                    except Exception:
+                        step_snapshot = model.snapshot_state()
+                    step_cache_step_sigs[int(idx)] = _step_exec_signature(step)
+                    step_cache_step_states[int(idx)] = _snap_store(
+                        step_snapshot, kind="step", step_idx=int(idx)
+                    )
+                    step_cache_step_sources[int(idx)] = "direct"
+                except Exception:
+                    # Execution already committed; a cache write failure only disables time travel.
+                    step_cache_step_sigs.pop(int(idx), None)
+                    step_cache_step_sources.pop(int(idx), None)
+                    _snap_drop(step_cache_step_states.pop(int(idx), None))
                 _autosave(f"run step {step.name}")
                 conn.send(
                     {
@@ -71351,6 +71599,8 @@ def _webui_worker_main(
 
             if cmd == "load_autosave":
                 loaded = _load_autosave()
+                if loaded:
+                    _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
@@ -71376,6 +71626,7 @@ def _webui_worker_main(
                 _autosave("auto-saved before recipe switch", immediate=True)
                 if not _load_recipe_entry(entry_id):
                     raise ValueError("History entry not found")
+                _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
@@ -71403,6 +71654,7 @@ def _webui_worker_main(
                 if not name:
                     name = "Untitled"
                 current_recipe_name = name
+                _clear_redo_history()
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave("recipe name")
@@ -71551,6 +71803,8 @@ def _webui_worker_main(
                         current_recipe_id = ""
                         _manual_save("init")
                         switched = True
+                if switched:
+                    _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
@@ -71582,12 +71836,7 @@ def _webui_worker_main(
                     _invalidate_loop_cache()
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 # New recipe should not inherit prior domain/wafer settings.
                 # Reset domain to default and reset substrate/temperature to Initialize Wafer defaults.
                 try:
@@ -71720,12 +71969,7 @@ def _webui_worker_main(
                             pass
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 model_revision += 1
                 preview_ready.clear()
                 current_recipe_id = ""
@@ -71859,12 +72103,7 @@ def _webui_worker_main(
                         current_ui_state.pop("dock_layout", None)
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 model_revision += 1
                 preview_ready.clear()
                 current_recipe_id = ""
@@ -73765,6 +74004,11 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/undo":
             resp = sess.rpc("undo", {})
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/redo":
+            resp = sess.rpc("redo", {})
             self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
@@ -81849,13 +82093,13 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-		  <div class="main-container">
+		  <div class="main-container drawer-collapsed">
 		    <div class="left-panel dock-col" data-dock-idx="0">
 		      <div class="left-frame">
 		        <div class="dock-nav" id="dock-nav" data-dock-idx="0" aria-label="Control bar">
 		          <div class="dock-tabs" id="dock-tabs" data-dock-idx="0" role="tablist" aria-label="Panels"></div>
 		          <div class="dock-actions">
-		            <button class="btn btn-sm" id="cad-drawer-toggle" title="折叠工具面板">«</button>
+		            <button class="btn btn-sm" id="cad-drawer-toggle" title="展开工具面板">»</button>
 		            <button class="btn btn-sm" id="layout-reset-btn" title="恢复默认布局">恢复默认布局</button>
 		          </div>
 		        </div>
@@ -82401,6 +82645,7 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
               </div>
               <div class="btn-row">
                 <button class="btn" id="undo-btn">撤销</button>
+                <button class="btn" id="redo-btn">重做</button>
                 <button class="btn btn-danger" id="reset-btn">重置</button>
               </div>
             </div>
@@ -82834,7 +83079,7 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                   <input id="material-color-picker" type="color" style="position:fixed; left:-1000px; top:-1000px; width:1px; height:1px; opacity:0" />
                   <div class="viewer-slice-info" id="slice-info" style="display:none"></div>
                   <div class="viewer-ruler" id="viewer-ruler" style="display:none"></div>
-                  <div class="viewer-backend-status" id="viewer-backend-status" hidden></div>
+                  <div class="viewer-backend-status" id="viewer-backend-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
                   <div class="viewer-hint" id="viewer-hint">提示：鼠标拖拽旋转，滚轮缩放，右键平移</div>
             </div>
           </div>
@@ -83317,9 +83562,11 @@ header p { font-size: 12px; opacity: 1; color: var(--header-subtext); }
 .main-container.drawer-collapsed .left-panel .dock-tabs,
 .main-container.drawer-collapsed .left-panel .left-scroll { display: none; }
 .main-container.drawer-collapsed .left-panel .dock-actions { flex-direction: column; }
+.main-container.drawer-collapsed .left-panel #layout-reset-btn { display: none; }
 @media (max-width: 1100px) {
-  .cad-workspace { grid-template-columns: minmax(250px, 290px) minmax(360px, 1fr); }
-  .cad-parameters.is-collapsed { display: none; }
+  .cad-workspace {
+    grid-template-columns: minmax(220px, 260px) minmax(260px, 300px) minmax(360px, 1fr);
+  }
 }
 
 .card {
@@ -83778,6 +84025,32 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
 .step-item.active { background: var(--select-bg); }
 .step-item.dragging { opacity: 0.55; }
 .step-item.drop-target { outline: 2px dashed rgba(var(--accent-rgb), 0.65); outline-offset: -2px; }
+.step-item.st-ready { border-left: 3px solid rgba(148,163,184,0.75); }
+.step-item.st-dirty { border-left: 3px solid #d97706; }
+.step-item.st-running { border-left: 3px solid #2563eb; }
+.step-item.st-done { border-left: 3px solid #16a34a; }
+.step-item.st-error { border-left: 3px solid #dc2626; background: rgba(220,38,38,0.07); }
+.step-error-badge {
+  flex: 1 0 100%;
+  font-size: 11px;
+  color: #b91c1c;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-error-detail {
+  border: 1px solid rgba(220,38,38,0.45);
+  background: rgba(220,38,38,0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #7f1d1d;
+  line-height: 1.55;
+}
+.step-error-detail .err-title { font-weight: 800; color: #b91c1c; margin-bottom: 4px; }
+.step-error-detail .err-row b { font-weight: 700; }
 .step-rename-input {
   flex: 1;
   min-width: 0;
@@ -84415,6 +84688,8 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   border: 1px solid rgba(45, 212, 191, 0.50);
 }
 #viewer-backend-status[data-backend="remote"] {
+  top: auto;
+  bottom: 50px;
   left: 10px;
   right: auto;
   max-width: min(72%, 720px);
@@ -84423,6 +84698,13 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   border-radius: 8px;
   background: rgba(120, 53, 15, 0.90);
   border: 1px solid rgba(251, 191, 36, 0.62);
+}
+.viewer-container.host-render-active .viewer-legend {
+  max-height: calc(100% - 96px);
+}
+.viewer-container.webgl-active .viewer-legend {
+  max-width: calc(100% - 110px);
+  box-sizing: border-box;
 }
 .viewer-backend-status[hidden] { display: none !important; }
 
@@ -89528,9 +89810,9 @@ function _cadSetParamsCollapsed(collapsed) {
 function _cadResetShellState() {
   try {
     const mc = document.querySelector('.main-container');
-    if (mc) mc.classList.remove('drawer-collapsed');
+    if (mc) mc.classList.add('drawer-collapsed');
     const dt = $('cad-drawer-toggle');
-    if (dt) { dt.textContent = '\u00AB'; dt.title = '\u6298\u53E0\u5DE5\u5177\u9762\u677F'; }
+    if (dt) { dt.textContent = '\u00BB'; dt.title = '\u5C55\u5F00\u5DE5\u5177\u9762\u677F'; }
     _cadSetParamsCollapsed(false);
   } catch (e) {}
 }
@@ -90177,6 +90459,31 @@ function _sliceOverrideKey(idx) {
       state.sliceStepOverrides2 = swap(state.sliceStepOverrides2);
     }
 
+    function _sliceOverridesMove(cur0, from0, to0) {
+      const cur = (cur0 && typeof cur0 === 'object') ? cur0 : {};
+      const from = parseInt(from0, 10);
+      const to = parseInt(to0, 10);
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < 0 || from === to) {
+        return Object.assign({}, cur);
+      }
+      const out = {};
+      for (const key of Object.keys(cur)) {
+        const index = parseInt(key, 10);
+        if (!Number.isFinite(index) || index < 0) continue;
+        let next = index;
+        if (index === from) next = to;
+        else if (from < to && index > from && index <= to) next = index - 1;
+        else if (from > to && index >= to && index < from) next = index + 1;
+        out[String(next)] = cur[key];
+      }
+      return out;
+    }
+
+    function _sliceOverridesMoveBoth(from, to) {
+      state.sliceStepOverrides = _sliceOverridesMove(state.sliceStepOverrides, from, to);
+      state.sliceStepOverrides2 = _sliceOverridesMove(state.sliceStepOverrides2, from, to);
+    }
+
 function _uiLockDisabled(el, locked) {
   if (!el) return;
   try {
@@ -90201,7 +90508,7 @@ function _setProcessRecipeUiLocked(locked) {
     'preset-seq-select', 'preset-seq-insert-btn',
     'run-step-btn', 'run-to-btn', 'run-all-btn',
     'dup-step-btn', 'move-up-btn', 'move-down-btn', 'remove-step-btn',
-    'undo-btn', 'reset-btn',
+    'undo-btn', 'redo-btn', 'reset-btn',
   ];
   for (const id of ids) {
     try { _uiLockDisabled($(id), !!locked); } catch (e) {}
@@ -90260,7 +90567,8 @@ function renderRecipe() {
       prevLoopLabel = loopLabel;
     }
     const item = document.createElement('div');
-    item.className = 'step-item' + (!locked && idx === state.selectedIndex ? ' active' : '');
+    const stCls = ' st-' + String((step && step.runtime_status) || 'ready');
+    item.className = 'step-item' + stCls + (!locked && idx === state.selectedIndex ? ' active' : '');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = !!(step && step.enabled);
@@ -90363,6 +90671,16 @@ function renderRecipe() {
         renderParams();
         try { applyEffectiveSliceForSelectedStep(true); } catch (e) {}
       });
+    }
+    if (!locked && String((step && step.runtime_status) || '') === 'error') {
+      try {
+        const errInfo = (state.stepErrors || {})[idx];
+        const badge = document.createElement('div');
+        badge.className = 'step-error-badge';
+        badge.textContent = '\u26A0 ' + String((errInfo && errInfo.error) || '\u6B65\u9AA4\u5931\u8D25').slice(0, 46);
+        badge.title = String((errInfo && errInfo.error) || 'Step failed');
+        item.appendChild(badge);
+      } catch (e) {}
     }
     list.appendChild(item);
   });
@@ -90666,11 +90984,44 @@ function renderCmpSelectivity(container, step) {
   container.appendChild(wrapper);
 }
 
+function _renderStepErrorBox(container, idx) {
+  try {
+    const step = (state.recipe || [])[idx];
+    if (!step || String(step.runtime_status || '') !== 'error') return;
+    const err = (state.stepErrors || {})[idx];
+    const box = document.createElement('div');
+    box.className = 'step-error-detail';
+    const title = document.createElement('div');
+    title.className = 'err-title';
+    title.textContent = `\u26A0 \u6B65\u9AA4 ${idx + 1} \u6267\u884C\u5931\u8D25${err && err.rolled_back ? '\uFF08\u5DF2\u81EA\u52A8\u56DE\u6EDA\uFF09' : ''}`;
+    box.appendChild(title);
+    const rows = [
+      ['\u5B9E\u4F8B\u540D', String((err && err.instance_name) || step.instance_name || step.name || '-')],
+      ['\u6B65\u9AA4\u7C7B\u578B', String((err && err.step_type) || step.name || '-')],
+      ['\u53C2\u6570\u8DEF\u5F84', String((err && err.parameter_path) || '\u672A\u5B9A\u4F4D')],
+      ['\u9519\u8BEF', String((err && err.error) || '\u672A\u77E5\u9519\u8BEF')],
+      ['\u5F02\u5E38\u7C7B\u578B', String((err && err.error_type) || '-')],
+      ['\u5EFA\u8BAE\u64CD\u4F5C', String((err && err.suggestion) || '\u68C0\u67E5\u53C2\u6570\u540E\u91CD\u8BD5')],
+    ];
+    for (const [k, v] of rows) {
+      const row = document.createElement('div');
+      row.className = 'err-row';
+      const b = document.createElement('b');
+      b.textContent = k + '\uFF1A';
+      row.appendChild(b);
+      row.appendChild(document.createTextNode(v));
+      box.appendChild(row);
+    }
+    container.insertBefore(box, container.firstChild);
+  } catch (e) {}
+}
+
 function renderParams() {
   const step = state.recipe[state.selectedIndex];
   $('param-step-title').textContent = step ? `Step Parameters — ${step.name}` : 'Step Parameters';
   const container = $('param-container');
   container.innerHTML = '';
+  if (step) _renderStepErrorBox(container, state.selectedIndex);
   const isExposure = isMaskExposureStep(step);
   let exposureAdvEnabled = false;
   try {
@@ -93163,6 +93514,12 @@ function _runUiBuildPlan(mode0, targetIdx0) {
 }
 
 function _runUiStart(mode, targetIdx) {
+  try {
+    for (const id of ['run-step-btn', 'run-to-btn', 'run-all-btn']) {
+      const el = $(id);
+      if (el) _uiLockDisabled(el, true);
+    }
+  } catch (e) {}
   const plan = _runUiBuildPlan(mode, targetIdx);
   const posByIndex = {};
   for (let k = 0; k < plan.length; k++) posByIndex[String(plan[k])] = k + 1;
@@ -93187,6 +93544,12 @@ function _runUiStart(mode, targetIdx) {
 }
 
 function _runUiStop() {
+  try {
+    for (const id of ['run-step-btn', 'run-to-btn', 'run-all-btn']) {
+      const el = $(id);
+      if (el) _uiLockDisabled(el, false);
+    }
+  } catch (e) {}
   const run = _runUiProgress;
   if (run) {
     run.active = false;
@@ -93532,6 +93895,16 @@ async function refreshAll(doPreview, retry = 0) {
     state.demoRecipes = init.result.demo_recipes || {};
     try { renderDemoRecipes(); } catch (e) {}
     try { refreshTimeline(); } catch (e) {}
+    try {
+      const previous = (state.stepErrors && typeof state.stepErrors === 'object') ? state.stepErrors : {};
+      const keep = {};
+      (state.recipe || []).forEach((st, i) => {
+        if (!st || String(st.runtime_status || '') !== 'error') return;
+        if (st.runtime_error && typeof st.runtime_error === 'object') keep[i] = st.runtime_error;
+        else if (previous[i]) keep[i] = previous[i];
+      });
+      state.stepErrors = keep;
+    } catch (e) {}
     state.recipes = init.result.recipes || init.result.history || [];
     state.exports = init.result.exports || [];
     state.recipeFactories = init.result.recipe_factories || [];
@@ -94394,6 +94767,13 @@ function _updateViewerBackendUI() {
     try {
       if (status.dataset) status.dataset.backend = statusKind;
       else status.setAttribute('data-backend', statusKind);
+    } catch (e) {}
+    try {
+      const container = status.parentElement;
+      if (container && container.classList) {
+        container.classList.toggle('host-render-active', remote);
+        container.classList.toggle('webgl-active', webglReady);
+      }
     } catch (e) {}
   }
   const hint = $('viewer-hint');
@@ -100155,6 +100535,15 @@ async function undo() {
   await refreshAll(true);
 }
 
+async function redo() {
+  showNotification('重做中...');
+  const res = await apiPost('/api/redo', {});
+  if (res && res.ok && res.result && res.result.redone === false) {
+    showNotification('没有可重做的操作');
+  }
+  await refreshAll(true);
+}
+
 async function saveParams() {
   const step = state.recipe[state.selectedIndex];
   if (!step) return;
@@ -100162,6 +100551,23 @@ async function saveParams() {
   showNotification('保存参数中...');
   await applyParamsNow();
   await refreshAll(false);
+}
+
+async function handleStructuredRunFailure(response) {
+  const failure = (response && typeof response === 'object') ? response : { error: 'unknown' };
+  const stepIndex = Number.isInteger(failure.step_index) ? failure.step_index : -1;
+  // Pull authoritative runtime statuses and the server-persisted structured error first.
+  // This keeps the card badge and parameter detail visible immediately and after reload.
+  try { await refreshAll(false); } catch (e) {}
+  if (stepIndex >= 0 && stepIndex < (state.recipe || []).length) {
+    state.stepErrors = state.stepErrors || {};
+    state.stepErrors[stepIndex] = failure;
+    try { state.recipe[stepIndex].runtime_status = 'error'; } catch (e) {}
+    state.selectedIndex = stepIndex;
+    renderRecipe();
+    renderParams();
+  }
+  showNotification('运行失败：' + (failure.error || 'unknown'), 6500, 'error');
 }
 
 async function runSelected() {
@@ -100188,7 +100594,10 @@ async function runSelected() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   await refreshAll(true);
   try {
@@ -100225,7 +100634,10 @@ async function runToSelected() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   if (res.result && res.result.model) { state.model = res.result.model; setHeaderStats(state.model); }
   await refreshAll(true);
@@ -100257,7 +100669,10 @@ async function runAll() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   if (res.result && res.result.model) { state.model = res.result.model; setHeaderStats(state.model); }
   await refreshAll(true);
@@ -100509,7 +100924,7 @@ async function moveRecipeStep(from, to) {
   }
   if (Array.isArray(res.result)) {
     state.recipe = res.result;
-    try { _sliceOverridesSwap(f, t); } catch (e) {}
+    try { _sliceOverridesMoveBoth(f, t); } catch (e) {}
     state.selectedIndex = Math.max(0, Math.min(t, state.recipe.length - 1));
     renderRecipe();
     renderParams();
@@ -102190,6 +102605,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
           $('reset-btn').addEventListener('click', resetModel);
           $('undo-btn').addEventListener('click', undo);
+          const redoBtnEl = $('redo-btn');
+          if (redoBtnEl) redoBtnEl.addEventListener('click', redo);
           const saveParamsBtn = $('save-params-btn');
           if (saveParamsBtn) saveParamsBtn.addEventListener('click', saveParams);
   $('run-step-btn').addEventListener('click', runSelected);
