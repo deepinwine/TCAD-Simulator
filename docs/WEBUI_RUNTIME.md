@@ -79,6 +79,18 @@ The status chip on the viewer reports the actually initialized backend, not just
 
 Camera, projection, clipping, and material visibility interactions are browser-local: they must not trigger worker recomputes, `preview/manifest` refetches, or geometry re-downloads. Only lightweight UI state is persisted (for example `ui_state.clipPlanes3d` and per-material display modes under `ui_state.materialDisplaySolid`/`materialDisplayFast`). The clipping status element (role `status`) reads `未启用裁剪` when idle and `X+Y+Z 组合裁剪 · 多轴不封口` when several axes are active.
 
+## Timeline, Undo/Redo, And Step Errors
+
+The CAD shell adds these worker commands behind HTTP endpoints:
+
+- `POST /api/timeline/get`: per-step manifest (`index`, `state`, `runtime_status`, `snapshot_valid`) plus the current viewing index. A snapshot is valid only when the step status is `done`, its cached state exists, and the cache context signature matches.
+- `POST /api/timeline/restore`: restores a valid snapshot for viewing only. Steps without a valid snapshot are rejected with `code: no_valid_snapshot` — the worker never recomputes implicitly.
+- `POST /api/undo` / `POST /api/redo`: spillable snapshot stacks capped at 20 entries. Undo pushes the current state onto the redo stack; any new edit or successful run clears redo. Restores are atomic with runtime statuses, step errors, and the timeline position.
+- `POST /api/recipe/rename-step`: sets a step's `instance_name` (1-80 chars) without touching execution parameters.
+- `POST /api/recipe/move`: supports either `{index, direction: "up"|"down"}` or `{index, to}` for drag-and-drop reordering.
+
+Failed steps return a structured payload (`step_index`, `instance_name`, `step_type`, `parameter_path`, `error`, `error_type`, `suggestion`, `rolled_back`) that the browser renders on the failing step card and in the Parameters panel.
+
 ## Manual Viewer Smoke Check
 
 Start an isolated WebUI with a throwaway storage root:
