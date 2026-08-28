@@ -925,6 +925,125 @@ console.log(JSON.stringify({{ elements, state }}));
         self.assertFalse(cutaway["checked"])
         self.assertIn("GPU failed", cutaway["title"])
 
+    def test_backend_status_reports_actual_webgl_version_and_resets_across_states(self):
+        normalize_reason = _extract_function(
+            "_normalizeViewerFallbackReason", "_updateViewerBackendUI"
+        )
+        update_ui = _extract_function("_updateViewerBackendUI", "_remoteCaptureView")
+        result = _run_node(
+            f"""
+const controlIds = [
+  'slice-cutaway-toggle', 'viewer-camera-mode', 'viewer-view-iso',
+  'viewer-view-top', 'viewer-view-bottom', 'viewer-view-front',
+  'viewer-view-back', 'viewer-view-left', 'viewer-view-right'
+];
+function control(title) {{
+  return {{
+    disabled: false,
+    checked: true,
+    title,
+    dataset: {{}},
+    setAttribute(k, v) {{ this[k] = v; }}
+  }};
+}}
+const elements = {{
+  'viewer-backend-status': {{ textContent: '', hidden: true, title: '', dataset: {{}} }},
+  'viewer-hint': {{ textContent: '', style: {{ display: 'none' }} }},
+  'slice-cutaway-toggle': control('cutaway'),
+  'slice-cutaway-toggle-wrap': control('cutaway-wrap')
+}};
+for (const id of controlIds.slice(1)) elements[id] = control(`original:${{id}}`);
+const state = {{
+  viewerBackend: 'webgl',
+  viewerReady: true,
+  viewerWebglVersion: 2,
+  viewerMode: '3d',
+  viewerFallbackReason: 'stale reason'
+}};
+function $(id) {{ return elements[id] || null; }}
+{normalize_reason}
+{update_ui}
+function snapshot() {{
+  const status = elements['viewer-backend-status'];
+  return {{
+    status: {{
+      textContent: status.textContent,
+      hidden: status.hidden,
+      title: status.title,
+      backend: status.dataset.backend || null
+    }},
+    controls: controlIds.map((id) => ({{
+      disabled: elements[id].disabled,
+      title: elements[id].title,
+      aria: elements[id]['aria-disabled'] || null
+    }}))
+  }};
+}}
+
+_updateViewerBackendUI();
+const webgl2 = snapshot();
+
+state.viewerBackend = 'remote';
+state.viewerReady = true;
+state.viewerWebglVersion = 0;
+state.viewerFallbackReason = '<b>GPU failed</b>';
+_updateViewerBackendUI();
+const remote = snapshot();
+
+state.viewerBackend = 'webgl';
+state.viewerReady = true;
+state.viewerWebglVersion = 1;
+state.viewerFallbackReason = 'stale reason';
+_updateViewerBackendUI();
+const webgl1 = snapshot();
+
+state.viewerBackend = 'pending';
+state.viewerReady = false;
+state.viewerWebglVersion = 0;
+_updateViewerBackendUI();
+const pending = snapshot();
+
+console.log(JSON.stringify({{ webgl2, remote, webgl1, pending }}));
+"""
+        )
+
+        for key, label in (("webgl2", "WebGL2"), ("webgl1", "WebGL1")):
+            with self.subTest(state=key):
+                status = result[key]["status"]
+                self.assertFalse(status["hidden"])
+                self.assertEqual(status["textContent"], label)
+                self.assertIn(label, status["title"])
+                self.assertEqual(status["backend"], "webgl")
+                self.assertTrue(all(not item["disabled"] for item in result[key]["controls"]))
+                self.assertTrue(
+                    all(item["aria"] == "false" for item in result[key]["controls"][1:])
+                )
+
+        remote = result["remote"]
+        self.assertFalse(remote["status"]["hidden"])
+        self.assertEqual(remote["status"]["textContent"], "Host Render · <b>GPU failed</b>")
+        self.assertEqual(remote["status"]["title"], "<b>GPU failed</b>")
+        self.assertEqual(remote["status"]["backend"], "remote")
+        self.assertTrue(all(item["disabled"] for item in remote["controls"]))
+        self.assertTrue(all(item["aria"] == "true" for item in remote["controls"][1:]))
+
+        pending = result["pending"]
+        self.assertTrue(pending["status"]["hidden"])
+        self.assertEqual(pending["status"]["textContent"], "")
+        self.assertEqual(pending["status"]["title"], "")
+        self.assertEqual(pending["status"]["backend"], "pending")
+        self.assertTrue(all(not item["disabled"] for item in pending["controls"]))
+        self.assertTrue(
+            all(item["aria"] == "false" for item in pending["controls"][1:])
+        )
+
+        self.assertIn(
+            '.viewer-backend-status[data-backend="webgl"]', tcad._WEBUI_STYLE_CSS
+        )
+        self.assertIn(
+            '.viewer-backend-status[data-backend="remote"]', tcad._WEBUI_STYLE_CSS
+        )
+
 
 class CameraContractTests(unittest.TestCase):
     @staticmethod

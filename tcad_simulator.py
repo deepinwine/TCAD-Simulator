@@ -84116,18 +84116,28 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   left: 10px;
   z-index: 8;
   max-width: min(72%, 720px);
-  color: #fef3c7;
   font-size: 12px;
   font-weight: 800;
   line-height: 1.35;
-  padding: 7px 11px;
-  border-radius: 8px;
-  background: rgba(120, 53, 15, 0.90);
-  border: 1px solid rgba(251, 191, 36, 0.62);
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.28);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: none;
+}
+.viewer-backend-status[data-backend="webgl"] {
+  color: #ccfbf1;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(6, 78, 59, 0.78);
+  border: 1px solid rgba(45, 212, 191, 0.50);
+}
+.viewer-backend-status[data-backend="remote"] {
+  color: #fef3c7;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: rgba(120, 53, 15, 0.90);
+  border: 1px solid rgba(251, 191, 36, 0.62);
 }
 .viewer-backend-status[hidden] { display: none !important; }
 
@@ -93991,11 +94001,25 @@ function _normalizeViewerFallbackReason(reason) {
 function _updateViewerBackendUI() {
   const remote = (state.viewerBackend === 'remote');
   const reason = remote ? _normalizeViewerFallbackReason(state.viewerFallbackReason) : '';
+  const webglVersion = Number(state.viewerWebglVersion);
+  const webglReady = (
+    state.viewerBackend === 'webgl'
+    && state.viewerReady === true
+    && (webglVersion === 1 || webglVersion === 2)
+  );
+  const statusKind = remote ? 'remote' : (webglReady ? 'webgl' : 'pending');
+  const statusLabel = remote
+    ? `Host Render · ${reason}`
+    : (webglReady ? `WebGL${webglVersion}` : '');
   const status = $('viewer-backend-status');
   if (status) {
-    status.textContent = remote ? `Host Render · ${reason}` : '';
-    status.title = remote ? reason : '';
-    status.hidden = !remote;
+    status.textContent = statusLabel;
+    status.title = remote ? reason : (webglReady ? `${statusLabel} 渲染已启用` : '');
+    status.hidden = !(remote || webglReady);
+    try {
+      if (status.dataset) status.dataset.backend = statusKind;
+      else status.setAttribute('data-backend', statusKind);
+    } catch (e) {}
   }
   const hint = $('viewer-hint');
   if (hint && state.viewerMode !== '2d') {
