@@ -51,6 +51,10 @@ def _axis_clipping_contract_source():
     return source[start:end]
 
 
+def _cutaway_cap_mesh_source():
+    return _extract_function("_ensureCutawayCapMesh", "_ensureSingleAxisClippingCap")
+
+
 class WebGLCapabilityContractTests(unittest.TestCase):
     def test_probe_uses_a_temporary_canvas_and_prefers_webgl2(self):
         self.assertNotIn("_webglAvailable", tcad._WEBUI_SCRIPT_JS)
@@ -1500,10 +1504,189 @@ console.log(JSON.stringify({ partialDomain, indices, normal, inverted, invertedN
         self.assertEqual(result["indices"], {"X": 30, "Y": 30, "Z": 30})
         self.assertEqual(result["normal"], [0, 0, 1])
         self.assertEqual(result["inverted"], 30)
-        self.assertEqual(result["invertedNormal"], [0, 0, -1])
+        self.assertEqual(result["invertedNormal"], [0, 0, 1])
         self.assertEqual(result["low"], 0)
         self.assertEqual(result["high"], 99)
         self.assertEqual(result["after"], result["before"])
+
+    def test_range_input_updates_planes_immediately_but_debounces_cap_fetch(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+let nextTimer = 1;
+const timers = new Map();
+const retiredTimers = [];
+globalThis.setTimeout = (fn, delay) => { const id = nextTimer++; timers.set(id, { fn, delay }); return id; };
+globalThis.clearTimeout = (id) => {
+  if (timers.has(id)) retiredTimers.push(timers.get(id).fn);
+  timers.delete(id);
+};
+function flushTimers() {
+  const queued = Array.from(timers.values());
+  timers.clear();
+  for (const timer of queued) timer.fn();
+}
+class FakeAbortController {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+}
+window.AbortController = FakeAbortController;
+const fetches = [];
+_ensureSingleAxisClippingCap = (axis) => {
+  fetches.push(`/api/slice?axis=${axis}&index=${_axisClippingSliceIndex(axis)}&kind=material`);
+  return true;
+};
+const material = new THREE.MeshBasicMaterial();
+meshGroup.add(new THREE.Mesh(new THREE.BoxGeometry(100, 100, 100), material));
+axisMax = () => 99;
+state.clipPlanes3d.Z.enabled = true;
+let materialApplications = 0;
+const applyMaterialsNow = _applyAxisClippingToMaterials;
+_applyAxisClippingToMaterials = (planes) => { materialApplications += 1; return applyMaterialsNow(planes); };
+for (let i = 0; i < 38; i++) {
+  _setAxisClippingState('Z', { position: (i + 1) / 40 }, 420, 160);
+}
+_setAxisClippingState('Z', { position: 1 }, 420, 160);
+_setAxisClippingState('Z', { position: 1 }, 420, 160);
+retiredTimers[retiredTimers.length - 1]();
+const beforeIdle = {
+  fetches: fetches.length,
+  renders: events.filter((event) => event === 'render').length,
+  materialApplications,
+  pendingTimers: timers.size,
+  finalPoint: activeAxisClippingMeta.Z.point
+};
+flushTimers();
+const afterIdle = { fetches: fetches.length, pendingTimers: timers.size, path: fetches[0] || '' };
+
+state.clipPlanes3d.X.enabled = false;
+state.clipPlanes3d.Z.enabled = true;
+_setAxisClippingState('Z', { position: 0.25 }, 420, 160);
+state.clipPlanes3d.X.enabled = true;
+updateAxisClippingPlanes(false);
+const beforeMultiFlush = fetches.length;
+flushTimers();
+const afterMultiFlush = fetches.length;
+
+state.clipPlanes3d.X.enabled = false;
+state.clipPlanes3d.Z.enabled = true;
+_setAxisClippingState('Z', { position: 0.75 }, 420, 160);
+state.viewerBackend = 'remote';
+updateAxisClippingPlanes(false);
+const beforeRemoteFlush = fetches.length;
+flushTimers();
+console.log(JSON.stringify({
+  beforeIdle,
+  afterIdle,
+  beforeMultiFlush,
+  afterMultiFlush,
+  beforeRemoteFlush,
+  afterRemoteFlush: fetches.length,
+  timerHandle: typeof axisClippingCapTimer === 'undefined' ? 'missing' : axisClippingCapTimer
+}));
+"""
+        )
+
+        self.assertEqual(result["beforeIdle"]["fetches"], 0)
+        self.assertEqual(result["beforeIdle"]["renders"], 40)
+        self.assertEqual(result["beforeIdle"]["materialApplications"], 40)
+        self.assertEqual(result["beforeIdle"]["pendingTimers"], 1)
+        self.assertEqual(result["beforeIdle"]["finalPoint"], 50)
+        self.assertEqual(result["afterIdle"]["fetches"], 1)
+        self.assertIn("index=50", result["afterIdle"]["path"])
+        self.assertEqual(result["afterIdle"]["pendingTimers"], 0)
+        self.assertEqual(result["afterMultiFlush"], result["beforeMultiFlush"])
+        self.assertEqual(result["afterRemoteFlush"], result["beforeRemoteFlush"])
+        self.assertIsNone(result["timerHandle"])
+
+    def test_cap_uses_full_domain_center_and_invert_keeps_texture_orientation(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + _cutaway_cap_mesh_source()
+            + r"""
+let scene = new THREE.Scene();
+cutawayCapsGroup = new THREE.Group();
+scene.add(cutawayCapsGroup);
+let cutawayCapsKey = '';
+let cutawayCapsKey2 = '';
+function domainDimsNm() { return { x: 100000, y: 100000, z: 100000, voxel: 1000 }; }
+function _cutawayCapOpacity() { return 1; }
+function _buildCutawayCapTexture() { return null; }
+function disposeObject3DDeep() {}
+meshCenterOffset.set(1, 1, 50);
+axisMax = () => 99;
+activeAxisClippingBounds = new THREE.Box3(
+  new THREE.Vector3(20, 20, -10),
+  new THREE.Vector3(40, 40, 10)
+);
+const points = { X: 29, Y: 29, Z: 0 };
+const expectedPositions = { X: [29, 49, 0], Y: [49, 29, 0], Z: [49, 49, 0] };
+const rows = {};
+for (const axis of ['X', 'Y', 'Z']) {
+  const positive = new THREE.Vector3(axis === 'X' ? 1 : 0, axis === 'Y' ? 1 : 0, axis === 'Z' ? 1 : 0);
+  state.clipPlanes3d = _defaultClipPlanes3d();
+  state.clipPlanes3d[axis] = { enabled: true, position: 0.5, invert: false };
+  activeAxisClippingMeta = { [axis]: { point: points[axis], invert: false, plane: new THREE.Plane(positive.clone(), -points[axis]) } };
+  const slice = { axis, index: _axisClippingSliceIndex(axis), w: 100, h: 100, data: new Uint16Array(10000) };
+  const normalMesh = _ensureCutawayCapMesh(1, slice);
+  const normalQuaternion = normalMesh.quaternion.toArray();
+  const normalTangents = [
+    new THREE.Vector3(1, 0, 0).applyQuaternion(normalMesh.quaternion).toArray(),
+    new THREE.Vector3(0, 1, 0).applyQuaternion(normalMesh.quaternion).toArray()
+  ];
+  const normalPosition = normalMesh.position.toArray();
+  const normalIndex = _axisClippingSliceIndex(axis);
+  state.clipPlanes3d[axis].invert = true;
+  activeAxisClippingMeta[axis].invert = true;
+  activeAxisClippingMeta[axis].plane = new THREE.Plane(positive.clone().multiplyScalar(-1), points[axis]);
+  const invertedMesh = _ensureCutawayCapMesh(1, slice);
+  rows[axis] = {
+    expectedPosition: expectedPositions[axis],
+    normalPosition,
+    invertedPosition: invertedMesh.position.toArray(),
+    normalIndex,
+    invertedIndex: _axisClippingSliceIndex(axis),
+    normalQuaternion,
+    invertedQuaternion: invertedMesh.quaternion.toArray(),
+    normalTangents,
+    invertedTangents: [
+      new THREE.Vector3(1, 0, 0).applyQuaternion(invertedMesh.quaternion).toArray(),
+      new THREE.Vector3(0, 1, 0).applyQuaternion(invertedMesh.quaternion).toArray()
+    ],
+    clippingNormal: activeAxisClippingMeta[axis].plane.normal.toArray()
+  };
+}
+const validCenter = _axisClippingDomainCenterWorld().toArray();
+domainDimsNm = () => ({ x: NaN, y: 0, z: Infinity, voxel: 1000 });
+const invalidCenter = _axisClippingDomainCenterWorld();
+const invalidCap = _ensureCutawayCapMesh(1, { axis: 'Z', index: 50, w: 1, h: 1, data: new Uint16Array(1) });
+console.log(JSON.stringify({
+  rows,
+  validCenter,
+  invalidCenter,
+  invalidCap: invalidCap === null,
+  invalidCapHidden: cutawayCapMesh1 ? !cutawayCapMesh1.visible : true
+}));
+"""
+        )
+
+        self.assertEqual(result["validCenter"], [49, 49, 0])
+        self.assertIsNone(result["invalidCenter"])
+        self.assertTrue(result["invalidCap"])
+        self.assertTrue(result["invalidCapHidden"])
+        expected_indices = {"X": 30, "Y": 30, "Z": 50}
+        expected_normals = {"X": [-1, 0, 0], "Y": [0, -1, 0], "Z": [0, 0, -1]}
+        for axis in ("X", "Y", "Z"):
+            row = result["rows"][axis]
+            self.assertEqual(row["normalPosition"], row["expectedPosition"])
+            self.assertEqual(row["invertedPosition"], row["expectedPosition"])
+            self.assertEqual(row["normalIndex"], expected_indices[axis])
+            self.assertEqual(row["invertedIndex"], expected_indices[axis])
+            self.assertEqual(row["invertedQuaternion"], row["normalQuaternion"])
+            self.assertEqual(row["invertedTangents"], row["normalTangents"])
+            self.assertEqual(row["clippingNormal"], expected_normals[axis])
 
     def test_dedicated_cap_fetch_works_without_slice_overlay_and_rejects_stale_response(self):
         result = _run_node(
@@ -1537,6 +1720,9 @@ function _axisClippingRenderCapSlice(slice) { rendered.push({ axis: slice.axis, 
   const renderedAfterStale = rendered.slice();
   pending[1].resolve({ ok: true, result: { axis: 'Z', index: 40, shape: [2, 2], data_b64: 'ignored' } });
   await second;
+  activeAxisClippingMeta.Z.point = 40.1;
+  const sameIndexMotion = await _requestAxisClippingCapSlice('Z');
+  const requestsAfterSameIndexMotion = pending.length;
   const requestsBeforeInvert = pending.length;
   state.clipPlanes3d.Z.invert = true;
   activeAxisClippingMeta.Z.invert = true;
@@ -1553,9 +1739,11 @@ function _axisClippingRenderCapSlice(slice) { rendered.push({ axis: slice.axis, 
     renderedAfterStale,
     rendered,
     requestsBeforeInvert,
+    requestsAfterSameIndexMotion,
     requestsAfterInvert,
     requestsAfterRevision,
     inverted,
+    sameIndexMotion,
     sliceOverlay: state.sliceOverlay,
     sliceAxis: state.sliceAxis,
     sliceIndex: state.sliceIndex,
@@ -1573,6 +1761,8 @@ function _axisClippingRenderCapSlice(slice) { rendered.push({ axis: slice.axis, 
         self.assertTrue(result["firstWasAborted"])
         self.assertEqual(result["renderedAfterStale"], [])
         self.assertEqual(result["rendered"][-1]["index"], 40)
+        self.assertTrue(result["sameIndexMotion"])
+        self.assertEqual(result["requestsAfterSameIndexMotion"], 2)
         self.assertEqual(result["requestsAfterInvert"], result["requestsBeforeInvert"])
         self.assertEqual(result["requestsAfterRevision"], result["requestsAfterInvert"] + 1)
         self.assertTrue(result["inverted"])
