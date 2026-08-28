@@ -1090,7 +1090,8 @@ const norm = (v) => Math.hypot(v[0], v[1], v[2]);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const metrics = (name, value) => ({
   name,
-  finite: [...value.fwd, ...value.right, ...value.up].every(Number.isFinite),
+  finite: [...value.pos, ...value.fwd, ...value.right, ...value.up].every(Number.isFinite),
+  pos: value.pos,
   norms: [norm(value.fwd), norm(value.right), norm(value.up)].map((v) => Number.isFinite(v) ? v : -999),
   dots: [dot(value.fwd, value.right), dot(value.fwd, value.up), dot(value.right, value.up)].map((v) => Number.isFinite(v) ? v : -999)
 });
@@ -1115,10 +1116,23 @@ for (const [axis, fwd] of directions) {
     cases.push(metrics(`${axis}:${kind}`, _remoteCameraBasis({ pos, target: [0, 0, 0], up })));
   }
 }
+const malformedCameras = [
+  ['invalid-pos', { pos: [Infinity, NaN, -Infinity], target: [0, 0, 0], up: [0, 1, 0] }],
+  ['string-infinity-pos', { pos: ['Infinity', '-Infinity', undefined], target: [0, 0, 0], up: [0, 1, 0] }],
+  ['invalid-target', { pos: [0, 0, 5], target: [NaN, Infinity, '-Infinity'], up: [0, 1, 0] }],
+  ['missing-components', { pos: [], target: [], up: [0, 1, 0] }],
+  ['missing-pos-target', { up: [0, 1, 0] }],
+  ['coincident-pos-target', { pos: [4, 5, 6], target: [4, 5, 6], up: [0, 1, 0] }]
+];
+for (const [name, cam] of malformedCameras) {
+  cases.push(metrics(name, _remoteCameraBasis(cam)));
+}
 const validYUp = _remoteCameraBasis({ pos: [0, 0, 10], target: [0, 0, 0], up: [0, 1, 0] });
+const defaultCamera = _remoteCameraBasis({ up: [0, 1, 0] });
 console.log(JSON.stringify({
   cases,
-  validYUp
+  validYUp,
+  defaultCamera
 }));
 """
         )
@@ -1132,6 +1146,8 @@ console.log(JSON.stringify({
                     self.assertAlmostEqual(value, 0.0, places=8)
         self.assertEqual(result["validYUp"]["right"], [1, 0, 0])
         self.assertEqual(result["validYUp"]["up"], [0, 1, 0])
+        self.assertEqual(result["defaultCamera"]["pos"], [0, 0, 1])
+        self.assertEqual(result["defaultCamera"]["fwd"], [0, 0, -1])
 
 
 if __name__ == "__main__":

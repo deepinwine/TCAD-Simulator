@@ -94216,12 +94216,18 @@ function _composeRemoteFrame(gbuf, mode) {
 }
 
 function _remoteCameraBasis(cam) {
-  const pos = cam && Array.isArray(cam.pos) ? cam.pos : [0, 0, 1];
-  const tar = cam && Array.isArray(cam.target) ? cam.target : [0, 0, 0];
+  const finiteCoord = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const rawPos = cam && Array.isArray(cam.pos) ? cam.pos : [0, 0, 1];
+  const rawTar = cam && Array.isArray(cam.target) ? cam.target : [0, 0, 0];
+  const pos = [finiteCoord(rawPos[0]), finiteCoord(rawPos[1]), finiteCoord(rawPos[2])];
+  const tar = [finiteCoord(rawTar[0]), finiteCoord(rawTar[1]), finiteCoord(rawTar[2])];
   const up0 = cam && Array.isArray(cam.up) ? cam.up : [0, 0, 1];
-  let fx = (Number(tar[0]) || 0) - (Number(pos[0]) || 0);
-  let fy = (Number(tar[1]) || 0) - (Number(pos[1]) || 0);
-  let fz = (Number(tar[2]) || 0) - (Number(pos[2]) || 0);
+  let fx = tar[0] - pos[0];
+  let fy = tar[1] - pos[1];
+  let fz = tar[2] - pos[2];
   let fn = Math.hypot(fx, fy, fz);
   if (!(Number.isFinite(fn) && fn > 1e-12)) {
     fx = 0; fy = 0; fz = -1; fn = 1;
@@ -94272,7 +94278,7 @@ function _remoteCameraBasis(cam) {
     ux2 = 0; uy2 = 1; uz2 = 0; u2n = 1;
   }
   ux2 /= u2n; uy2 /= u2n; uz2 /= u2n;
-  return { pos: [Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0], right: [rx, ry, rz], up: [ux2, uy2, uz2], fwd: [fx, fy, fz] };
+  return { pos, right: [rx, ry, rz], up: [ux2, uy2, uz2], fwd: [fx, fy, fz] };
 }
 
 function _remoteProjectToGbuf(p, basis, proj, gbuf) {
