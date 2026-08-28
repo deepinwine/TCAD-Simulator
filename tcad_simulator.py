@@ -70881,7 +70881,19 @@ def _webui_worker_main(
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
                 moved_to = idx
-                if direction == "up" and idx > 0:
+                to_raw = payload.get("to", None)
+                if to_raw is not None:
+                    to = int(to_raw)
+                    if not (0 <= to < len(steps)):
+                        raise ValueError("Invalid step index")
+                    if to != idx:
+                        steps.insert(to, steps.pop(idx))
+                        moved_to = to
+                        try:
+                            _agent_shift_step_meta_move(int(idx), int(to))
+                        except Exception:
+                            pass
+                elif direction == "up" and idx > 0:
                     steps[idx - 1], steps[idx] = steps[idx], steps[idx - 1]
                     moved_to = idx - 1
                     try:
@@ -70899,6 +70911,18 @@ def _webui_worker_main(
                     _invalidate_step_runtime_statuses(min(idx, moved_to))
                 _autosave("move step")
                 conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
+                continue
+
+            if cmd == "recipe_rename_step":
+                index = int(payload.get("index", -1))
+                instance_name = str(payload.get("instance_name", "")).strip()
+                if not (0 <= index < len(steps)):
+                    raise ValueError("Step index out of range")
+                if not instance_name or len(instance_name) > 80:
+                    raise ValueError("Step name must contain 1-80 characters")
+                steps[index].instance_name = _normalize_step_instance_name(instance_name, steps[index].name)
+                _autosave("rename step")
+                conn.send({"ok": True, "result": _serialize_step_for_client(index), "rid": rid})
                 continue
 
             if cmd == "apply_domain":
@@ -73562,6 +73586,12 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/recipe/move":
             payload = self._read_json()
             resp = sess.rpc("recipe_move", payload)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/recipe/rename-step":
+            payload = self._read_json()
+            resp = sess.rpc("recipe_rename_step", payload)
             self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
@@ -83573,6 +83603,18 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
 }
 .step-item:last-child { border-bottom: none; }
 .step-item.active { background: var(--select-bg); }
+.step-item.dragging { opacity: 0.55; }
+.step-item.drop-target { outline: 2px dashed rgba(var(--accent-rgb), 0.65); outline-offset: -2px; }
+.step-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.96);
+  color: inherit;
+}
 .step-item .name {
   flex: 1;
   min-width: 0;
@@ -90065,7 +90107,8 @@ function renderRecipe() {
     }
     const name = document.createElement('div');
     name.className = 'name';
-    name.textContent = String((step && step.name) || '');
+    name.textContent = String((step && (step.instance_name || step.name)) || '');
+    name.title = String((step && step.name) || '');
     const group = document.createElement('div');
     group.className = 'group';
     group.textContent = String((step && (step.loop || step.group)) || '');
@@ -90115,6 +90158,32 @@ function renderRecipe() {
           } catch (e) {}
         }
     if (!locked) {
+      // Native drag-and-drop reordering (up/down buttons remain as the accessible fallback).
+      item.draggable = true;
+      item.addEventListener('dragstart', (ev) => {
+        try {
+          ev.dataTransfer.effectAllowed = 'move';
+          ev.dataTransfer.setData('text/tcad-step-index', String(idx));
+          item.classList.add('dragging');
+        } catch (e) {}
+      });
+      item.addEventListener('dragend', () => { try { item.classList.remove('dragging'); } catch (e) {} });
+      item.addEventListener('dragover', (ev) => {
+        ev.preventDefault();
+        try { item.classList.add('drop-target'); } catch (e) {}
+      });
+      item.addEventListener('dragleave', () => { try { item.classList.remove('drop-target'); } catch (e) {} });
+      item.addEventListener('drop', async (ev) => {
+        ev.preventDefault();
+        try { item.classList.remove('drop-target'); } catch (e) {}
+        const from = Number(ev.dataTransfer.getData('text/tcad-step-index'));
+        if (!Number.isInteger(from) || from === idx) return;
+        await moveRecipeStep(from, idx);
+      });
+      name.addEventListener('dblclick', (ev) => {
+        ev.stopPropagation();
+        renameStep(idx);
+      });
       item.addEventListener('click', () => {
         state.selectedIndex = idx;
         renderRecipe();
@@ -100161,6 +100230,74 @@ async function moveStep(direction) {
     if (direction === 'down') state.selectedIndex = Math.min(state.recipe.length - 1, oldIndex + 1);
     await refreshAll(false);
   }
+}
+
+async function moveRecipeStep(from, to) {
+  const lastIdx = Math.max(0, (state.recipe || []).length - 1);
+  const f = clampInt(from, 0, lastIdx);
+  const t = clampInt(to, 0, lastIdx);
+  if (f === t) return;
+  const res = await apiPost('/api/recipe/move', { index: f, to: t });
+  if (!res.ok) {
+    showNotification('移动失败：' + (res.error || 'unknown'));
+    await refreshAll(false);
+    return;
+  }
+  if (Array.isArray(res.result)) {
+    state.recipe = res.result;
+    try { _sliceOverridesSwap(f, t); } catch (e) {}
+    state.selectedIndex = Math.max(0, Math.min(t, state.recipe.length - 1));
+    renderRecipe();
+    renderParams();
+    try { syncSliceControls(false); } catch (e) {}
+    try { scheduleUiStatePersist(0); } catch (e) {}
+    try { applyEffectiveSliceForSelectedStep(true); } catch (e) {}
+  } else {
+    await refreshAll(false);
+  }
+}
+
+function renameStep(index) {
+  const list = $('step-list');
+  if (!list) return;
+  const step = (state.recipe || [])[index];
+  if (!step) return;
+  const item = list.querySelectorAll('.step-item')[index];
+  const nameEl = item ? item.querySelector('.name') : null;
+  if (!nameEl) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'step-rename-input';
+  input.maxLength = 80;
+  input.value = String(step.instance_name || step.name || '');
+  nameEl.replaceWith(input);
+  input.focus();
+  try { input.select(); } catch (e) {}
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const next = String(input.value || '').trim();
+    const prev = String(step.instance_name || step.name || '');
+    if (!next || next === prev) { renderRecipe(); return; }
+    const res = await apiPost('/api/recipe/rename-step', { index, instance_name: next });
+    if (!res.ok) {
+      showNotification('重命名失败：' + (res.error || 'unknown'));
+      renderRecipe();
+      return;
+    }
+    step.instance_name = String((res.result && res.result.instance_name) || next);
+    renderRecipe();
+    renderParams();
+  };
+  const cancel = () => { if (!done) { done = true; renderRecipe(); } };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', () => commit());
+  input.addEventListener('click', (ev) => ev.stopPropagation());
+  input.addEventListener('dblclick', (ev) => ev.stopPropagation());
 }
 
 async function newRecipe() {
