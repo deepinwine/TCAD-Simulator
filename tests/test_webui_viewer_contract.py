@@ -42,6 +42,15 @@ def _camera_contract_source():
     return source[start:end]
 
 
+def _axis_clipping_contract_source():
+    source = tcad._WEBUI_SCRIPT_JS
+    start = source.find("const CLIP_AXES =")
+    end = source.find("\nfunction _cutawayCapOpacity()", start)
+    if start < 0 or end < 0:
+        raise AssertionError("could not extract axis clipping contract source")
+    return source[start:end]
+
+
 class WebGLCapabilityContractTests(unittest.TestCase):
     def test_probe_uses_a_temporary_canvas_and_prefers_webgl2(self):
         self.assertNotIn("_webglAvailable", tcad._WEBUI_SCRIPT_JS)
@@ -1148,6 +1157,286 @@ console.log(JSON.stringify({
         self.assertEqual(result["validYUp"]["up"], [0, 1, 0])
         self.assertEqual(result["defaultCamera"]["pos"], [0, 0, 1])
         self.assertEqual(result["defaultCamera"]["fwd"], [0, 0, -1])
+
+
+class AxisClippingContractTests(unittest.TestCase):
+    @staticmethod
+    def _node_prelude():
+        return r"""
+const THREE = require('./three.js');
+const window = { THREE };
+const state = {
+  viewerBackend: 'webgl',
+  viewerMode: '3d',
+  clipPlanes3d: {
+    X: { enabled: false, position: 0.5, invert: false },
+    Y: { enabled: false, position: 0.5, invert: false },
+    Z: { enabled: false, position: 0.5, invert: false }
+  },
+  meshes: new Map(),
+  sliceCutaway: false,
+  sliceAxis: 'X',
+  sliceIndex: 0
+};
+let renderer = { localClippingEnabled: false };
+let meshGroup = new THREE.Group();
+let elementPointsGroup = null;
+let activeClippingPlanes = [];
+let activeAxisClippingBounds = null;
+let activeAxisClippingMeta = {};
+let cutawayPlaneCount = 0;
+let cutawayCapsGroup = null;
+let cutawayCapMesh1 = null;
+let cutawayCapMesh2 = null;
+let cutawayCapMat1 = null;
+let cutawayCapMat2 = null;
+let cutawayCapTex1 = null;
+let cutawayCapTex2 = null;
+let axisClippingCapMode = 'none';
+const elements = {};
+const events = [];
+function $(id) { return elements[id] || null; }
+function requestWebglRender() { events.push('render'); }
+function scheduleUiStatePersist(delay) { events.push(`persist:${delay}`); }
+function _clearCutawayCaps() { events.push('clear-caps'); }
+function _ensureSingleAxisClippingCap(axis) { events.push(`single-cap:${axis}`); return true; }
+function _normalizeViewerFallbackReason(value) { return String(value || 'WebGL unavailable'); }
+function axisMax() { return 9; }
+function _sanitizeSliceAxis(axis) { return ['X', 'Y', 'Z'].includes(String(axis).toUpperCase()) ? String(axis).toUpperCase() : 'Z'; }
+function clampInt(value, lo, hi) { return Math.max(lo, Math.min(hi, parseInt(value, 10) || 0)); }
+"""
+
+    def test_three_axes_use_visible_world_bounds_clamp_and_invert(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+const visibleMaterial = new THREE.MeshBasicMaterial();
+const visible = new THREE.Mesh(new THREE.BoxGeometry(8, 20, 6), visibleMaterial);
+visible.position.set(6, 20, 6);
+meshGroup.add(visible);
+const hidden = new THREE.Mesh(new THREE.BoxGeometry(100, 100, 100), new THREE.MeshBasicMaterial());
+hidden.position.set(1000, 1000, 1000);
+hidden.visible = false;
+meshGroup.add(hidden);
+state.clipPlanes3d.X = { enabled: true, position: -0.5, invert: false };
+state.clipPlanes3d.Y = { enabled: true, position: 0.25, invert: true };
+state.clipPlanes3d.Z = { enabled: true, position: 1.5, invert: false };
+const ok = updateAxisClippingPlanes(false);
+console.log(JSON.stringify({
+  ok,
+  revision: THREE.REVISION,
+  bounds: {
+    min: activeAxisClippingBounds.min.toArray(),
+    max: activeAxisClippingBounds.max.toArray()
+  },
+  planes: activeClippingPlanes.map((plane) => ({
+    normal: plane.normal.toArray(),
+    constant: plane.constant
+  })),
+  materialPlaneCount: visibleMaterial.clippingPlanes.length,
+  rendererEnabled: renderer.localClippingEnabled,
+  positions: {
+    X: state.clipPlanes3d.X.position,
+    Y: state.clipPlanes3d.Y.position,
+    Z: state.clipPlanes3d.Z.position
+  }
+}));
+"""
+        )
+
+        self.assertEqual(result["revision"], "145")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["bounds"], {"min": [2, 10, 3], "max": [10, 30, 9]})
+        self.assertEqual(result["planes"][0], {"normal": [1, 0, 0], "constant": -2})
+        self.assertEqual(result["planes"][1], {"normal": [0, -1, 0], "constant": 15})
+        self.assertEqual(result["planes"][2], {"normal": [0, 0, 1], "constant": -9})
+        self.assertEqual(result["materialPlaneCount"], 3)
+        self.assertTrue(result["rendererEnabled"])
+        self.assertEqual(result["positions"], {"X": 0, "Y": 0.25, "Z": 1})
+
+    def test_plane_transitions_deduplicate_materials_and_refresh_new_meshes(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+const shared = new THREE.MeshBasicMaterial();
+const second = new THREE.MeshBasicMaterial();
+const first = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), [shared, second, shared]);
+meshGroup.add(first);
+state.clipPlanes3d.X.enabled = true;
+updateAxisClippingPlanes(false);
+const one = {
+  renderer: renderer.localClippingEnabled,
+  shared: shared.clippingPlanes.length,
+  second: second.clippingPlanes.length,
+  sameArray: shared.clippingPlanes === second.clippingPlanes
+};
+state.clipPlanes3d.Y.enabled = true;
+updateAxisClippingPlanes(false);
+const two = [shared.clippingPlanes.length, second.clippingPlanes.length];
+const newcomerMaterial = new THREE.MeshBasicMaterial();
+const newcomer = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), newcomerMaterial);
+newcomer.position.set(3, 0, 0);
+meshGroup.add(newcomer);
+applyAxisClippingAfterMeshRefresh(false);
+const refreshed = newcomerMaterial.clippingPlanes.length;
+state.clipPlanes3d.X.enabled = false;
+state.clipPlanes3d.Y.enabled = false;
+updateAxisClippingPlanes(false);
+console.log(JSON.stringify({
+  one,
+  two,
+  refreshed,
+  zero: {
+    renderer: renderer.localClippingEnabled,
+    shared: shared.clippingPlanes,
+    second: second.clippingPlanes,
+    newcomer: newcomerMaterial.clippingPlanes,
+    activeCount: activeClippingPlanes.length
+  }
+}));
+"""
+        )
+
+        self.assertEqual(result["one"], {"renderer": True, "shared": 1, "second": 1, "sameArray": True})
+        self.assertEqual(result["two"], [2, 2])
+        self.assertEqual(result["refreshed"], 2)
+        self.assertEqual(
+            result["zero"],
+            {"renderer": False, "shared": None, "second": None, "newcomer": None, "activeCount": 0},
+        )
+
+    def test_controls_dispatch_only_the_target_axis_and_restore_after_remote(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+function makeElement(value = '') {
+  return {
+    value,
+    checked: false,
+    disabled: false,
+    title: '',
+    textContent: '',
+    dataset: {},
+    listeners: {},
+    addEventListener(kind, fn) {
+      if (!this.listeners[kind]) this.listeners[kind] = [];
+      this.listeners[kind].push(fn);
+    },
+    setAttribute(key, value2) { this[key] = value2; }
+  };
+}
+for (const axis of ['x', 'y', 'z']) {
+  elements[`clip-${axis}-enabled`] = makeElement();
+  elements[`clip-${axis}-position`] = makeElement('0.5');
+  elements[`clip-${axis}-value`] = makeElement('0.5');
+  elements[`clip-${axis}-invert`] = makeElement();
+}
+elements['axis-clipping-status'] = makeElement();
+elements['slice-cutaway-toggle'] = makeElement();
+elements['slice-cutaway-toggle-wrap'] = makeElement();
+bindAxisClippingControls();
+bindAxisClippingControls();
+elements['clip-y-position'].value = '0.8';
+elements['clip-y-position'].listeners.input[0]();
+elements['clip-z-invert'].checked = true;
+elements['clip-z-invert'].listeners.change[0]();
+elements['clip-x-enabled'].checked = true;
+elements['clip-x-enabled'].listeners.change[0]();
+const afterEvents = JSON.parse(JSON.stringify(state.clipPlanes3d));
+state.viewerBackend = 'remote';
+state.viewerFallbackReason = 'GPU unavailable';
+syncAxisClippingControlsUI();
+const remoteDisabled = ['x', 'y', 'z'].every((axis) =>
+  ['enabled', 'position', 'value', 'invert'].every((suffix) => elements[`clip-${axis}-${suffix}`].disabled)
+);
+const preservedRemoteState = JSON.parse(JSON.stringify(state.clipPlanes3d));
+state.viewerBackend = 'webgl';
+syncAxisClippingControlsUI();
+const restored = ['x', 'y', 'z'].every((axis) =>
+  ['enabled', 'position', 'value', 'invert'].every((suffix) => !elements[`clip-${axis}-${suffix}`].disabled)
+);
+console.log(JSON.stringify({
+  afterEvents,
+  remoteDisabled,
+  preservedRemoteState,
+  restored,
+  listenerCounts: Object.fromEntries(Object.entries(elements)
+    .filter(([id]) => id.startsWith('clip-'))
+    .map(([id, el]) => [id, Object.values(el.listeners).reduce((n, list) => n + list.length, 0)])),
+  status: elements['axis-clipping-status'].textContent
+}));
+"""
+        )
+
+        self.assertEqual(result["afterEvents"]["X"], {"enabled": True, "position": 0.5, "invert": False})
+        self.assertEqual(result["afterEvents"]["Y"], {"enabled": False, "position": 0.8, "invert": False})
+        self.assertEqual(result["afterEvents"]["Z"], {"enabled": False, "position": 0.5, "invert": True})
+        self.assertTrue(result["remoteDisabled"])
+        self.assertEqual(result["preservedRemoteState"], result["afterEvents"])
+        self.assertTrue(result["restored"])
+        self.assertTrue(all(count == 1 for count in result["listenerCounts"].values()))
+
+    def test_single_axis_keeps_cap_but_multi_axis_clears_resources(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+meshGroup.add(new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshBasicMaterial()));
+state.clipPlanes3d.Z.enabled = true;
+updateAxisClippingPlanes(false);
+const singleMode = axisClippingCapMode;
+state.clipPlanes3d.X.enabled = true;
+updateAxisClippingPlanes(false);
+const multiMode = axisClippingCapMode;
+const multiEvents = events.slice();
+state.clipPlanes3d.X.enabled = false;
+state.clipPlanes3d.Z.enabled = false;
+updateAxisClippingPlanes(false);
+console.log(JSON.stringify({ singleMode, multiMode, multiEvents, finalMode: axisClippingCapMode, events }));
+"""
+        )
+
+        self.assertEqual(result["singleMode"], "single")
+        self.assertEqual(result["multiMode"], "multi-disabled")
+        self.assertIn("single-cap:Z", result["multiEvents"])
+        self.assertIn("clear-caps", result["multiEvents"])
+        self.assertEqual(result["finalMode"], "none")
+
+    def test_runtime_cleanup_removes_planes_caps_and_material_references(self):
+        result = _run_node(
+            self._node_prelude()
+            + _axis_clipping_contract_source()
+            + r"""
+const material = new THREE.MeshBasicMaterial();
+meshGroup.add(new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), material));
+state.clipPlanes3d.X.enabled = true;
+updateAxisClippingPlanes(false);
+const before = { count: activeClippingPlanes.length, renderer: renderer.localClippingEnabled };
+resetAxisClippingRuntime();
+console.log(JSON.stringify({
+  before,
+  after: {
+    count: activeClippingPlanes.length,
+    renderer: renderer.localClippingEnabled,
+    materialPlanes: material.clippingPlanes,
+    bounds: activeAxisClippingBounds,
+    metaKeys: Object.keys(activeAxisClippingMeta),
+    capMode: axisClippingCapMode
+  },
+  stateStillSerializable: state.clipPlanes3d
+}));
+"""
+        )
+
+        self.assertEqual(result["before"], {"count": 1, "renderer": True})
+        self.assertEqual(
+            result["after"],
+            {"count": 0, "renderer": False, "materialPlanes": None, "bounds": None, "metaKeys": [], "capMode": "none"},
+        )
+        self.assertEqual(result["stateStillSerializable"]["X"]["enabled"], True)
 
 
 if __name__ == "__main__":
