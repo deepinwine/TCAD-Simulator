@@ -1,7 +1,9 @@
 import json
 import re
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 import tcad_simulator as tcad
 
@@ -53,6 +55,367 @@ def _axis_clipping_contract_source():
 
 def _cutaway_cap_mesh_source():
     return _extract_function("_ensureCutawayCapMesh", "_ensureSingleAxisClippingCap")
+
+
+def _material_visual_contract_source():
+    source = tcad._WEBUI_SCRIPT_JS
+    start = source.find("function _materialVisualForMesh(")
+    end = source.find("\nfunction clearMeshes()", start)
+    if start < 0 or end < 0:
+        raise AssertionError("could not extract material visual contract source")
+    return source[start:end]
+
+
+class MaterialManifestTests(unittest.TestCase):
+    def test_material_visual_payload_has_all_render_fields(self):
+        db = tcad.MaterialDatabase()
+        visual = db.material_visual(db.id_for("Copper")).as_dict()
+        self.assertEqual(
+            set(visual),
+            {
+                "material_id",
+                "display_name",
+                "color",
+                "opacity",
+                "metallic",
+                "roughness",
+                "visible",
+            },
+        )
+        json.dumps(visual, allow_nan=False)
+
+    def test_worker_manifest_refreshes_visual_override_on_geometry_cache_hit(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = tcad.WebUIServerManager(
+                    host="127.0.0.1",
+                    port=0,
+                    max_users=1,
+                    storage_root=Path(temp_dir),
+                    enable_ai_agent=False,
+                    default_domain={
+                        "grid_shape": [12, 12, 16],
+                        "voxel_size_nm": 5.0,
+                        "threads": 1,
+                    },
+                )
+                manager.start()
+                session, _cookie = manager.create_session()
+                first = session.rpc(
+                    "preview_manifest", {"face_limit": 2000, "mode": "fast"}, timeout_s=60.0
+                )["result"]
+                self.assertTrue(first["meshes"])
+                item0 = first["meshes"][0]
+                mat_id = int(item0["mat_id"])
+                self.assertIn("name", item0)
+                self.assertIn("color", item0)
+                self.assertEqual(
+                    set(item0["visual"]),
+                    {
+                        "material_id",
+                        "display_name",
+                        "color",
+                        "opacity",
+                        "metallic",
+                        "roughness",
+                        "visible",
+                    },
+                )
+                json.dumps(first, allow_nan=False)
+
+                # Runtime solid/fast/off preferences are deliberately not MaterialVisual overrides.
+                session.rpc(
+                    "ui_state",
+                    {
+                        "ui_state": {
+                            "materialDisplaySolid": {str(mat_id): "off"},
+                            "materialDisplayFast": {str(mat_id): "off"},
+                        }
+                    },
+                    timeout_s=30.0,
+                )
+                updated = session.rpc(
+                    "material_colors",
+                    {
+                        "action": "set",
+                        "colors": {str(mat_id): [0.125, 0.25, 0.375]},
+                    },
+                    timeout_s=30.0,
+                )
+                self.assertTrue(updated["ok"])
+
+                second = session.rpc(
+                    "preview_manifest", {"face_limit": 2000, "mode": "fast"}, timeout_s=60.0
+                )["result"]
+                item1 = next(m for m in second["meshes"] if int(m["mat_id"]) == mat_id)
+                self.assertEqual(second["rev"], first["rev"])
+                self.assertEqual(item1["tri_count"], item0["tri_count"])
+                self.assertEqual(item1["bbox"], item0["bbox"])
+                self.assertEqual(item1["name"], item0["name"])
+                self.assertEqual(item1["color"], item0["color"])
+                self.assertEqual(item1["visual"]["color"], [0.125, 0.25, 0.375])
+                self.assertTrue(item1["visual"]["visible"])
+                json.dumps(second, allow_nan=False)
+            finally:
+                if manager is not None:
+                    manager.stop()
+
+
+class MaterialVisualClientContractTests(unittest.TestCase):
+    @staticmethod
+    def _node_prelude():
+        return r"""
+class Color {
+  constructor(r, g, b) {
+    if (g === undefined && b === undefined) {
+      const n = Number(r) || 0;
+      this.r = ((n >> 16) & 255) / 255;
+      this.g = ((n >> 8) & 255) / 255;
+      this.b = (n & 255) / 255;
+    } else {
+      this.r = Number(r); this.g = Number(g); this.b = Number(b);
+    }
+  }
+  clone() { return new Color(this.r, this.g, this.b); }
+  multiplyScalar(v) { this.r *= v; this.g *= v; this.b *= v; return this; }
+  convertSRGBToLinear() { return this; }
+}
+class Group {
+  constructor() { this.children = []; this.userData = {}; this.visible = true; }
+  add(node) { this.children.push(node); }
+}
+class Material {
+  constructor(params) { Object.assign(this, params); this.params = params; this.disposeCount = 0; }
+  dispose() { this.disposeCount += 1; }
+}
+class Mesh {
+  constructor(geometry, material) {
+    this.geometry = geometry; this.material = material; this.userData = {}; this.visible = true;
+  }
+}
+class EdgesGeometry {
+  constructor(source) { this.source = source; this.disposeCount = 0; }
+  dispose() { this.disposeCount += 1; }
+}
+class LineSegments extends Mesh {}
+const THREE = {
+  Color,
+  Group,
+  Mesh,
+  MeshStandardMaterial: Material,
+  EdgesGeometry,
+  LineBasicMaterial: Material,
+  LineSegments,
+  FrontSide: 'front',
+  BackSide: 'back'
+};
+const window = { THREE };
+const state = {
+  viewerBackend: 'webgl',
+  previewStyle: 'solid',
+  materialColors: {},
+  materialDisplaySolid: {},
+  materialDisplayFast: {},
+  materialDisplay: {},
+  meshes: new Map()
+};
+const activeClippingPlanes = [{ axis: 'X' }, { axis: 'Z' }];
+function _materialColorOverride01(matId) {
+  return state.materialColors[String(parseInt(matId) || 0)] || null;
+}
+function getResolvedMaterialDisplay(matId) {
+  return state.materialDisplaySolid[String(parseInt(matId) || 0)] || 'solid';
+}
+function _assignAxisClippingMaterial(material, planes) {
+  material.clippingPlanes = planes && planes.length ? planes : null;
+}
+"""
+
+    def test_visual_drives_pbr_materials_visibility_and_shared_geometry(self):
+        material_source = _material_visual_contract_source()
+        apply_mode = _extract_function("_applyMaterialModeToGroup", "applyMaterialDisplayWebGL")
+        result = _run_node(
+            self._node_prelude()
+            + f"""
+{material_source}
+{apply_mode}
+const geometry = {{
+  getIndex() {{ return {{ count: 24 }}; }}
+}};
+const manifestItem = {{
+  mat_id: 7,
+  name: 'Legacy Copper',
+  color: [0.9, 0.8, 0.7],
+  visual: {{
+    material_id: 7,
+    display_name: 'Canonical Copper',
+    color: [0.1, 0.2, 0.3],
+    opacity: 0.4,
+    metallic: 0.7,
+    roughness: 0.25,
+    visible: false
+  }}
+}};
+const group = _createMaterialMeshGroup(manifestItem, geometry);
+const solid = group.userData._tcadSolidMesh;
+const xray = group.userData._tcadXray;
+const beforeToggle = {{
+  groupVisible: group.visible,
+  childCount: group.children.length,
+  sameGeometry: solid.geometry === geometry && xray.front.geometry === geometry && xray.back.geometry === geometry,
+  solid: {{
+    color: [solid.material.color.r, solid.material.color.g, solid.material.color.b],
+    opacity: solid.material.opacity,
+    metalness: solid.material.metalness,
+    roughness: solid.material.roughness,
+    transparent: solid.material.transparent,
+    depthWrite: solid.material.depthWrite,
+    clippingCount: solid.material.clippingPlanes.length
+  }},
+  xrayOpacity: [xray.back.material.opacity, xray.front.material.opacity],
+  displayName: group.userData.name,
+  baseVisible: group.userData._tcadBaseVisible
+}};
+_applyMaterialModeToGroup(group, 'solid');
+const afterToggle = {{ groupVisible: group.visible, geometryStillPresent: solid.geometry === geometry }};
+const legacy = _materialVisualForMesh({{ mat_id: 9, name: 'Legacy', color: [0.4, 0.5, 0.6] }});
+console.log(JSON.stringify({{ beforeToggle, afterToggle, legacy }}));
+"""
+        )
+
+        before = result["beforeToggle"]
+        self.assertFalse(before["groupVisible"])
+        self.assertGreaterEqual(before["childCount"], 3)
+        self.assertTrue(before["sameGeometry"])
+        self.assertEqual(before["solid"]["color"], [0.1, 0.2, 0.3])
+        self.assertEqual(before["solid"]["opacity"], 0.4)
+        self.assertEqual(before["solid"]["metalness"], 0.7)
+        self.assertEqual(before["solid"]["roughness"], 0.25)
+        self.assertTrue(before["solid"]["transparent"])
+        self.assertFalse(before["solid"]["depthWrite"])
+        self.assertEqual(before["solid"]["clippingCount"], 2)
+        self.assertEqual(before["xrayOpacity"], [0.072, 0.152])
+        self.assertEqual(before["displayName"], "Canonical Copper")
+        self.assertFalse(before["baseVisible"])
+        self.assertFalse(result["afterToggle"]["groupVisible"])
+        self.assertTrue(result["afterToggle"]["geometryStillPresent"])
+        self.assertEqual(result["legacy"]["display_name"], "Legacy")
+        self.assertEqual(result["legacy"]["color"], [0.4, 0.5, 0.6])
+        self.assertEqual(result["legacy"]["opacity"], 1)
+        self.assertTrue(result["legacy"]["visible"])
+
+    def test_local_display_toggle_does_not_fetch_and_refreshes_clipping(self):
+        apply_mode = _extract_function("_applyMaterialModeToGroup", "applyMaterialDisplayWebGL")
+        apply_all = _extract_function("applyMaterialDisplayWebGL", "applyMaterialColorOverridesWebGL")
+        result = _run_node(
+            self._node_prelude()
+            + f"""
+{apply_mode}
+{apply_all}
+let fetchCount = 0;
+let clippingRefreshes = 0;
+function fetch() {{ fetchCount += 1; throw new Error('display toggle must not fetch'); }}
+function _cutawayActive3d() {{ return true; }}
+function applyCutawayNow() {{ clippingRefreshes += 1; }}
+function requestWebglRender() {{}}
+const group = {{
+  visible: true,
+  userData: {{
+    _tcadBaseVisible: true,
+    _tcadSolidMesh: {{ visible: true }},
+    _tcadXray: {{ back: {{ visible: false }}, front: {{ visible: false }}, edges: {{ visible: false }} }}
+  }}
+}};
+state.meshes.set(4, group);
+state.materialDisplaySolid['4'] = 'off';
+applyMaterialDisplayWebGL();
+const off = {{ group: group.visible, solid: group.userData._tcadSolidMesh.visible }};
+state.materialDisplaySolid['4'] = 'fast';
+applyMaterialDisplayWebGL();
+const fast = {{ group: group.visible, front: group.userData._tcadXray.front.visible }};
+console.log(JSON.stringify({{ fetchCount, clippingRefreshes, off, fast }}));
+"""
+        )
+
+        self.assertEqual(result["fetchCount"], 0)
+        self.assertEqual(result["clippingRefreshes"], 2)
+        self.assertFalse(result["off"]["group"])
+        self.assertFalse(result["off"]["solid"])
+        self.assertTrue(result["fast"]["group"])
+        self.assertTrue(result["fast"]["front"])
+
+    def test_legend_prefers_visual_display_name_and_color(self):
+        material_source = _material_visual_contract_source()
+        render_legend = _extract_function("renderLegend", "_elementLegendVisible")
+        result = _run_node(
+            self._node_prelude()
+            + f"""
+{material_source}
+class Element {{
+  constructor(tag) {{
+    this.tag = tag; this.children = []; this.style = {{}}; this.dataset = {{}};
+    this.classList = {{ toggle() {{}} }};
+  }}
+  appendChild(node) {{ this.children.push(node); }}
+  addEventListener() {{}}
+  setAttribute() {{}}
+}}
+const legend = new Element('legend');
+legend.innerHTML = '';
+const document = {{ createElement(tag) {{ return new Element(tag); }} }};
+function $(id) {{ if (id !== 'materials-legend') throw new Error('unexpected id'); return legend; }}
+function _legendSetTriToggle() {{}}
+function cycleMaterialDisplay() {{ return 'solid'; }}
+function scheduleUiStatePersist() {{}}
+function scheduleRemoteRender() {{}}
+function applyMaterialDisplayWebGL() {{}}
+function applyCutawayNow() {{}}
+function openMaterialColorPicker() {{}}
+function _rgb01ToHex(rgb) {{ return `rgb(${{rgb.join(',')}})`; }}
+{render_legend}
+renderLegend([{{
+  mat_id: 3,
+  name: 'Legacy Name',
+  color: [0.8, 0.8, 0.8],
+  visual: {{ display_name: 'Visual Name', color: [0.2, 0.3, 0.4] }}
+}}]);
+const row = legend.children[0];
+console.log(JSON.stringify({{
+  label: row.children[2].textContent,
+  color: row.children[1].style.background
+}}));
+"""
+        )
+
+        self.assertEqual(result["label"], "Visual Name")
+        self.assertEqual(result["color"], "rgb(0.2,0.3,0.4)")
+
+    def test_deep_dispose_deduplicates_shared_geometry_and_materials(self):
+        dispose = _extract_function("disposeObject3DDeep", "elementPointsMax")
+        result = _run_node(
+            f"""
+const sharedGeometry = {{ count: 0, dispose() {{ this.count += 1; }} }};
+const sharedMaterial = {{ count: 0, dispose() {{ this.count += 1; }} }};
+const uniqueMaterial = {{ count: 0, dispose() {{ this.count += 1; }} }};
+const nodes = [
+  {{ geometry: sharedGeometry, material: sharedMaterial }},
+  {{ geometry: sharedGeometry, material: sharedMaterial }},
+  {{ geometry: sharedGeometry, material: uniqueMaterial }}
+];
+const root = {{ traverse(fn) {{ for (const node of nodes) fn(node); }} }};
+function disposeObject3D() {{ throw new Error('unexpected fallback'); }}
+{dispose}
+disposeObject3DDeep(root);
+console.log(JSON.stringify({{
+  geometry: sharedGeometry.count,
+  sharedMaterial: sharedMaterial.count,
+  uniqueMaterial: uniqueMaterial.count
+}}));
+"""
+        )
+
+        self.assertEqual(result, {"geometry": 1, "sharedMaterial": 1, "uniqueMaterial": 1})
 
 
 class WebGLCapabilityContractTests(unittest.TestCase):
