@@ -81686,6 +81686,7 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
 		        <div class="dock-nav" id="dock-nav" data-dock-idx="0" aria-label="Control bar">
 		          <div class="dock-tabs" id="dock-tabs" data-dock-idx="0" role="tablist" aria-label="Panels"></div>
 		          <div class="dock-actions">
+		            <button class="btn btn-sm" id="cad-drawer-toggle" title="折叠工具面板">«</button>
 		            <button class="btn btn-sm" id="layout-reset-btn" title="恢复默认布局">恢复默认布局</button>
 		          </div>
 		        </div>
@@ -81728,59 +81729,6 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
               </div>
 
-	          <div class="card" id="recipe-card" data-panel-id="recipe" data-panel-title="Process Recipe">
-	            <div class="card-header">Process Recipe</div>
-	            <div class="card-body">
-              <div class="form-row">
-                <div class="form-group" style="flex:1">
-                  <label>新增步骤（选中即添加）</label>
-                  <select id="add-step-select"></select>
-                </div>
-              </div>
-              <div class="form-row" id="demo-recipe-row">
-                <div class="form-group" style="flex:1">
-                  <label>Demo Recipes（替换当前 Recipe）</label>
-                  <select id="demo-recipe-select">
-                    <option value="" selected>-- Select --</option>
-                  </select>
-                </div>
-                <div class="form-group" style="width:160px">
-                  <label>&nbsp;</label>
-                  <button class="btn" id="demo-recipe-load-btn">Load</button>
-                </div>
-              </div>
-                  <div class="form-row" id="preset-seq-row">
-                    <div class="form-group" style="flex:1">
-                      <label>Preset Sequences（追加多个步骤）</label>
-                      <select id="preset-seq-select">
-                        <option value="" selected>-- Select --</option>
-                      </select>
-                    </div>
-                <div class="form-group" style="width:160px">
-                  <label>&nbsp;</label>
-                  <button class="btn" id="preset-seq-insert-btn">Insert</button>
-                </div>
-              </div>
-
-                  <div class="step-list" id="step-list"></div>
-
-              <div class="btn-row">
-                <button class="btn btn-primary" id="run-step-btn">运行选中</button>
-                <button class="btn btn-primary" id="run-to-btn">运行到选中</button>
-                <button class="btn btn-primary" id="run-all-btn">运行全部</button>
-              </div>
-              <div class="btn-row">
-                <button class="btn" id="dup-step-btn">复制</button>
-                <button class="btn" id="move-up-btn">上移</button>
-                <button class="btn" id="move-down-btn">下移</button>
-                <button class="btn btn-danger" id="remove-step-btn">删除</button>
-              </div>
-              <div class="btn-row">
-                <button class="btn" id="undo-btn">撤销</button>
-                <button class="btn btn-danger" id="reset-btn">重置</button>
-              </div>
-            </div>
-          </div>
 
 	          <div class="card" id="agent-card" data-panel-id="agent" data-panel-title="AI Agent" style="display:none">
 	            <div class="card-header">AI Agent</div>
@@ -82086,6 +82034,215 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
             </div>
           </div>
 
+
+	          <div class="card" id="history-card" data-panel-id="history" data-panel-title="History">
+	            <div class="card-header">
+	              <span>History（Recipes）</span>
+              <div class="header-actions">
+                <div class="capsule-switch capsule-small" id="history-mode-switch" role="tablist" aria-label="History 模式">
+                  <input type="radio" name="history-mode" id="history-mode-personal" checked />
+                  <label for="history-mode-personal">个人</label>
+                  <input type="radio" name="history-mode" id="history-mode-library" />
+                  <label for="history-mode-library">公档</label>
+                  <div class="capsule-indicator" aria-hidden="true"></div>
+                </div>
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="history-personal">
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>当前 Recipe 名称</label>
+                    <input id="current-recipe-name" type="text" placeholder="Untitled" />
+                  </div>
+                </div>
+                <div class="btn-row">
+                  <button class="btn" id="new-recipe-btn">新建</button>
+                  <button class="btn btn-primary" id="save-recipe-btn">保存</button>
+                  <button class="btn" id="import-recipe-btn">导入</button>
+                  <button class="btn" id="export-recipe-btn">导出</button>
+                </div>
+                <input id="import-recipe-input" type="file" accept=".json,application/json" style="display:none" />
+                <div class="divider"></div>
+                <div class="history-list" id="history-list"></div>
+              </div>
+
+              <div id="history-library" style="display:none">
+                <div class="profile-row">
+                  <div class="profile-chip" id="library-profile-chip">未登记</div>
+                  <button class="btn btn-sm" id="library-profile-btn">登记/更新</button>
+                  <button class="btn btn-sm" id="library-refresh-btn">刷新公档</button>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Department</label>
+                    <select id="library-dept-filter"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Folder</label>
+                    <select id="library-cat1-filter"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Subfolder</label>
+                    <select id="library-cat2-filter"></select>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>Search</label>
+                    <input id="library-search" type="text" placeholder="Search..." />
+                  </div>
+                </div>
+                <div class="divider"></div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>Upload title/comment</label>
+                    <input id="library-upload-title" type="text" placeholder="Dept-Name-ID-Note" />
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Upload dept</label>
+                    <select id="library-upload-dept"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Folder</label>
+                    <input id="library-upload-cat1" type="text" value="General" />
+                  </div>
+                  <div class="form-group">
+                    <label>Subfolder</label>
+                    <input id="library-upload-cat2" type="text" value="" />
+                  </div>
+                </div>
+                <div class="btn-row">
+                  <button class="btn btn-primary" id="library-upload-recipe-btn">上传当前 Recipe</button>
+                </div>
+                <div class="divider"></div>
+                <div class="history-list" id="library-recipes-list"></div>
+                <div class="hint-inline">提示：公档只会显示你有权限的部门；只能覆盖/删除自己上传的条目。</div>
+              </div>
+            </div>
+          </div>
+
+	          <div class="card" id="export-card" data-panel-id="export" data-panel-title="Export">
+	            <div class="card-header">Export</div>
+	            <div class="card-body">
+              <div class="form-row export-checks">
+                <label class="check"><input id="export-sti" type="checkbox" checked /> STL/XYZ</label>
+                <label class="check"><input id="export-merge-materials" type="checkbox" /> 合并同材质</label>
+                <label class="check"><input id="export-metrics" type="checkbox" /> Metrics</label>
+              </div>
+              <div class="form-row export-checks">
+                <label class="check"><input id="export-cross" type="checkbox" /> Cross</label>
+                <label class="check"><input id="export-video" type="checkbox" /> Video (MP4)</label>
+                <label class="check"><input id="export-images" type="checkbox" /> Image array</label>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Axis</label>
+                  <select id="export-cross-axis"><option>Z</option><option>X</option><option>Y</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Index</label>
+                  <input id="export-cross-index" type="number" value="0" />
+                </div>
+              </div>
+              <div class="form-row" id="export-video-row" style="display:none">
+                <div class="form-group">
+                  <label>Seconds / frame</label>
+                  <input id="export-video-spf" type="number" min="0.05" step="0.05" value="0.60" />
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label>View</label>
+                  <select id="export-video-view">
+                    <option value="current" selected>当前 3D View（默认）</option>
+                    <option value="Z">Z</option>
+                    <option value="X">X</option>
+                    <option value="Y">Y</option>
+                    <option value="OBL60">斜 60°</option>
+                    <option value="OBL45">斜 45°</option>
+                    <option value="XTOP45">X 正上方 45°</option>
+                    <option value="YTOP45">Y 正上方 45°</option>
+                  </select>
+                </div>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-primary" id="export-btn">导出 ZIP</button>
+                <button class="btn" id="export-video-btn" disabled>导出视频</button>
+                <a class="download-link" id="export-link" href="#" style="display:none"></a>
+              </div>
+              <div class="divider"></div>
+              <div class="export-files" id="export-files"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <main id="cad-workspace" class="cad-workspace">
+      <section id="process-flow-panel" class="cad-panel cad-process-flow">
+        <div class="left-frame">
+          <div class="left-scroll">
+	          <div class="card" id="recipe-card" data-panel-id="recipe" data-panel-title="Process Recipe">
+	            <div class="card-header">Process Recipe</div>
+	            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>新增步骤（选中即添加）</label>
+                  <select id="add-step-select"></select>
+                </div>
+              </div>
+              <div class="form-row" id="demo-recipe-row">
+                <div class="form-group" style="flex:1">
+                  <label>Demo Recipes（替换当前 Recipe）</label>
+                  <select id="demo-recipe-select">
+                    <option value="" selected>-- Select --</option>
+                  </select>
+                </div>
+                <div class="form-group" style="width:160px">
+                  <label>&nbsp;</label>
+                  <button class="btn" id="demo-recipe-load-btn">Load</button>
+                </div>
+              </div>
+                  <div class="form-row" id="preset-seq-row">
+                    <div class="form-group" style="flex:1">
+                      <label>Preset Sequences（追加多个步骤）</label>
+                      <select id="preset-seq-select">
+                        <option value="" selected>-- Select --</option>
+                      </select>
+                    </div>
+                <div class="form-group" style="width:160px">
+                  <label>&nbsp;</label>
+                  <button class="btn" id="preset-seq-insert-btn">Insert</button>
+                </div>
+              </div>
+
+                  <div class="step-list" id="step-list"></div>
+
+              <div class="btn-row">
+                <button class="btn btn-primary" id="run-step-btn">运行选中</button>
+                <button class="btn btn-primary" id="run-to-btn">运行到选中</button>
+                <button class="btn btn-primary" id="run-all-btn">运行全部</button>
+              </div>
+              <div class="btn-row">
+                <button class="btn" id="dup-step-btn">复制</button>
+                <button class="btn" id="move-up-btn">上移</button>
+                <button class="btn" id="move-down-btn">下移</button>
+                <button class="btn btn-danger" id="remove-step-btn">删除</button>
+              </div>
+              <div class="btn-row">
+                <button class="btn" id="undo-btn">撤销</button>
+                <button class="btn btn-danger" id="reset-btn">重置</button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+      </section>
+      <section id="parameters-panel" class="cad-panel cad-parameters">
+        <button class="btn btn-sm cad-panel-collapse" id="cad-params-collapse" title="折叠参数面板">«</button>
+        <div class="left-frame">
+          <div class="left-scroll">
 	          <div class="card" id="params-card" data-panel-id="params" data-panel-title="Step Parameters">
 	            <div class="card-header"><span id="param-step-title">Step Parameters</span></div>
 	            <div class="card-body">
@@ -82320,151 +82477,11 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
             </div>
           </div>
           </div>
-
-	          <div class="card" id="history-card" data-panel-id="history" data-panel-title="History">
-	            <div class="card-header">
-	              <span>History（Recipes）</span>
-              <div class="header-actions">
-                <div class="capsule-switch capsule-small" id="history-mode-switch" role="tablist" aria-label="History 模式">
-                  <input type="radio" name="history-mode" id="history-mode-personal" checked />
-                  <label for="history-mode-personal">个人</label>
-                  <input type="radio" name="history-mode" id="history-mode-library" />
-                  <label for="history-mode-library">公档</label>
-                  <div class="capsule-indicator" aria-hidden="true"></div>
-                </div>
-              </div>
-            </div>
-            <div class="card-body">
-              <div id="history-personal">
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>当前 Recipe 名称</label>
-                    <input id="current-recipe-name" type="text" placeholder="Untitled" />
-                  </div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn" id="new-recipe-btn">新建</button>
-                  <button class="btn btn-primary" id="save-recipe-btn">保存</button>
-                  <button class="btn" id="import-recipe-btn">导入</button>
-                  <button class="btn" id="export-recipe-btn">导出</button>
-                </div>
-                <input id="import-recipe-input" type="file" accept=".json,application/json" style="display:none" />
-                <div class="divider"></div>
-                <div class="history-list" id="history-list"></div>
-              </div>
-
-              <div id="history-library" style="display:none">
-                <div class="profile-row">
-                  <div class="profile-chip" id="library-profile-chip">未登记</div>
-                  <button class="btn btn-sm" id="library-profile-btn">登记/更新</button>
-                  <button class="btn btn-sm" id="library-refresh-btn">刷新公档</button>
-                </div>
-                <div class="form-row">
-                  <div class="form-group">
-                    <label>Department</label>
-                    <select id="library-dept-filter"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Folder</label>
-                    <select id="library-cat1-filter"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Subfolder</label>
-                    <select id="library-cat2-filter"></select>
-                  </div>
-                </div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>Search</label>
-                    <input id="library-search" type="text" placeholder="Search..." />
-                  </div>
-                </div>
-                <div class="divider"></div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>Upload title/comment</label>
-                    <input id="library-upload-title" type="text" placeholder="Dept-Name-ID-Note" />
-                  </div>
-                </div>
-                <div class="form-row">
-                  <div class="form-group">
-                    <label>Upload dept</label>
-                    <select id="library-upload-dept"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Folder</label>
-                    <input id="library-upload-cat1" type="text" value="General" />
-                  </div>
-                  <div class="form-group">
-                    <label>Subfolder</label>
-                    <input id="library-upload-cat2" type="text" value="" />
-                  </div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn btn-primary" id="library-upload-recipe-btn">上传当前 Recipe</button>
-                </div>
-                <div class="divider"></div>
-                <div class="history-list" id="library-recipes-list"></div>
-                <div class="hint-inline">提示：公档只会显示你有权限的部门；只能覆盖/删除自己上传的条目。</div>
-              </div>
-            </div>
-          </div>
-
-	          <div class="card" id="export-card" data-panel-id="export" data-panel-title="Export">
-	            <div class="card-header">Export</div>
-	            <div class="card-body">
-              <div class="form-row export-checks">
-                <label class="check"><input id="export-sti" type="checkbox" checked /> STL/XYZ</label>
-                <label class="check"><input id="export-merge-materials" type="checkbox" /> 合并同材质</label>
-                <label class="check"><input id="export-metrics" type="checkbox" /> Metrics</label>
-              </div>
-              <div class="form-row export-checks">
-                <label class="check"><input id="export-cross" type="checkbox" /> Cross</label>
-                <label class="check"><input id="export-video" type="checkbox" /> Video (MP4)</label>
-                <label class="check"><input id="export-images" type="checkbox" /> Image array</label>
-              </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label>Axis</label>
-                  <select id="export-cross-axis"><option>Z</option><option>X</option><option>Y</option></select>
-                </div>
-                <div class="form-group">
-                  <label>Index</label>
-                  <input id="export-cross-index" type="number" value="0" />
-                </div>
-              </div>
-              <div class="form-row" id="export-video-row" style="display:none">
-                <div class="form-group">
-                  <label>Seconds / frame</label>
-                  <input id="export-video-spf" type="number" min="0.05" step="0.05" value="0.60" />
-                </div>
-                <div class="form-group" style="flex:1">
-                  <label>View</label>
-                  <select id="export-video-view">
-                    <option value="current" selected>当前 3D View（默认）</option>
-                    <option value="Z">Z</option>
-                    <option value="X">X</option>
-                    <option value="Y">Y</option>
-                    <option value="OBL60">斜 60°</option>
-                    <option value="OBL45">斜 45°</option>
-                    <option value="XTOP45">X 正上方 45°</option>
-                    <option value="YTOP45">Y 正上方 45°</option>
-                  </select>
-                </div>
-              </div>
-              <div class="btn-row">
-                <button class="btn btn-primary" id="export-btn">导出 ZIP</button>
-                <button class="btn" id="export-video-btn" disabled>导出视频</button>
-                <a class="download-link" id="export-link" href="#" style="display:none"></a>
-              </div>
-              <div class="divider"></div>
-              <div class="export-files" id="export-files"></div>
-            </div>
           </div>
         </div>
-      </div>
-    </div>
-
+      </section>
+      <section id="viewer-panel" class="cad-viewer">
+        <button class="btn btn-sm cad-params-restore" id="cad-params-restore" title="展开参数面板" style="display:none">参数 »</button>
 	    <div class="right-panel" id="right-panel">
 	      <div class="right-frame">
 	        <div class="right-scroll" id="right-scroll">
@@ -82786,6 +82803,8 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
               <input id="theme-import-input" type="file" accept=".json,application/json" style="display:none" />
 	            </div>
 	          </div>
+      </section>
+    </main>
 	
 	      <div id="dock-split-hint" class="dock-split-hint" style="display:none" aria-hidden="true"></div>
 	      <div id="floating-panels" class="floating-panels" aria-label="Floating panels"></div>
@@ -83054,6 +83073,50 @@ header p { font-size: 12px; opacity: 1; color: var(--header-subtext); }
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Process CAD Shell: fixed three-column workspace */
+.cad-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(300px, 360px) minmax(420px, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+}
+.cad-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cad-panel.is-collapsed { display: none; }
+.cad-workspace.params-collapsed { grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr); }
+.cad-panel-collapse {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  opacity: 0.6;
+}
+.cad-viewer { position: relative; min-width: 0; min-height: 0; display: flex; }
+.cad-viewer > .right-panel { flex: 1; }
+.cad-params-restore {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 24;
+}
+.main-container.drawer-collapsed .left-panel { width: 42px; }
+.main-container.drawer-collapsed .left-panel .left-frame { padding: 8px 4px; }
+.main-container.drawer-collapsed .left-panel .dock-tabs,
+.main-container.drawer-collapsed .left-panel .left-scroll { display: none; }
+.main-container.drawer-collapsed .left-panel .dock-actions { flex-direction: column; }
+@media (max-width: 1100px) {
+  .cad-workspace { grid-template-columns: minmax(250px, 290px) minmax(360px, 1fr); }
+  .cad-parameters.is-collapsed { display: none; }
 }
 
 .card {
@@ -84481,6 +84544,7 @@ body.waiting header, body.waiting .main-container {
   .main-container { flex-direction: column; overflow: visible; }
   .left-panel { width: 100%; }
   .right-panel { width: 100%; }
+  .cad-workspace { display: flex; flex-direction: column; }
 }
 """
 
@@ -88546,9 +88610,12 @@ function _dockCreateDockColumn(dockIdx) {
 
 function _dockEnsureDockColumnsDom(dockCount) {
   const want = Math.max(1, Math.min(_DOCK_MAX_DOCKS, _dockParseDockIdx(dockCount, 1)));
+  const workspace = $('cad-workspace');
   const right = $('right-panel') || document.querySelector('.right-panel');
-  const main = right ? right.parentElement : null;
-  if (!main) return want;
+  // Dock columns are inserted before the fixed CAD workspace (right-panel fallback for robustness).
+  const main = workspace ? workspace.parentElement : (right ? right.parentElement : null);
+  const dockAnchor = workspace || right;
+  if (!main || !dockAnchor) return want;
 
   const cols = _dockAllDockCols();
   const have = new Set();
@@ -88558,7 +88625,7 @@ function _dockEnsureDockColumnsDom(dockCount) {
     if (have.has(i)) continue;
     try {
       const col = _dockCreateDockColumn(i);
-      main.insertBefore(col, right);
+      main.insertBefore(col, dockAnchor);
     } catch (e) {}
   }
 
@@ -89225,10 +89292,66 @@ function _dockDockPanel(panelId, dockIdx = null) {
   scheduleUiStatePersist(0);
 }
 
+function _cadNotifyLayoutResized() {
+  try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+}
+
+function _cadSetParamsCollapsed(collapsed) {
+  try {
+    const panel = $('parameters-panel');
+    const ws = $('cad-workspace');
+    if (panel) panel.classList.toggle('is-collapsed', !!collapsed);
+    if (ws) ws.classList.toggle('params-collapsed', !!collapsed);
+    const colBtn = $('cad-params-collapse');
+    const showBtn = $('cad-params-restore');
+    if (colBtn) colBtn.style.display = collapsed ? 'none' : '';
+    if (showBtn) showBtn.style.display = collapsed ? '' : 'none';
+    _cadNotifyLayoutResized();
+  } catch (e) {}
+}
+
+function _cadResetShellState() {
+  try {
+    const mc = document.querySelector('.main-container');
+    if (mc) mc.classList.remove('drawer-collapsed');
+    const dt = $('cad-drawer-toggle');
+    if (dt) { dt.textContent = '\u00AB'; dt.title = '\u6298\u53E0\u5DE5\u5177\u9762\u677F'; }
+    _cadSetParamsCollapsed(false);
+  } catch (e) {}
+}
+
+function _cadBindShellControls() {
+  const drawerBtn = $('cad-drawer-toggle');
+  if (drawerBtn && !drawerBtn.dataset._cadBound) {
+    drawerBtn.dataset._cadBound = '1';
+    drawerBtn.addEventListener('click', () => {
+      try {
+        const mc = document.querySelector('.main-container');
+        if (!mc) return;
+        const collapsed = mc.classList.toggle('drawer-collapsed');
+        drawerBtn.textContent = collapsed ? '\u00BB' : '\u00AB';
+        drawerBtn.title = collapsed ? '\u5C55\u5F00\u5DE5\u5177\u9762\u677F' : '\u6298\u53E0\u5DE5\u5177\u9762\u677F';
+        _cadNotifyLayoutResized();
+      } catch (e) {}
+    });
+  }
+  const paramsColBtn = $('cad-params-collapse');
+  if (paramsColBtn && !paramsColBtn.dataset._cadBound) {
+    paramsColBtn.dataset._cadBound = '1';
+    paramsColBtn.addEventListener('click', () => _cadSetParamsCollapsed(true));
+  }
+  const paramsShowBtn = $('cad-params-restore');
+  if (paramsShowBtn && !paramsShowBtn.dataset._cadBound) {
+    paramsShowBtn.dataset._cadBound = '1';
+    paramsShowBtn.addEventListener('click', () => _cadSetParamsCollapsed(false));
+  }
+}
+
 function _dockResetLayout() {
   const ids = _dockKnownPanelIds();
   const lay = _dockDefaultLayout(ids);
   state.uiLayout = lay;
+  try { _cadResetShellState(); } catch (e) {}
   _dockApplyLayoutFromState(true);
   scheduleUiStatePersist(0);
   try { showNotification('已恢复默认布局', 1800, 'success'); } catch (e) {}
@@ -89547,6 +89670,8 @@ function initDockingUI() {
       btn.addEventListener('click', () => { try { _dockResetLayout(); } catch (e) {} });
     }
   } catch (e) {}
+  // Process CAD Shell: drawer collapse + parameters panel collapse.
+  try { _cadBindShellControls(); } catch (e) {}
   // Mouse wheel: when cursor is on a dock-nav bar, scroll that dock's tabs horizontally.
   // (Do not affect page scroll elsewhere.)
   try { _dockBindAllNavWheels(); } catch (e) {}
