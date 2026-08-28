@@ -248,6 +248,45 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
                     manager.stop()
 
 
+class BaselineRunnerTests(unittest.TestCase):
+    def test_baseline_runner_writes_success_json(self):
+        import json
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(repo_root / "tools" / "run_process_cad_baseline.py"),
+                    "--grid",
+                    "32",
+                    "--output",
+                    str(output),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=240,
+                cwd=str(repo_root),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["grid"], 32)
+            self.assertEqual(set(payload["demos"]), {"Basic Trench", "Spacer Formation", "Bonding + Thinning"})
+            for demo in payload["demos"].values():
+                self.assertIn("elapsed_s", demo)
+                self.assertIn("peak_rss_mb", demo)
+                self.assertIn("material_count", demo)
+                self.assertIn("occupied_voxels", demo)
+                self.assertIn("triangle_count", demo)
+                self.assertIn("mesh_elapsed_s", demo)
+
+
 class CadShellInteractionContractTests(unittest.TestCase):
     def test_recipe_items_support_drag_and_rename(self):
         source = tcad._WEBUI_SCRIPT_JS
