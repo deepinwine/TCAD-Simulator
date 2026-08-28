@@ -70947,6 +70947,9 @@ def _webui_worker_main(
                 if any(key in payload for key in ("enabled", "group", "loop", "params", "custom_mask")):
                     _invalidate_step_runtime_statuses(idx)
                 resp = {"ok": True, "result": _serialize_step_for_client(idx), "rid": rid}
+                # Authoritative post-edit statuses so the browser can mark the
+                # edited step and its successors Dirty without a full refetch.
+                resp["statuses"] = list(step_runtime_statuses)
                 if step_warn:
                     resp["warnings"] = step_warn[:12]
                 conn.send(resp)
@@ -90217,6 +90220,17 @@ async function applyParamsNow(noAutosave = false, timeoutMs = 0) {
     try {
       if (resp && Array.isArray(resp.warnings) && resp.warnings.length) {
         showNotification(String(resp.warnings[0] || '参数已回退到默认材料'), 5200);
+      }
+    } catch (e) {}
+    // Adopt the server's authoritative runtime statuses so edited steps and
+    // their successors turn Dirty immediately (snapshot review stays in sync).
+    try {
+      if (resp && Array.isArray(resp.statuses) && Array.isArray(state.recipe)) {
+        for (let i = 0; i < state.recipe.length && i < resp.statuses.length; i++) {
+          state.recipe[i].runtime_status = String(resp.statuses[i] || 'ready');
+        }
+        renderRecipe();
+        try { refreshTimeline(); } catch (e2) {}
       }
     } catch (e) {}
     // Keep Mask Exposure preview aligned with the step's *effective* mask after parameter edits.

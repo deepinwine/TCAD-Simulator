@@ -100,6 +100,35 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
         manager.start()
         return manager
 
+    def test_set_step_response_reports_dirty_statuses(self):
+        manager = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                manager = self._start_manager(temp_dir)
+                session, _cookie = manager.create_session()
+                session.rpc("recipe_new", {"name": "Dirty statuses"}, timeout_s=30.0)
+                session.rpc(
+                    "recipe_insert_steps",
+                    {"steps": [{"name": "Spin Resist"}, {"name": "Etch"}]},
+                    timeout_s=30.0,
+                )
+                first = session.rpc("run_all", {}, timeout_s=30.0)
+                self.assertTrue(first["ok"])
+                edited = session.rpc(
+                    "set_step",
+                    {"index": 1, "params": {}, "no_autosave": True},
+                    timeout_s=30.0,
+                )
+                self.assertTrue(edited["ok"])
+                statuses = edited.get("statuses")
+                self.assertIsInstance(statuses, list)
+                self.assertEqual(statuses[0], "done")
+                for status in statuses[1:]:
+                    self.assertEqual(status, "dirty")
+            finally:
+                if manager is not None:
+                    manager.stop()
+
     def test_single_step_replaces_stale_timeline_snapshot(self):
         manager = None
         with tempfile.TemporaryDirectory() as temp_dir:
