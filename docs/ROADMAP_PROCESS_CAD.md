@@ -13,8 +13,8 @@ Previous/Next, atomic undo/redo, structured step errors, three demo recipes
 (Basic Trench / Spacer Formation / Bonding + Thinning), reproducible baseline runner
 (`tools/run_process_cad_baseline.py`).
 
-Status: feature-complete on branch `zcode/process-cad-shell` (158 tests green,
-128³ baseline ok, browser acceptance passed). Pending: merge with
+Status: feature-complete on branch `zcode/process-cad-shell` (baseline and CAD tests green,
+fixed-physical-domain 128³ baseline with structural checks ok, browser acceptance passed). Pending: merge with
 `codex/process-cad-shell`, then land on `main` and push `origin`.
 
 ## M2 — Parameter Exploration (next)

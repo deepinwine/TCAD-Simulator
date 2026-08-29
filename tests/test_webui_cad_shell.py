@@ -306,14 +306,29 @@ class BaselineRunnerTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["grid"], 32)
+            self.assertIn("grid_shape", payload)
+            self.assertEqual(payload["grid_shape"], [32, 32, 32])
+            self.assertAlmostEqual(payload["physical_extent_nm"], 640.0)
+            self.assertAlmostEqual(payload["voxel_nm"], 20.0)
             self.assertEqual(set(payload["demos"]), {"Basic Trench", "Spacer Formation", "Bonding + Thinning"})
-            for demo in payload["demos"].values():
+            required_materials = {
+                "Basic Trench": {"Silicon", "Silicon Dioxide"},
+                "Spacer Formation": {"Silicon", "Silicon Nitride"},
+                "Bonding + Thinning": {"Silicon", "Silicon Dioxide"},
+            }
+            for name, demo in payload["demos"].items():
+                self.assertTrue(demo["ok"], f"{name}: {demo}")
                 self.assertIn("elapsed_s", demo)
                 self.assertIn("peak_rss_mb", demo)
                 self.assertIn("material_count", demo)
                 self.assertIn("occupied_voxels", demo)
                 self.assertIn("triangle_count", demo)
                 self.assertIn("mesh_elapsed_s", demo)
+                self.assertGreaterEqual(demo["material_count"], 2)
+                self.assertGreater(demo["occupied_voxels"], 0)
+                self.assertGreater(demo["triangle_count"], 0)
+                self.assertTrue(required_materials[name].issubset(set(demo["materials"])))
+                self.assertTrue(all(demo["checks"].values()), f"{name}: {demo['checks']}")
 
 
 class CadShellInteractionContractTests(unittest.TestCase):
