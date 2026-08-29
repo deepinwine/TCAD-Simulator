@@ -65,45 +65,58 @@ surface; M4 later wraps the same semantics with typed schemas (FastAPI/Pydantic)
 deprecate members only behind a versioned facade — never by breaking the frozen set
 before React parity (M5).
 
-Frozen core (verified against the HTTP dispatchers in `tcad_simulator.py`; executable
-contract tests: `tests/test_webui_cad_shell.py::M2ApiContractTests`). "JSON" responses
-are `{"ok": bool, ...}` envelopes (successful worker results under `result`). Binary
-endpoints send raw bytes with `application/octet-stream` (JSON error envelopes on 4xx/5xx).
+Frozen core — one row per endpoint, verified against the HTTP dispatchers in
+`tcad_simulator.py`. "JSON" responses are `{"ok": bool, …}` envelopes (successful worker
+results under `result`). Binary endpoints send raw bytes on success (JSON error envelopes
+on 4xx/5xx). Contract tests: `tests/test_webui_cad_shell.py::M2ApiContractTests`
+(behavioral) and `::M2ApiDocConsistencyTests` (doc vs dispatcher drift).
 
 | Endpoint | Method | Request (minimal) | Response |
 | --- | --- | --- | --- |
 | `/api/health` | GET | — | JSON |
-| `/api/init` | GET | — | JSON; `result`: `recipe` (step list), `model` (summary), `recipe_factories`, `materials`, `demo_recipes`, `recipes`, `ui_state` |
-| `/api/status`, `/api/log`, `/api/history` | GET | — | JSON |
+| `/api/init` | GET | — | JSON; `result`: `recipe`、`model`、`recipe_factories`、`materials`、`demo_recipes`、`recipes`、`ui_state` |
+| `/api/status` | GET | — | JSON |
+| `/api/log` | GET | — | JSON |
+| `/api/history` | GET | — | JSON（历史清单） |
 | `/api/process_config` | GET | — | JSON |
 | `/api/load_autosave` | POST | `{}` | JSON |
 | `/api/recipe/new` | POST | `{name, current_name?}` | JSON |
-| `/api/recipe/save` | POST | `{name, ui_state?}` | JSON |
-| `/api/recipe/load`, `/api/recipe/delete`, `/api/recipe/set_name` | POST | recipe id/name fields | JSON |
-| `/api/recipe/export` | GET | query (recipe id) | JSON (recipe blob) |
+| `/api/recipe/save` | POST | `{name, note?, ui_state?}` | JSON |
+| `/api/recipe/load` | POST | `{id, current_name?}` | JSON |
+| `/api/recipe/delete` | POST | `{id}` | JSON |
+| `/api/recipe/set_name` | POST | `{name}` | JSON |
+| `/api/recipe/export` | GET | query `id` 或 `scope=current` | JSON（**裸 recipe blob**，无 `ok` 封套；含 `steps_full`） |
 | `/api/recipe/import` | POST | `{recipe, autosave_current?, current_name?}` | JSON |
-| `/api/recipe/add`, `/api/recipe/insert_steps`, `/api/recipe/remove`, `/api/recipe/duplicate` | POST | step payload / `{index}` / `{steps, insert_index?}` | JSON; `result`: full step list |
-| `/api/recipe/move` | POST | `{index, direction:"up"\|"down"}` 或 `{index, to}` | JSON; `result`: step list |
-| `/api/recipe/rename-step` | POST | `{index, instance_name (1–80 chars)}` | JSON; `result`: updated step |
-| `/api/step/set` | POST | `{index, enabled?, params?, loop?, group?, no_autosave?}` | JSON; `result`: step, `statuses`: runtime-status list, `warnings?` |
-| `/api/run/step` | POST | `{index}` | JSON; failure = flat structured payload (`step_index`, `instance_name`, `step_type`, `parameter_path`, `error`, `error_type`, `suggestion`, `rolled_back`) |
-| `/api/run/all`, `/api/run/to` (alias `/api/run/until`) | POST | `{}` / `{index}` | JSON |
-| `/api/undo`, `/api/redo` | POST | `{}` | JSON; `result.undone`/`redone`, `model`, `log` |
-| `/api/reset`, `/api/domain/apply` | POST | `{}` / `{nx, ny, nz, voxel, threads}` | JSON |
-| `/api/timeline/get` | POST | `{}` | JSON; `result.items[]`: `{index, state, runtime_status, snapshot_valid}`, `result.current` |
-| `/api/timeline/restore` | POST | `{index}` | JSON; reject = `{ok:false, code:"no_valid_snapshot"}`（HTTP 200，不隐式重算） |
-| `/api/preview/manifest` | GET | query `mode`, `face_limit` | JSON; `result.rev`, `result.meshes[]` (`mat_id`, …) |
-| `/api/preview/geom` | GET | query `mat_id`, `rev`, `mode` | **binary** octet-stream |
-| `/api/preview/stl` | GET | query `mat_id`, `rev`, `mode` | **binary** STL |
-| `/api/preview/elements` | GET | query `max_points`, `channels`, `quality` | **binary**（动态 content-type） |
-| `/api/slice` | GET | query `axis`, `index`, `kind` | JSON（`result.data_b64` 内嵌二进制） |
-| `/api/render/gbuffer` | POST | render settings JSON | **binary** on success（支持 gzip），JSON error |
-| `/api/material_colors` | POST | color overrides | JSON |
-| `/api/mask/preview`, `/api/mask/preview_step` | GET | query (step/mask params) | JSON |
-| `/api/upload/mask` | POST | mask payload | JSON |
-| `/api/history/load` | POST | `{...}` | JSON |
-| `/api/ui_state`, `/api/save` | POST | UI state payload | JSON |
-| `/api/export` | POST | export options | JSON |
+| `/api/recipe/add` | POST | `{name, insert_index?}` | JSON; `result`: step list |
+| `/api/recipe/insert_steps` | POST | `{steps, insert_index?}` | JSON; `result`: step list |
+| `/api/recipe/remove` | POST | `{index}` | JSON; `result`: step list |
+| `/api/recipe/duplicate` | POST | `{index}` | JSON; `result`: step list |
+| `/api/recipe/move` | POST | `{index, direction}` 或 `{index, to}` | JSON; `result`: step list |
+| `/api/recipe/rename-step` | POST | `{index, instance_name (1–80 字符)}` | JSON; `result`: step |
+| `/api/step/set` | POST | `{index, enabled?, params?, loop?, group?, no_autosave?}` | JSON; `result`: step、`statuses` 列表、`warnings?` |
+| `/api/run/step` | POST | `{index}` | JSON；失败为平面结构化载荷（`step_index`、`instance_name`、`step_type`、`parameter_path`、`error`、`error_type`、`suggestion`、`rolled_back`） |
+| `/api/run/all` | POST | `{}` | JSON |
+| `/api/run/to`（dispatcher 别名 `/api/run/until`） | POST | `{index}` | JSON |
+| `/api/undo` | POST | `{}` | JSON; `result.undone`、`model`、`log` |
+| `/api/redo` | POST | `{}` | JSON; `result.redone`、`model`、`log` |
+| `/api/reset` | POST | `{}` | JSON |
+| `/api/domain/apply` | POST | `{nx, ny, nz, voxel, threads}` | JSON |
+| `/api/timeline/get` | POST | `{}` | JSON; `result.items[]`：`{index, state, runtime_status, snapshot_valid}`、`result.current` |
+| `/api/timeline/restore` | POST | `{index}` | JSON；拒绝 = `{ok:false, code:"no_valid_snapshot"}`（HTTP 200，不隐式重算） |
+| `/api/preview/manifest` | GET | query `mode`、`face_limit` | JSON; `result.rev`、`result.meshes[]`（`mat_id`…） |
+| `/api/preview/geom` | GET | query `mat_id`、`rev`、`mode` | **binary** `application/octet-stream` |
+| `/api/preview/stl` | GET | query `mat_id`、`rev`、`mode` | **binary** STL（`application/sla`） |
+| `/api/preview/elements` | GET | query `max_points`、`channels`、`quality` | **binary**（动态 content-type） |
+| `/api/slice` | GET | query `axis`、`index`、`kind` | JSON（`result.data_b64` 内嵌二进制） |
+| `/api/render/gbuffer` | POST | render 设置 JSON | **binary**（支持 gzip），JSON error |
+| `/api/material_colors` | POST | `{action, mode?, …}` | JSON |
+| `/api/mask/preview` | GET | query `file`（已上传掩膜文件名，`.npy` 渲染为 PNG） | **binary** `image/png`，JSON error |
+| `/api/mask/preview_step` | GET | query `step_index`（或 `index`） | **binary**（默认 `image/png`），JSON error |
+| `/api/upload/mask` | POST | **multipart/form-data**：`file` 字段 + query `step_index` | JSON；`path` 为保存后完整路径（含哈希文件名），`result.mask_name` 为基名 |
+| `/api/history/load` | POST | `{id, current_name?}` | JSON |
+| `/api/ui_state` | POST | `{recipe_id, ui_state}` | JSON |
+| `/api/save` | POST | `{}` | JSON |
+| `/api/export` | POST | 导出选项 JSON | JSON |
 | `/api/export/download` | GET | query `file` | **binary** attachment |
 
 Rules:

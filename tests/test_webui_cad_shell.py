@@ -452,7 +452,7 @@ class M2ApiContractTests(unittest.TestCase):
         return manager
 
     @staticmethod
-    def _request(base, cookie, method, path, body=None):
+    def _request(base, cookie, method, path, body=None, raw_body=None, content_type=None):
         import http.client
         import json as _json
         from urllib.parse import urlparse
@@ -461,7 +461,10 @@ class M2ApiContractTests(unittest.TestCase):
         conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=90)
         headers = {"Cookie": cookie.split(";", 1)[0]}
         payload = None
-        if body is not None:
+        if raw_body is not None:
+            payload = raw_body
+            headers["Content-Type"] = content_type or "application/octet-stream"
+        elif body is not None:
             payload = _json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         conn.request(method, path, body=payload, headers=headers)
@@ -471,6 +474,25 @@ class M2ApiContractTests(unittest.TestCase):
         status = response.status
         conn.close()
         return status, resp_headers, raw
+
+    @staticmethod
+    def _first_string_ending(obj, suffixes):
+        """递归查找 JSON 中第一个以指定后缀结尾的字符串（用于文件名提取）。"""
+        import json as _json
+
+        if isinstance(obj, str):
+            return obj if any(obj.endswith(s) for s in suffixes) else None
+        if isinstance(obj, dict):
+            for value in obj.values():
+                found = M2ApiContractTests._first_string_ending(value, suffixes)
+                if found:
+                    return found
+        if isinstance(obj, list):
+            for value in obj:
+                found = M2ApiContractTests._first_string_ending(value, suffixes)
+                if found:
+                    return found
+        return None
 
     def test_get_bootstrap_endpoints_return_json_envelopes(self):
         import json
@@ -614,6 +636,277 @@ class M2ApiContractTests(unittest.TestCase):
                 self.assertEqual(status, 404)
             finally:
                 manager.stop()
+
+
+    def test_full_endpoint_lifecycle_walk(self):
+        """行为证据：契约表中每个端点都以声明的 method 调用并断言响应类别。"""
+        import io
+        import json
+
+        import numpy as np
+
+        def check_json(raw, ctx):
+            payload = json.loads(raw)
+            self.assertIn("ok", payload, ctx)
+
+        def check_binary(headers, raw, ctx):
+            ctype = headers.get("content-type", "")
+            self.assertFalse(raw[:1] == b"{", f"{ctx}: expected binary, got JSON")
+            self.assertNotIn("json", ctype.lower(), f"{ctx}: binary endpoint returned JSON content-type {ctype!r}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, cookie = manager.create_session()
+                base = manager.url
+
+                # --- bootstrap ---
+                for path in ("/api/health", "/api/status", "/api/log", "/api/history", "/api/process_config", "/api/init"):
+                    status, headers, raw = self._request(base, cookie, "GET", path)
+                    self.assertEqual(status, 200, path)
+                    check_json(raw, path)
+
+                # --- recipe editing lifecycle ---
+                steps = [
+                    ("POST", "/api/recipe/new", {"name": "M2 walk"}, "json"),
+                    ("POST", "/api/recipe/add", {"name": "Spin Resist"}, "json"),
+                    ("POST", "/api/recipe/add", {"name": "Mask Exposure"}, "json"),
+                    ("POST", "/api/recipe/duplicate", {"index": 2}, "json"),
+                    ("POST", "/api/recipe/remove", {"index": 3}, "json"),
+                    ("POST", "/api/recipe/move", {"index": 0, "to": 1}, "json"),
+                    ("POST", "/api/recipe/rename-step", {"index": 1, "instance_name": "契约行走"}, "json"),
+                    ("POST", "/api/step/set", {"index": 1, "params": {}, "no_autosave": True}, "json"),
+                    ("POST", "/api/recipe/save", {"name": "M2 walk"}, "json"),
+                ]
+                for method, path, body, kind in steps:
+                    status, headers, raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    check_json(raw, path)
+
+                status, _h, raw = self._request(base, cookie, "GET", "/api/history")
+                history_payload = json.loads(raw)
+                # 取一个已保存 recipe 的 id（history 条目含 id 字段）
+                recipe_id = None
+
+                def _find_id(obj):
+                    nonlocal recipe_id
+                    if recipe_id is not None:
+                        return
+                    if isinstance(obj, dict):
+                        if isinstance(obj.get("id"), str) and obj.get("name"):
+                            recipe_id = obj["id"]
+                            return
+                        for v in obj.values():
+                            _find_id(v)
+                    elif isinstance(obj, list):
+                        for v in obj:
+                            _find_id(v)
+
+                _find_id(history_payload)
+                self.assertIsNotNone(recipe_id, "history should expose a saved recipe id")
+                # /api/recipe/export 返回裸 recipe blob（无 ok 封套），单独断言
+                status, headers, raw = self._request(base, cookie, "GET", "/api/recipe/export?scope=current")
+                self.assertEqual(status, 200, raw[:200])
+                exported_blob = json.loads(raw)
+                self.assertIsInstance(exported_blob, dict)
+                self.assertIn("steps_full", exported_blob)
+
+                for method, path, body in (
+                    ("POST", "/api/history/load", {"id": recipe_id}),
+                    ("POST", "/api/recipe/load", {"id": recipe_id}),
+                ):
+                    status, headers, raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    check_json(raw, path)
+
+                # --- execution / timeline / history ---
+                for method, path, body in (
+                    ("POST", "/api/run/to", {"index": 2}),
+                    ("POST", "/api/timeline/get", {}),
+                    ("POST", "/api/timeline/restore", {"index": 0}),
+                    ("POST", "/api/undo", {}),
+                    ("POST", "/api/redo", {}),
+                    ("POST", "/api/domain/apply", {"nx": 12, "ny": 12, "nz": 16, "voxel": 5.0, "threads": 1}),
+                    ("POST", "/api/material_colors", {}),
+                ):
+                    status, headers, raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    check_json(raw, path)
+
+                # --- multipart mask upload + binary mask previews ---
+                buf = io.BytesIO()
+                np.save(buf, np.zeros((8, 8), dtype=bool))
+                npy_bytes = buf.getvalue()
+                boundary = "tcadcontractboundary"
+                multipart = (
+                    f"--{boundary}\r\n"
+                    'Content-Disposition: form-data; name="file"; filename="m2_mask.npy"\r\n'
+                    "Content-Type: application/octet-stream\r\n\r\n"
+                ).encode() + npy_bytes + f"\r\n--{boundary}--\r\n".encode()
+                status, headers, raw = self._request(
+                    base,
+                    cookie,
+                    "POST",
+                    "/api/upload/mask?step_index=2",
+                    raw_body=multipart,
+                    content_type=f"multipart/form-data; boundary={boundary}",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                check_json(raw, "/api/upload/mask")
+                upload_resp = json.loads(raw)
+                uploaded = upload_resp.get("path") or self._first_string_ending(upload_resp, (".npy",))
+                self.assertIsNotNone(uploaded, "upload/mask should echo the stored path")
+                uploaded = uploaded.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]  # preview 只接受文件名
+
+                status, headers, raw = self._request(base, cookie, "GET", f"/api/mask/preview?file={uploaded}")
+                self.assertEqual(status, 200, raw[:200])
+                check_binary(headers, raw, "/api/mask/preview")
+                self.assertIn("image/png", headers.get("content-type", ""))
+
+                status, headers, raw = self._request(base, cookie, "GET", "/api/mask/preview_step?step_index=2")
+                self.assertEqual(status, 200, raw[:200])
+                check_binary(headers, raw, "/api/mask/preview_step")
+
+                # --- preview geometry: JSON manifest + binary payloads ---
+                status, headers, raw = self._request(base, cookie, "GET", "/api/preview/manifest?mode=solid&face_limit=2000")
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/preview/manifest")
+                result = json.loads(raw)["result"]
+                mat_id = int(result["meshes"][0]["mat_id"])
+                rev = int(result["rev"])
+                for path in (
+                    f"/api/preview/geom?mat_id={mat_id}&rev={rev}&mode=solid",
+                    f"/api/preview/stl?mat_id={mat_id}&rev={rev}&mode=solid",
+                    "/api/preview/elements?max_points=64&channels=m",
+                ):
+                    status, headers, raw = self._request(base, cookie, "GET", path)
+                    self.assertEqual(status, 200, f"{path}: {raw[:120]!r}")
+                    check_binary(headers, raw, path)
+
+                status, headers, raw = self._request(base, cookie, "GET", "/api/slice?axis=Z&index=0&kind=material")
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/slice")
+                self.assertIn("data_b64", json.loads(raw)["result"])
+
+                status, headers, raw = self._request(
+                    base, cookie, "POST", "/api/render/gbuffer", {"axis": "Z", "kind": "material", "index": 0}
+                )
+                self.assertEqual(status, 200, raw[:200])
+                check_binary(headers, raw, "/api/render/gbuffer")
+
+                # --- ui state / save / export / download ---
+                for method, path, body in (
+                    ("POST", "/api/ui_state", {"recipe_id": recipe_id, "ui_state": {}}),
+                    ("POST", "/api/save", {}),
+                    ("POST", "/api/export", {"sti": True}),
+                ):
+                    status, headers, raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    check_json(raw, path)
+                exported = self._first_string_ending(json.loads(raw), (".zip", ".stl"))
+                if exported:
+                    status, headers, raw = self._request(base, cookie, "GET", f"/api/export/download?file={exported}")
+                    self.assertEqual(status, 200, raw[:120])
+                    check_binary(headers, raw, "/api/export/download")
+                else:
+                    status, headers, raw = self._request(base, cookie, "GET", "/api/export/download?file=__missing__")
+                    self.assertEqual(status, 404)
+                    check_json(raw, "/api/export/download (404 envelope)")
+
+                # --- reset / autosave / single run / delete ---
+                for method, path, body in (
+                    ("POST", "/api/reset", {}),
+                    ("POST", "/api/load_autosave", {}),
+                    ("POST", "/api/run/step", {"index": 0}),
+                    ("POST", "/api/recipe/set_name", {"name": "M2 walk renamed"}),
+                    ("POST", "/api/recipe/delete", {"id": recipe_id}),
+                ):
+                    status, headers, raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    check_json(raw, path)
+
+                status, headers, raw = self._request(base, cookie, "POST", "/api/run/all", {})
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/run/all")
+            finally:
+                manager.stop()
+
+
+class M2ApiDocConsistencyTests(unittest.TestCase):
+    """静态一致性：契约表（ARCHITECTURE_TARGET.md）不得与 HTTP dispatcher 漂移。"""
+
+    DOCS_REL = Path("docs") / "ARCHITECTURE_TARGET.md"
+
+    @classmethod
+    def _doc_entries(cls):
+        import re
+
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / cls.DOCS_REL).read_text(encoding="utf-8")
+        section = text.split("## M2 Compatibility API", 1)[1].split("## Frontend Structure", 1)[0]
+        entries = {}
+        for line in section.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("| `/api/"):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            match = re.match(r"`(/api/[a-z_/-]+)`", cells[0])
+            if not match or len(cells) < 2:
+                continue
+            method = cells[1].strip().strip("`").upper()
+            assert method in {"GET", "POST"}, f"bad method cell: {cells[:2]!r}"
+            entries[match.group(1)] = method
+        return entries
+
+    @classmethod
+    def _dispatcher_routes(cls):
+        import re
+
+        repo_root = Path(__file__).resolve().parents[1]
+        lines = (repo_root / "tcad_simulator.py").read_text(encoding="utf-8").splitlines()
+
+        def find(name, start=0):
+            for i in range(start, len(lines)):
+                if f"    def {name}(" in lines[i]:
+                    return i
+            raise AssertionError(f"method {name} not found")
+
+        webui_get = find("do_GET")
+        webui_post = find("do_POST", webui_get + 1)
+        admin_get = find("do_GET", webui_post + 1)  # WebUI do_POST 区段的终点
+
+        route_re = re.compile(r'path == "(/api/[a-z_/-]+)"')
+        set_re = re.compile(r'path in \{"(/api/[a-z_/-]+)", "(/api/[a-z_/-]+)"\}')
+
+        def collect(start, end):
+            routes = set()
+            for line in lines[start:end]:
+                for m in route_re.finditer(line):
+                    routes.add(m.group(1))
+                for m in set_re.finditer(line):
+                    routes.update(m.groups())
+            return routes
+
+        return collect(webui_get, webui_post), collect(webui_post, admin_get)
+
+    def test_every_documented_endpoint_exists_with_declared_method(self):
+        entries = self._doc_entries()
+        self.assertGreaterEqual(len(entries), 40, "contract table looks truncated")
+        get_routes, post_routes = self._dispatcher_routes()
+        for path, method in sorted(entries.items()):
+            in_get = path in get_routes
+            in_post = path in post_routes
+            self.assertTrue(in_get or in_post, f"{path} documented but missing from dispatchers")
+            self.assertFalse(in_get and in_post, f"{path} routed in both GET and POST")
+            self.assertEqual(
+                ("GET" if in_get else "POST"),
+                method,
+                f"{path}: doc says {method} but dispatcher disagrees",
+            )
+
+    def test_documented_alias_matches_dispatcher(self):
+        _get_routes, post_routes = self._dispatcher_routes()
+        self.assertIn("/api/run/until", post_routes, "documented alias /api/run/until missing from POST dispatcher")
 
 
 if __name__ == "__main__":
