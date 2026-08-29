@@ -278,6 +278,63 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
 
 
 class BaselineRunnerTests(unittest.TestCase):
+    @staticmethod
+    def _load_runner_module():
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "tcad_baseline_runner", repo_root / "tools" / "run_process_cad_baseline.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_rss_helpers_fall_back_when_resource_is_missing(self):
+        import sys
+        from unittest import mock
+
+        runner = self._load_runner_module()
+        # Unix 正常路径：返回 float，且 scope 标注为累计峰值
+        self.assertIsInstance(runner._peak_rss_mb(), float)
+        self.assertEqual(runner._rss_scope(), "ru_maxrss_cumulative_process")
+        # 模拟 Windows：resource 与 psutil 均缺失 -> 不抛异常，返回 None
+        with mock.patch.object(runner, "resource", None), mock.patch.dict(sys.modules, {"psutil": None}):
+            self.assertIsNone(runner._peak_rss_mb())
+            self.assertEqual(runner._rss_scope(), "unavailable")
+
+    def test_baseline_runner_survives_without_resource_module(self):
+        import json
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        code = (
+            "import sys; sys.modules['resource'] = None; sys.modules['psutil'] = None; "
+            "import runpy; out, script = sys.argv[1], sys.argv[2]; "
+            "sys.argv = ['run_process_cad_baseline.py', '--grid', '32', '--output', out]; "
+            "runpy.run_path(script, run_name='__main__')"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result.json"
+            completed = subprocess.run(
+                [sys.executable, "-c", code, str(output), str(repo_root / "tools" / "run_process_cad_baseline.py")],
+                text=True,
+                capture_output=True,
+                timeout=240,
+                cwd=str(repo_root),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["peak_rss_scope"], "unavailable")
+            for demo in payload["demos"].values():
+                self.assertIn("peak_rss_mb", demo)
+                self.assertIsNone(demo["peak_rss_mb"])
+
     def test_baseline_runner_writes_success_json(self):
         import json
         import subprocess

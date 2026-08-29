@@ -40,7 +40,10 @@ KLayout object types.
 - **Python application layer**: recipe, ProcessStep execution, simulation jobs, snapshots
   and replay, material registry, backend routing, persistence, metrology orchestration,
   LLM/AI workflows, serialization, and the API surface (FastAPI + Pydantic when the new
-  API layer is introduced).
+  API layer is introduced). Python-version policy: the existing runtime keeps Python
+  3.10+ compatibility (as documented in the README); new application/API-layer modules
+  (M4+) target Python 3.12+ and may declare it explicitly — do not gratuitously drop
+  3.10 support from the existing runtime.
 - **C++ accurate engine**: ViennaPS + ViennaLS + VTK behind adapters (official bindings or
   pybind11). Used for surface evolution, HAR etching, plasma etch, wet undercut, ALD/CVD
   topography, shadowing, redeposition, selective processes — where voxel geometry is
@@ -53,6 +56,39 @@ KLayout object types.
 - STL remains an export format, not the internal representation.
 - Avoid: per-voxel Three.js cubes, repeated voxel↔mesh and voxel↔level-set conversions,
   giant nested-JSON geometry payloads (prefer binary/streaming representations).
+
+## M2 Compatibility API — Minimum Stable Contract (resolves the M2/M4 ordering)
+
+React (M2) starts **before** the typed API facade exists (M4). Resolution: the existing
+WebUI HTTP API is frozen as the **M2 Compatibility API**; React consumes exactly this
+surface; M4 later wraps the same semantics with typed schemas (FastAPI/Pydantic) and may
+deprecate members only behind a versioned facade — never by breaking the frozen set
+before React parity (M5).
+
+Frozen core (additive-only evolution — new fields/endpoints allowed, semantics of listed
+members immutable until M4 versions them):
+
+| Group | Endpoints |
+| --- | --- |
+| Bootstrap / session | `GET /api/init`, `GET /api/health`, `GET /api/status`, `GET /api/log`, `POST /api/load_autosave` |
+| Recipe editing | `POST /api/recipe/new\|save\|load\|delete\|export\|import\|add\|insert_steps\|remove\|duplicate\|move\|rename-step\|set_name`, `POST /api/step/set` |
+| Execution & history | `POST /api/run/step\|all\|to`, `POST /api/undo\|redo`, `POST /api/reset`, `POST /api/domain/apply` |
+| Timeline | `POST /api/timeline/get\|restore` |
+| Preview / geometry (binary) | `GET /api/preview/manifest\|geom\|elements\|stl`, `GET /api/slice`, `POST /api/render/gbuffer` |
+| Materials & masks | `GET/POST /api/material_colors`, `GET /api/process_config`, `POST /api/mask/preview`, `POST /api/mask/preview_step`, `POST /api/upload/mask` |
+| History & UI state | `GET /api/history`, `POST /api/history/load`, `POST /api/ui_state`, `POST /api/save` |
+| Export | `POST /api/export`, `GET /api/export/download` |
+
+Rules:
+
+1. Any endpoint or response field a React component reads must be added to this table
+   (in the same PR) before the client depends on it.
+2. Binary endpoints (`geom`, `slice`, `gbuffer`, downloads) stay binary — React never
+   parses them as JSON.
+3. Cookie/session model stays as-is; WebSocket additions are new endpoints, not changes.
+4. Structured step-failure payloads keep their current field names
+   (`step_index`, `instance_name`, `step_type`, `parameter_path`, `error`,
+   `error_type`, `suggestion`, `rolled_back`).
 
 ## Frontend Structure (when M2 begins)
 

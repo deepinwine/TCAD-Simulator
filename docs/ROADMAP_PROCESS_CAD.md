@@ -38,7 +38,10 @@ Golden tests assert final geometry/material composition per flow so later migrat
 ## M2 — React Shell
 
 `frontend/` with React + TypeScript + Vite: Process Flow, Parameters, Viewer shell,
-Timeline shell. Parallel client only; legacy WebUI untouched (ADR-012).
+Timeline shell. Parallel client only; legacy WebUI untouched (ADR-012). React consumes
+**exactly** the frozen "M2 Compatibility API" defined in `docs/ARCHITECTURE_TARGET.md`
+(existing WebUI HTTP endpoints, additive-only) — this is how M2 can start before the M4
+facade exists.
 
 ## M3 — Three.js Viewer (React)
 
@@ -48,7 +51,11 @@ material visibility/transparency, selection, measurement visualization.
 ## M4 — Python API Facade
 
 Typed facade over the existing runtime: recipe, step, run, snapshot, geometry, materials.
-Then incremental standardization toward FastAPI + Pydantic (compat API first; ADR-013).
+It wraps the frozen M2 Compatibility API semantics with typed schemas and then
+standardizes toward FastAPI + Pydantic (ADR-013). Deprecations happen only behind the
+versioned facade — the frozen surface stays intact until React parity (M5). New
+API-layer modules target Python 3.12+ while the existing runtime keeps 3.10+
+compatibility.
 
 ## M5 — React Parity
 
@@ -89,16 +96,28 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 
 ## Backlog (owner slots these into the sequence)
 
+- UI-agnostic demo/flow registry entry (e.g., `tcad.load_demo_flows(database)`) so
+  benchmarks and golden tests stop depending on the private `_webui_demo_recipes`
+  helper (currently used by `tools/run_process_cad_baseline.py`). Natural fit: M1
+  golden-test completion.
 - Parameter sweep / DOE runner with metrology comparison (natural fit after M4).
 - Device regions, electrodes, meshing export, electrical-solve interface stub.
 - Calibration data ingestion; reproducible experiment packages.
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-29)
+## Current Branch State (2026-08-29, post-review-repairs)
 
-- `zcode/process-cad-shell` — M1 shell + M0 constitution + calibrated baseline;
-  pushed to `backup`.
-- `codex/process-cad-shell` — parallel line at `4c3e32f` (M1 work).
-- Next: Codex reviews the M0/M1 diff → merge both lines → land on `main` → begin M1
-  golden-test completion (W Plug + CMP, Basic BEOL).
+| Branch | Commit | Relationship |
+| --- | --- | --- |
+| `main` | `d15722d` | 停在 M1 设计文档，未含任何实现；origin/FonaTech 同步到此 |
+| `codex/process-cad-shell` | `10f6fbd` | 已被快进包含全部 M1 实现（至 `22fbc33`）+ 基准校准；与 backup 远程一致 |
+| `zcode/process-cad-shell` | M0 宪法 `b4aaec2` + 评审修复提交 | **`10f6fbd` 的直接后代**（线性领先一个或数个提交，无分叉） |
+
+祖先关系：`main ⊂ (4c3e32f …) ⊂ 10f6fbd ⊂ b4aaec2 ⊂ 本修复提交`。两条 feature 分支
+没有内容冲突，合并即快进。**合并顺序、是否落 `main`、何时推送 `origin` 由仓库所有者
+决定；Agent 不得自行合并 feature 分支或推送 `origin`（ADR-010/017）。**
+
+- Next: Codex 复审本修复 diff（仅 BLOCK 项与新增 diff，按评审约定不重审已通过的
+  CAD Shell 行为）→ 所有者决定合并 → 开始 M1 golden-test 收尾（W Plug + CMP、
+  Basic BEOL）。

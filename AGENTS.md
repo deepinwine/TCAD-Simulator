@@ -13,7 +13,7 @@ Project: evolving `deepinwine/TCAD-Simulator` (from the FonaTech prototype) into
 | --- | --- | --- |
 | Frontend | React + TypeScript + Vite | Process Flow editor, parameter forms, material tree, timeline, job state, metrology UI |
 | 3D Viewer | Three.js | Rendering only — orbit/pan/zoom, persp/ortho, X/Y/Z clipping, visibility, selection, measurement |
-| Application layer | Python 3.12+ (FastAPI / Pydantic when the new API layer lands) | Recipe, ProcessStep, project/session state, backend routing, jobs, materials, metrology, AI recipes, serialization, API, snapshots |
+| Application layer | Python — 3.10+ compatible today; 3.12+ target for the new API/application modules (M4+, see ARCHITECTURE_TARGET) | Recipe, ProcessStep, project/session state, backend routing, jobs, materials, metrology, AI recipes, serialization, API, snapshots |
 | Fast geometry | existing voxel `ProcessModel` | Preserved as Fast Mode backend until equivalent regression coverage exists |
 | Accurate engine | C++20 + ViennaPS + ViennaLS + VTK (+ OpenMP) | Integrated via official Python bindings / pybind11 |
 | Geometry interchange | VTK (VTP/VTU; HDF5/Zarr for large arrays) | STL is export-only, never canonical |

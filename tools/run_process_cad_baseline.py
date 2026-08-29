@@ -2,20 +2,25 @@
 """Reproducible Process CAD baseline.
 
 Runs the three Process CAD demo recipes headless on a fixed-size cubic grid and
-records per-demo wall time, process peak RSS, occupied-voxel/material counts,
-semantic acceptance checks, and preview-mesh triangle counts with mesh generation
-time. Results are written as JSON so runs can be archived and compared across revisions.
+records per-demo wall time, best-effort process RSS (see ``peak_rss_scope``),
+occupied-voxel/material counts, semantic acceptance checks, and preview-mesh triangle
+counts with mesh generation time. Results are written as JSON so runs can be archived
+and compared across revisions.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import resource
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+try:
+    import resource  # Unix only; absent on Windows
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -29,12 +34,38 @@ MESH_FACE_LIMIT = 20000
 PHYSICAL_EXTENT_NM = 640.0
 
 
-def _peak_rss_mb() -> float:
-    """Process peak RSS in MB (macOS reports bytes, Linux reports KiB)."""
-    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        return float(ru) / (1024.0 * 1024.0)
-    return float(ru) / 1024.0
+def _peak_rss_mb() -> Optional[float]:
+    """Best-effort process RSS in MB; None when unavailable (Windows without psutil).
+
+    Prefers ``resource.getrusage`` (macOS reports bytes, Linux reports KiB); falls back
+    to ``psutil``'s current RSS. Callers must handle ``None``.
+    """
+    if resource is not None:
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return float(ru) / (1024.0 * 1024.0)
+        return float(ru) / 1024.0
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        return float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        return None
+
+
+def _rss_scope() -> str:
+    """Document how ``peak_rss_mb`` was measured so reports stay comparable."""
+    if resource is not None:
+        # ru_maxrss is monotonic for the process: per-demo values are the cumulative
+        # peak at the moment the demo finished.
+        return "ru_maxrss_cumulative_process"
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        psutil.Process()
+        return "psutil_current_rss_per_demo"
+    except Exception:
+        return "unavailable"
 
 
 def _void_material_id(database: tcad.MaterialDatabase) -> int:
@@ -114,13 +145,12 @@ def _run_demo(name: str, grid: int, voxel_nm: float) -> Dict[str, Any]:
         material_names = sorted(database.material(material_id).name for material_id in present)
         triangle_count = int(sum(int(s[1].shape[0]) for s in surfaces))
         checks = _semantic_checks(name, database, model, set(material_names), triangle_count)
+        rss = _peak_rss_mb()
 
         return {
             "ok": bool(all(checks.values())),
             "elapsed_s": round(elapsed_s, 3),
-            # ru_maxrss is monotonic for the process, so per-demo values are the
-            # cumulative peak at the moment the demo finished.
-            "peak_rss_mb": round(_peak_rss_mb(), 1),
+            "peak_rss_mb": (round(rss, 1) if rss is not None else None),
             "material_count": len(present),
             "materials": material_names,
             "occupied_voxels": occupied_voxels,
@@ -144,6 +174,7 @@ def run_baseline(grid_size: int) -> Dict[str, Any]:
         "grid_shape": [grid, grid, grid],
         "physical_extent_nm": float(PHYSICAL_EXTENT_NM),
         "voxel_nm": float(voxel_nm),
+        "peak_rss_scope": _rss_scope(),
         "demos": {},
     }
     for name in DEMO_NAMES:
