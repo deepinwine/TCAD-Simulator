@@ -110,9 +110,10 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
-| `main` | `d15722d` | 停在 M1 设计文档，未含任何实现；origin/FonaTech 同步到此 |
+| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1 实现 |
+| 本地 `main` | `d15722d` | **线性领先 `origin/main` 恰好一个提交**（M1 设计文档）；同样不含实现 |
 | `codex/process-cad-shell` | `10f6fbd` | 已被快进包含全部 M1 实现（至 `22fbc33`）+ 基准校准；与 backup 远程一致 |
-| `zcode/process-cad-shell` | M0 宪法 `b4aaec2` + 评审修复提交 | **`10f6fbd` 的直接后代**（线性领先一个或数个提交，无分叉） |
+| `zcode/process-cad-shell` | M0 宪法 `b4aaec2` + 评审修复提交 | **`10f6fbd` 的直接后代**（线性领先，无分叉） |
 
 祖先关系：`main ⊂ (4c3e32f …) ⊂ 10f6fbd ⊂ b4aaec2 ⊂ 本修复提交`。两条 feature 分支
 没有内容冲突，合并即快进。**合并顺序、是否落 `main`、何时推送 `origin` 由仓库所有者

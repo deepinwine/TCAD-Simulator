@@ -96,3 +96,13 @@ counter-proposals are recorded as "Future Architecture Suggestion", not implemen
 ADR-018 — One concern per change.
 Reason: mixed diffs (migration + physics + UI + dependency) are unreviewable and risky.
 Rule: if a task forces two concerns, split the commits or the milestone.
+
+ADR-019 — The existing WebUI HTTP API is frozen as the "M2 Compatibility API".
+Reason: React (M2) must start before the typed facade (M4) exists; freezing the current
+endpoints (methods, payload shapes, JSON/binary response types) gives React a stable
+surface without waiting for M4.
+Rule: evolution is additive-only; endpoints and fields React consumes must be listed in
+`docs/ARCHITECTURE_TARGET.md` (M2 Compatibility API table) and covered by
+`tests/test_webui_cad_shell.py::M2ApiContractTests` in the same change; methods are part
+of the contract (wrong-method requests 404); binary endpoints stay binary; deprecation
+only behind M4's versioned facade, never before React parity (M5).

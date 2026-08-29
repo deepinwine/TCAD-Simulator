@@ -431,5 +431,190 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn("state.stepErrors[stepIndex] = failure", source)
 
 
+class M2ApiContractTests(unittest.TestCase):
+    """Executable contract for the frozen M2 Compatibility API.
+
+    Mirrors the table in docs/ARCHITECTURE_TARGET.md: HTTP methods, minimal request
+    payloads, and JSON/binary response classification. Every endpoint React consumes
+    must be covered here (ADR-019).
+    """
+
+    def _start_manager(self, temp_dir):
+        manager = tcad.WebUIServerManager(
+            host="127.0.0.1",
+            port=0,
+            max_users=1,
+            storage_root=Path(temp_dir),
+            enable_ai_agent=False,
+            default_domain={"grid_shape": [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
+        )
+        manager.start()
+        return manager
+
+    @staticmethod
+    def _request(base, cookie, method, path, body=None):
+        import http.client
+        import json as _json
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base)
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=90)
+        headers = {"Cookie": cookie.split(";", 1)[0]}
+        payload = None
+        if body is not None:
+            payload = _json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
+        response = conn.getresponse()
+        raw = response.read()
+        resp_headers = {k.lower(): v for k, v in response.getheaders()}
+        status = response.status
+        conn.close()
+        return status, resp_headers, raw
+
+    def test_get_bootstrap_endpoints_return_json_envelopes(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, cookie = manager.create_session()
+                base = manager.url
+                for path in ("/api/health", "/api/status", "/api/log", "/api/history", "/api/process_config"):
+                    status, headers, raw = self._request(base, cookie, "GET", path)
+                    self.assertEqual(status, 200, f"{path}: {raw[:200]!r}")
+                    self.assertIn("application/json", headers.get("content-type", ""))
+                    payload = json.loads(raw)
+                    self.assertIn("ok", payload)
+                status, _headers, raw = self._request(base, cookie, "GET", "/api/init")
+                self.assertEqual(status, 200)
+                result = json.loads(raw)["result"]
+                for key in ("recipe", "model", "recipe_factories", "materials"):
+                    self.assertIn(key, result, f"/api/init missing {key}")
+                self.assertIsInstance(result["recipe"], list)
+                self.assertIsInstance(result["model"], dict)
+            finally:
+                manager.stop()
+
+    def test_recipe_and_step_editing_contract(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, cookie = manager.create_session()
+                base = manager.url
+                status, _h, raw = self._request(base, cookie, "POST", "/api/recipe/new", {"name": "M2 contract"})
+                self.assertEqual(status, 200)
+                self.assertTrue(json.loads(raw)["ok"], raw[:300])
+                status, _h, raw = self._request(
+                    base, cookie, "POST", "/api/recipe/insert_steps", {"steps": [{"name": "Spin Resist"}]}
+                )
+                self.assertTrue(json.loads(raw)["ok"], raw[:300])
+
+                status, _h, raw = self._request(
+                    base, cookie, "POST", "/api/step/set", {"index": 1, "params": {}, "no_autosave": True}
+                )
+                payload = json.loads(raw)
+                self.assertTrue(payload["ok"], raw[:300])
+                self.assertIn(payload["result"]["runtime_status"], {"ready", "dirty", "running", "done", "error"})
+                self.assertIsInstance(payload.get("statuses"), list)
+                self.assertEqual(len(payload["statuses"]), 2)
+
+                status, _h, raw = self._request(
+                    base, cookie, "POST", "/api/recipe/rename-step", {"index": 1, "instance_name": "契约步骤"}
+                )
+                payload = json.loads(raw)
+                self.assertTrue(payload["ok"], raw[:300])
+                self.assertEqual(payload["result"]["instance_name"], "契约步骤")
+
+                status, _h, raw = self._request(base, cookie, "POST", "/api/recipe/move", {"index": 0, "to": 1})
+                payload = json.loads(raw)
+                self.assertTrue(payload["ok"], raw[:300])
+                self.assertIsInstance(payload["result"], list)
+                self.assertEqual(len(payload["result"]), 2)
+            finally:
+                manager.stop()
+
+    def test_execution_timeline_undo_redo_contract(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, cookie = manager.create_session()
+                base = manager.url
+                self._request(base, cookie, "POST", "/api/recipe/new", {"name": "M2 exec"})
+                status, _h, raw = self._request(base, cookie, "POST", "/api/run/to", {"index": 0})
+                self.assertTrue(json.loads(raw)["ok"], raw[:300])
+
+                status, _h, raw = self._request(base, cookie, "POST", "/api/timeline/get", {})
+                result = json.loads(raw)["result"]
+                self.assertEqual(result["current"], 0)
+                self.assertTrue(result["items"])
+                for item in result["items"]:
+                    self.assertEqual(set(item), {"index", "state", "runtime_status", "snapshot_valid"})
+
+                status, _h, raw = self._request(base, cookie, "POST", "/api/timeline/restore", {"index": 0})
+                payload = json.loads(raw)
+                self.assertTrue(payload["ok"], raw[:300])
+                self.assertEqual(payload["result"]["timeline"]["current"], 0)
+
+                # 拒绝无效快照：HTTP 200 + 结构化错误，不隐式重算
+                status, _h, raw = self._request(base, cookie, "POST", "/api/timeline/restore", {"index": 5})
+                payload = json.loads(raw)
+                self.assertEqual(status, 200)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["code"], "no_valid_snapshot")
+
+                status, _h, raw = self._request(base, cookie, "POST", "/api/undo", {})
+                self.assertTrue(json.loads(raw)["result"]["undone"])
+                status, _h, raw = self._request(base, cookie, "POST", "/api/redo", {})
+                self.assertTrue(json.loads(raw)["result"]["redone"])
+            finally:
+                manager.stop()
+
+    def test_preview_binary_and_json_contract(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, cookie = manager.create_session()
+                base = manager.url
+                self._request(base, cookie, "POST", "/api/recipe/new", {"name": "M2 preview"})
+                self._request(base, cookie, "POST", "/api/run/to", {"index": 0})
+
+                status, headers, raw = self._request(
+                    base, cookie, "GET", "/api/preview/manifest?mode=solid&face_limit=2000"
+                )
+                self.assertEqual(status, 200, raw[:200])
+                self.assertIn("application/json", headers.get("content-type", ""))
+                result = json.loads(raw)["result"]
+                self.assertIsInstance(result["rev"], int)
+                self.assertTrue(result["meshes"])
+                mat_id = int(result["meshes"][0]["mat_id"])
+                rev = int(result["rev"])
+
+                status, headers, raw = self._request(
+                    base, cookie, "GET", f"/api/preview/geom?mat_id={mat_id}&rev={rev}&mode=solid"
+                )
+                self.assertEqual(status, 200, raw[:200])
+                self.assertIn("application/octet-stream", headers.get("content-type", ""))
+                self.assertTrue(raw)
+                self.assertFalse(raw[:1] == b"{", "geom must be binary, not a JSON envelope")
+
+                status, _h, raw = self._request(base, cookie, "GET", "/api/slice?axis=Z&index=0&kind=material")
+                self.assertEqual(status, 200, raw[:200])
+                result = json.loads(raw)["result"]
+                self.assertIn("data_b64", result)
+
+                # 方法是契约的一部分：GET 打 POST-only 端点必须 404
+                status, _h, raw = self._request(base, cookie, "GET", "/api/timeline/get")
+                self.assertEqual(status, 404)
+            finally:
+                manager.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
