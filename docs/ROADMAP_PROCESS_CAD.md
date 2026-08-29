@@ -1,48 +1,104 @@
-# ROADMAP_PROCESS_CAD — Milestone Roadmap
+# ROADMAP_PROCESS_CAD — M0–M12
 
-One screen of truth for "what now". Detailed acceptance criteria live in
-`docs/superpowers/specs/`; task-level plans in `docs/superpowers/plans/`.
+One screen of truth for "what now". Target architecture: `docs/ARCHITECTURE_TARGET.md`;
+decisions: `docs/DECISIONS.md`; pre-constitution milestone designs remain in
+`docs/superpowers/specs|plans/` as history.
 
-## M1 — Process CAD Shell (complete)
+## M0 — Project Constitution ✅ (this milestone)
 
-Fixed three-pane WebUI workspace (Process Flow / Parameters / 3D Viewer), step
-drag-and-drop + rename, five new process primitives (Strip / Fill / Wafer Flip / Bonding /
-Thinning), WebGL2 viewer with seven standard views + perspective/orthographic cameras +
-X/Y/Z independent clipping, MaterialVisual-driven materials, snapshot timeline with
-Previous/Next, atomic undo/redo, structured step errors, three demo recipes
-(Basic Trench / Spacer Formation / Bonding + Thinning), reproducible baseline runner
-(`tools/run_process_cad_baseline.py`).
+`AGENTS.md`, `docs/ARCHITECTURE_TARGET.md`, `docs/DECISIONS.md`, this roadmap.
+Owner decision 2026-08-29: target stack React/TS/Vite + Three.js + Python (FastAPI path)
++ C++ ViennaPS route; strangler migration, never big-bang. GLM wrote; pending Codex review.
 
-Status: feature-complete on branch `zcode/process-cad-shell` (baseline and CAD tests green,
-fixed-physical-domain 128³ baseline with structural checks ok, browser acceptance passed). Pending: merge with
-`codex/process-cad-shell`, then land on `main` and push `origin`.
+## M1 — Existing Runtime Regression Baseline (in progress)
 
-## M2 — Parameter Exploration (next)
+Goal: make the current Process CAD workflow usable (done) and lock it with golden tests.
 
-Parameter sweep / DOE across recipes, structural measurement presets, and run-to-run
-result comparison (overlay diffs of geometry/metrology between runs).
+Already delivered (on `zcode/process-cad-shell`, pending merge + review):
+- Fixed three-pane WebUI CAD shell; step drag/rename; snapshot timeline Previous/Next;
+  atomic undo/redo; structured step errors; five process primitives
+  (Strip/Fill/Flip/Bonding/Thinning); WebGL2 viewer (7 views, dual camera, X/Y/Z
+  clipping, MaterialVisual); full test suite green; reproducible baseline runner on a
+  fixed-physical-domain (640 nm) cubic grid with per-demo semantic structural checks
+  (`tools/run_process_cad_baseline.py`, commit `10f6fbd`).
 
-Candidate first task: a sweep runner that executes a recipe over a parameter grid
-headless and tabulates CD/metrology deltas, reusing the baseline runner's harness.
+Remaining for M1 — golden regression tests for five named flows:
 
-## M3 — Device-Level Bridge
+| Flow | Status |
+| --- | --- |
+| Basic Trench | ✅ demo + tests |
+| Spacer Formation | ✅ demo + tests |
+| Flip / Bond / Thin | ✅ demo + tests |
+| W Plug + CMP | ❌ to add |
+| Basic BEOL | ❌ to add |
 
-Device region definition (S/D/G), electrodes, meshing export, and an electrical solving
-interface stub. Geometry fidelity improvements needed here (contact surfaces, rounding).
+Golden tests assert final geometry/material composition per flow so later migrations
+(M2–M12) can prove behavior preservation.
 
-## M4 — Assembly & Calibration
+## M2 — React Shell
 
-Stricter multi-wafer assembly semantics, calibration data ingestion, and reproducible
-experiment packages (recipe + data + results bundled).
+`frontend/` with React + TypeScript + Vite: Process Flow, Parameters, Viewer shell,
+Timeline shell. Parallel client only; legacy WebUI untouched (ADR-012).
 
-## M5+ — External Backends
+## M3 — Three.js Viewer (React)
 
-ViennaPS-style surface-evolution backend behind a `GeometryBackend` abstraction
-(ADR-003). Only after the voxel workflow and viewer UX are validated.
+Mesh load, orbit/pan/zoom, six views + ISO, perspective/orthographic, X/Y/Z clipping,
+material visibility/transparency, selection, measurement visualization.
 
-## Continuous Engineering
+## M4 — Python API Facade
 
-- Incremental extraction of Worker / frontend / model subdomains out of the single file
-  (each extraction is its own reviewed milestone; ADR-004).
-- Stable CI running the five test modules + compile check + baseline.
-- Packaging and license review (PyQt5 GPL implications for binaries).
+Typed facade over the existing runtime: recipe, step, run, snapshot, geometry, materials.
+Then incremental standardization toward FastAPI + Pydantic (compat API first; ADR-013).
+
+## M5 — React Parity
+
+React reaches legacy-WebUI feature parity with regression tests green → legacy WebUI
+deprecated (not deleted before).
+
+## M6 — KLayout LayoutAdapter
+
+`LayoutAdapter` abstraction; gdstk + optional KLayout for GDS/OASIS, hierarchy, booleans,
+ROI; normalized mask geometry to lithography (ADR-016).
+
+## M7 — ProcessBackend Interface
+
+```text
+ProcessBackend -> VoxelBackend -> ProcessModel   (behavior unchanged)
+```
+
+## M8 — ViennaPS Sandbox
+
+Prototype only under `experiments/viennaps`; standalone validation (ADR-014).
+
+## M9 — ViennaPSBackend
+
+Accurate Mode behind the backend interface; capability model with explicit fallbacks.
+
+## M10 — GeometryScene / VTK Bridge
+
+Unified voxel + ViennaPS output → GeometryScene → VTK → Three.js (ADR-015).
+
+## M11 — Hybrid Fast/Accurate
+
+Per-process mode selection (e.g. Deposit FAST, HAR Etch ACCURATE, ALD ACCURATE,
+Fill/CMP/Bonding FAST).
+
+## M12 — Desktop Packaging
+
+macOS / Windows application packaging (license review for Qt/PyQt5 implications first).
+
+## Backlog (owner slots these into the sequence)
+
+- Parameter sweep / DOE runner with metrology comparison (natural fit after M4).
+- Device regions, electrodes, meshing export, electrical-solve interface stub.
+- Calibration data ingestion; reproducible experiment packages.
+- Incremental extraction of Worker/frontend/model subdomains; stable CI.
+- Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
+
+## Current Branch State (2026-08-29)
+
+- `zcode/process-cad-shell` — M1 shell + M0 constitution + calibrated baseline;
+  pushed to `backup`.
+- `codex/process-cad-shell` — parallel line at `4c3e32f` (M1 work).
+- Next: Codex reviews the M0/M1 diff → merge both lines → land on `main` → begin M1
+  golden-test completion (W Plug + CMP, Basic BEOL).

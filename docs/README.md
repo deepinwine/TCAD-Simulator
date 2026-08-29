@@ -12,8 +12,9 @@ This documentation describes the architecture and algorithms of `tcad_simulator.
 - [MASK_LITHOGRAPHY.md](MASK_LITHOGRAPHY.md): mask import/rasterization, DRC, aerial image approximation, Dill exposure, PEB, and resist development.
 - [AGENT_KNOWLEDGE.md](AGENT_KNOWLEDGE.md): optional literature ingestion, local retrieval, process mapping, physics audit, skills, and LLM-assisted recipe design.
 - [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md): local setup, verification, cross-platform scripts, optional split tooling, GitHub upload checklist, and license notes.
-- [ROADMAP_PROCESS_CAD.md](ROADMAP_PROCESS_CAD.md): milestone roadmap (M1 CAD Shell through M5 external backends) with current status.
+- [ROADMAP_PROCESS_CAD.md](ROADMAP_PROCESS_CAD.md): milestone roadmap M0–M12 (constitution → golden baseline → React migration → ViennaPS) with current status.
 - [DECISIONS.md](DECISIONS.md): numbered architecture decisions (ADRs); read before proposing alternatives.
+- [ARCHITECTURE_TARGET.md](ARCHITECTURE_TARGET.md): long-term target architecture, layer responsibilities, and strangler migration strategy.
 - Project constitution for contributors and coding agents: [`AGENTS.md`](../AGENTS.md) at the repository root.
 
 ## Main Entry Points / 主入口
