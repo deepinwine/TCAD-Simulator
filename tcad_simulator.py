@@ -32377,8 +32377,8 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     return step
 
 
-def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
-    """Return fresh, portable definitions for the built-in Process CAD demos."""
+def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Return fresh, portable definitions for the built-in Process CAD flows."""
 
     def _step(
         name: str,
@@ -32593,6 +32593,12 @@ def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, An
             "steps": bonding_steps,
         },
     }
+
+
+def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Compatibility wrapper for callers that still use the legacy WebUI helper."""
+
+    return load_demo_flows(material_db)
 
 
 def _infer_exposure_advanced_enable(params: Any) -> int:
@@ -62050,7 +62056,7 @@ def _webui_worker_main(
                     "present_material_ids": _present_material_ids(),
                     "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
-                    "demo_recipes": _webui_demo_recipes(material_db),
+                    "demo_recipes": load_demo_flows(material_db),
                     "history": history_index,
                     "recipes": history_index,
                     "exports": exports_list,

@@ -108,6 +108,21 @@ class DemoRecipeRegistryTests(unittest.TestCase):
             0,
         )
 
+    def test_public_registry_is_canonical_and_legacy_wrapper_is_isolated(self):
+        database = tcad.MaterialDatabase()
+
+        public = tcad.load_demo_flows(database)
+        legacy = tcad._webui_demo_recipes(database)
+
+        self.assertEqual(public, legacy)
+        self.assertIsNot(public, legacy)
+        public["Basic Trench"]["steps"][0]["params"]["thickness_nm"] = -1
+        fresh = tcad.load_demo_flows(database)
+        self.assertGreater(
+            fresh["Basic Trench"]["steps"][0]["params"]["thickness_nm"],
+            0,
+        )
+
     def test_demo_sequences_express_the_designed_process_order(self):
         database = tcad.MaterialDatabase()
         demos = tcad._webui_demo_recipes(database)
