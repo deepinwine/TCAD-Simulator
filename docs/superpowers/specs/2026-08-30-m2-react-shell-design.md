@@ -116,8 +116,8 @@ frontend/
 
 - `api/client.ts`：统一 `fetch`、Cookie、JSON envelope、binary、取消和错误转换。
 - `api/schemas.ts`：对服务端边界做轻量 runtime guard，不重复 Pydantic。
-- `state/appReducer.ts`：管理 bootstrap、Recipe、选择、draft、运行状态、Timeline 和 model
-  revision。
+- `state/appReducer.ts`：管理 bootstrap、Recipe、选择、draft、运行状态、Timeline 和 Viewer
+  refresh generation。
 - `ProcessFlowPane`：显示步骤、摘要、enabled 和 runtime status；本次只处理选择。
 - `ParameterPanel`：根据工厂参数规格生成通用表单，不出现 process-specific 分支。
 - `TimelineBar`：只允许恢复 `snapshot_valid=true` 的快照。
@@ -172,7 +172,8 @@ build`，而不是空白页或 Python traceback。
 TypeScript 类型只描述客户端真正读取的字段。所有响应先作为 `unknown` 进入 runtime guard，
 再转成以下领域视图：
 
-- `InitView`：Recipe、steps、factories、materials、model、ui_state；
+- `InitView`：Recipe、steps、factories、materials、model、ui_state；`/api/init` 的 model summary
+  不包含 revision，客户端不得臆造该字段；
 - `StepView`：index、name、instance_name、enabled、params、runtime_status；
 - `ParameterSpecView`：name、type、label、default、范围和选项；
 - `TimelineView`：items、current、snapshot_valid；
@@ -192,9 +193,9 @@ flowchart TD
     Draft -->|合法| Save["POST /api/step/set"]
     Draft -->|非法| FieldError["只显示字段错误"]
     Save --> Status["替换服务端 step / statuses"]
-    Status --> Revision{"model revision 变化？"}
-    Revision -->|是| Mesh["manifest + STL"]
-    Revision -->|否| Ready
+    Status --> Refresh{"模型变更操作成功？"}
+    Refresh -->|是| Mesh["manifest.rev + STL"]
+    Refresh -->|否| Ready
     Mesh --> Ready
 ```
 
@@ -216,8 +217,8 @@ flowchart TD
 ### 7.3 执行
 
 Run Selected、Run To 和 Run All 共用单一 mutation gate。同一 Session 中只允许一个执行请求；
-运行期间禁用参数保存和其他运行按钮。服务端返回后统一更新 Recipe 状态、model revision 和
-错误信息。
+运行期间禁用参数保存和其他运行按钮。服务端返回后统一更新 Recipe 状态、可用的
+`model_revision` 提示和错误信息，并递增 Viewer refresh generation。
 
 执行失败时，失败步骤显示 `Error`，Parameters 显示结构化错误，Viewer 保留最后一次成功
 加载的几何。客户端不假设回滚成功，而是展示 `rolled_back` 的真实值。
@@ -227,14 +228,14 @@ Run Selected、Run To 和 Run All 共用单一 mutation gate。同一 Session �
 Timeline 从 `/api/timeline/get` 获取。Previous、Next 和 slider 只选择
 `snapshot_valid=true` 的节点。恢复调用 `/api/timeline/restore`，不触发 `/api/run/*`。
 
-恢复后显示「历史快照」状态和当前 step index。React 不在内存中复制模型；历史语义由现有
-Worker snapshot 实现负责。
+恢复后显示「历史快照」状态和当前 step index，并递增 Viewer refresh generation。React 不在
+内存中复制模型；历史语义由现有 Worker snapshot 实现负责。
 
 ## 8. 最小 Three.js Viewer
 
 ### 8.1 加载
 
-首次 bootstrap 完成及 model revision 变化时：
+首次 bootstrap 完成，以及 Run 或 Timeline restore 这类模型变更操作成功时：
 
 1. 请求 `/api/preview/manifest`；
 2. 对 manifest 中 `visible=true` 的材料请求 `/api/preview/stl`；
@@ -243,8 +244,10 @@ Worker snapshot 实现负责。
 5. 所有材料加入同一 `THREE.Group`；
 6. 计算可见 geometry 的 `Box3` 并执行 Fit。
 
-材料请求限制并发数，避免大配方一次创建过多连接。revision、material id 和加载序号共同
-标识请求。新的 revision 到来时取消旧请求，并丢弃已经返回的旧结果。
+材料请求限制并发数，避免大配方一次创建过多连接。manifest 返回的 `rev` 是几何 revision 的
+权威来源；`/api/init` 不提供该字段。refresh generation 只负责触发 manifest 检查，若
+manifest `rev` 未变化则复用现有 geometry。revision、material id 和加载序号共同标识请求；
+新的 refresh generation 到来时取消旧请求，并丢弃已经返回的旧结果。
 
 ### 8.2 交互
 
@@ -315,7 +318,7 @@ TcadApiError
 - 参数合法/非法路径及 350 ms debounce；
 - 高密度三栏、步骤选择、运行锁定和错误展示；
 - Timeline 只允许有效 snapshot；
-- revision 变化触发 mesh load，相机操作零 API；
+- bootstrap/模型变更操作触发 manifest 检查、相同 `rev` 不重复下载 mesh，相机操作零 API；
 - 旧 mesh 请求取消、材料级失败隔离和资源 dispose。
 
 WebGLRenderer 在 jsdom 中通过窄接口注入替身；测试真实 mesh loader、状态机和生命周期，不测试
@@ -396,7 +399,8 @@ git diff --check
 4. Run Selected、Run To、Run All 显示真实状态和结构化失败。
 5. Previous/Next 只恢复有效快照，不隐式执行工艺。
 6. Viewer 显示真实材料 STL，可拖拽旋转、平移、缩放、Fit 和 ISO。
-7. 相机交互不产生 API 请求；revision 变化才刷新网格。
+7. 相机交互不产生 API 请求；bootstrap 和模型变更操作检查 manifest，相同 `rev` 不重复下载
+   网格。
 8. WebGL 或单材料加载失败有明确、隔离的可见错误。
 9. 前端测试、typecheck、build 和现有 Python 回归全部通过。
 10. 128³ 五流程基准仍为 `ok: true`，FonaTech `origin` 未推送。
