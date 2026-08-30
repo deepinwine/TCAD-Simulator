@@ -795,6 +795,81 @@ class ReactStudioStaticTests(unittest.TestCase):
             finally:
                 manager.stop()
 
+    def test_studio_rejects_dist_parent_switch_before_root_open(self):
+        import os
+        from unittest import mock
+
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            self.skipTest("POSIX dir_fd safe-open primitives unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launch_dir = root / "launch"
+            frontend_dir = launch_dir / "frontend"
+            dist_dir = frontend_dir / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            (assets_dir / "race.js").write_text("SAFE ASSET", encoding="utf-8")
+            canonical_dist = dist_dir.resolve()
+
+            outside_frontend = root / "outside-frontend"
+            outside_assets = outside_frontend / "dist" / "assets"
+            outside_assets.mkdir(parents=True)
+            (outside_frontend / "dist" / "index.html").write_text(
+                "External React Shell", encoding="utf-8"
+            )
+            (outside_assets / "race.js").write_text("EXTERNAL SECRET", encoding="utf-8")
+            saved_frontend = root / "saved-frontend"
+            try:
+                probe = root / "symlink-probe"
+                probe.symlink_to(outside_frontend, target_is_directory=True)
+                probe.unlink()
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+
+            original_os_open = os.open
+            switched = False
+
+            def switch_parent():
+                nonlocal switched
+                if switched:
+                    return
+                frontend_dir.rename(saved_frontend)
+                frontend_dir.symlink_to(outside_frontend, target_is_directory=True)
+                switched = True
+
+            def switch_before_root_open(path, flags, mode=0o777, *, dir_fd=None):
+                path_text = os.fspath(path)
+                if not switched and (
+                    (dir_fd is None and path_text == str(canonical_dist))
+                    or (dir_fd is not None and path_text == "frontend")
+                ):
+                    switch_parent()
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)
+
+            patched_dir_fd_support = set(os.supports_dir_fd)
+            patched_dir_fd_support.add(switch_before_root_open)
+
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                with (
+                    mock.patch.object(os, "open", new=switch_before_root_open),
+                    mock.patch.object(os, "supports_dir_fd", patched_dir_fd_support),
+                ):
+                    status, headers, raw = self._request(
+                        manager.url, "GET", "/studio/assets/race.js"
+                    )
+                self.assertTrue(switched, "dist parent race hook did not run")
+                self.assertIn(status, (400, 403, 404, 500))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"EXTERNAL SECRET", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
     def test_studio_errors_do_not_expose_oserror_details(self):
         import os
         from unittest import mock

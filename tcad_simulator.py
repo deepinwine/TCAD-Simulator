@@ -73325,17 +73325,40 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
             return None
 
+        dist_parts = tuple(dist_dir.parts)
+        if (
+            not dist_dir.is_absolute()
+            or not dist_parts
+            or dist_parts[0] != os.sep
+            or any(part in {"", ".", "..", os.sep} for part in dist_parts[1:])
+        ):
+            self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
+            return None
+
         opened_fds: List[int] = []
         cloexec = int(getattr(os, "O_CLOEXEC", 0))
         try:
-            root_fd = os.open(
-                str(dist_dir),
+            anchor_fd = os.open(
+                os.sep,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
             )
-            opened_fds.append(root_fd)
-            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            opened_fds.append(anchor_fd)
+            if not stat.S_ISDIR(os.fstat(anchor_fd).st_mode):
                 self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
                 return None
+
+            root_fd = anchor_fd
+            for component in dist_parts[1:]:
+                child_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                    dir_fd=root_fd,
+                )
+                opened_fds.append(child_fd)
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
+                    return None
+                root_fd = child_fd
 
             parent_fd = root_fd
             final_fd: Optional[int] = None
@@ -73479,6 +73502,14 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 raise OSError(ctypes.get_last_error(), "GetFileInformationByHandle failed")
             return info
 
+        def _normalize_windows_path(path: Any) -> str:
+            value = os.fspath(path)
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+            return os.path.normcase(os.path.normpath(value))
+
         def _handle_path(handle: int) -> str:
             size = int(get_final_path(wintypes.HANDLE(handle), None, 0, 0))
             if size <= 0:
@@ -73487,14 +73518,10 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             written = int(get_final_path(wintypes.HANDLE(handle), buffer, len(buffer), 0))
             if written <= 0 or written >= len(buffer):
                 raise OSError(ctypes.get_last_error(), "GetFinalPathNameByHandleW failed")
-            value = buffer.value
-            if value.startswith("\\\\?\\UNC\\"):
-                value = "\\\\" + value[8:]
-            elif value.startswith("\\\\?\\"):
-                value = value[4:]
-            return os.path.normcase(os.path.normpath(value))
+            return _normalize_windows_path(buffer.value)
 
         target_path = dist_dir.joinpath(*parts)
+        canonical_root = _normalize_windows_path(dist_dir)
         try:
             for component_count in range(1, len(parts) + 1):
                 component_path = dist_dir.joinpath(*parts[:component_count])
@@ -73517,6 +73544,11 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
                 return None
 
+            root_final = _handle_path(root_handle)
+            if root_final != canonical_root:
+                self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
+                return None
+
             file_handle = _open_handle(str(target_path), generic_read, file_flag_sequential_scan)
             file_info = _handle_info(file_handle)
             if (
@@ -73526,7 +73558,6 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
                 return None
 
-            root_final = _handle_path(root_handle)
             file_final = _handle_path(file_handle)
             try:
                 if os.path.commonpath([root_final, file_final]) != root_final:
