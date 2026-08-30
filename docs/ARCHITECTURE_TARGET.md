@@ -66,9 +66,10 @@ deprecate members only behind a versioned facade — never by breaking the froze
 before React parity (M5).
 
 Frozen core — one row per endpoint, verified against the HTTP dispatchers in
-`tcad_simulator.py`. "JSON" responses are `{"ok": bool, …}` envelopes (successful worker
-results under `result`). Binary endpoints send raw bytes on success (JSON error envelopes
-on 4xx/5xx). Contract tests: `tests/test_webui_cad_shell.py::M2ApiContractTests`
+`tcad_simulator.py`. Unless a row explicitly says "裸 JSON", JSON responses are
+`{"ok": bool, …}` envelopes (successful worker results under `result`). Binary endpoints
+send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
+`tests/test_webui_cad_shell.py::M2ApiContractTests`
 (behavioral) and `::M2ApiDocConsistencyTests` (doc vs dispatcher drift).
 
 | Endpoint | Method | Request (minimal) | Response |
@@ -110,9 +111,9 @@ on 4xx/5xx). Contract tests: `tests/test_webui_cad_shell.py::M2ApiContractTests`
 | `/api/slice` | GET | query `axis`、`index`、`kind` | JSON（`result.data_b64` 内嵌二进制） |
 | `/api/render/gbuffer` | POST | render 设置 JSON | **binary**（支持 gzip），JSON error |
 | `/api/material_colors` | POST | `{action, mode?, …}` | JSON |
-| `/api/mask/preview` | GET | query `file`（已上传掩膜文件名，`.npy` 渲染为 PNG） | **binary** `image/png`，JSON error |
+| `/api/mask/preview` | GET | query `file`（已上传掩膜文件名） | **binary** `image/*`（`.npy` → `image/png`，其他支持格式保留源 MIME），JSON error |
 | `/api/mask/preview_step` | GET | query `step_index`（或 `index`） | **binary**（默认 `image/png`），JSON error |
-| `/api/upload/mask` | POST | **multipart/form-data**：`file` 字段 + query `step_index` | JSON；`path` 为保存后完整路径（含哈希文件名），`result.mask_name` 为基名 |
+| `/api/upload/mask` | POST | **multipart/form-data**：`file` 字段 + query `step_index` | JSON；顶层 `path` 为保存后完整路径（含哈希文件名），`result` 为嵌套的 `set_step` 封套，基名位于 `result.result.params.mask_name` |
 | `/api/history/load` | POST | `{id, current_name?}` | JSON |
 | `/api/ui_state` | POST | `{recipe_id, ui_state}` | JSON |
 | `/api/save` | POST | `{}` | JSON |

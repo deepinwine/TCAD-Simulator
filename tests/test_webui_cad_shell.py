@@ -451,8 +451,7 @@ class M2ApiContractTests(unittest.TestCase):
         manager.start()
         return manager
 
-    @staticmethod
-    def _request(base, cookie, method, path, body=None, raw_body=None, content_type=None):
+    def _request(self, base, cookie, method, path, body=None, raw_body=None, content_type=None):
         import http.client
         import json as _json
         from urllib.parse import urlparse
@@ -473,6 +472,9 @@ class M2ApiContractTests(unittest.TestCase):
         resp_headers = {k.lower(): v for k, v in response.getheaders()}
         status = response.status
         conn.close()
+        if getattr(self, "_record_contract_requests", False):
+            normalized_path = str(path).split("?", 1)[0]
+            self._contract_requests.add((str(method).upper(), normalized_path))
         return status, resp_headers, raw
 
     @staticmethod
@@ -654,6 +656,15 @@ class M2ApiContractTests(unittest.TestCase):
             self.assertFalse(raw[:1] == b"{", f"{ctx}: expected binary, got JSON")
             self.assertNotIn("json", ctype.lower(), f"{ctx}: binary endpoint returned JSON content-type {ctype!r}")
 
+        def multipart_file(boundary, filename, data):
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+        self._contract_requests = set()
+        self._record_contract_requests = True
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = self._start_manager(temp_dir)
             try:
@@ -670,7 +681,12 @@ class M2ApiContractTests(unittest.TestCase):
                 steps = [
                     ("POST", "/api/recipe/new", {"name": "M2 walk"}, "json"),
                     ("POST", "/api/recipe/add", {"name": "Spin Resist"}, "json"),
-                    ("POST", "/api/recipe/add", {"name": "Mask Exposure"}, "json"),
+                    (
+                        "POST",
+                        "/api/recipe/insert_steps",
+                        {"steps": [{"name": "Mask Exposure"}]},
+                        "json",
+                    ),
                     ("POST", "/api/recipe/duplicate", {"index": 2}, "json"),
                     ("POST", "/api/recipe/remove", {"index": 3}, "json"),
                     ("POST", "/api/recipe/move", {"index": 0, "to": 1}, "json"),
@@ -711,6 +727,16 @@ class M2ApiContractTests(unittest.TestCase):
                 self.assertIsInstance(exported_blob, dict)
                 self.assertIn("steps_full", exported_blob)
 
+                status, headers, raw = self._request(
+                    base,
+                    cookie,
+                    "POST",
+                    "/api/recipe/import",
+                    {"recipe": exported_blob, "autosave_current": False},
+                )
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/recipe/import")
+
                 for method, path, body in (
                     ("POST", "/api/history/load", {"id": recipe_id}),
                     ("POST", "/api/recipe/load", {"id": recipe_id}),
@@ -738,11 +764,7 @@ class M2ApiContractTests(unittest.TestCase):
                 np.save(buf, np.zeros((8, 8), dtype=bool))
                 npy_bytes = buf.getvalue()
                 boundary = "tcadcontractboundary"
-                multipart = (
-                    f"--{boundary}\r\n"
-                    'Content-Disposition: form-data; name="file"; filename="m2_mask.npy"\r\n'
-                    "Content-Type: application/octet-stream\r\n\r\n"
-                ).encode() + npy_bytes + f"\r\n--{boundary}--\r\n".encode()
+                multipart = multipart_file(boundary, "m2_mask.npy", npy_bytes)
                 status, headers, raw = self._request(
                     base,
                     cookie,
@@ -754,6 +776,12 @@ class M2ApiContractTests(unittest.TestCase):
                 self.assertEqual(status, 200, raw[:300])
                 check_json(raw, "/api/upload/mask")
                 upload_resp = json.loads(raw)
+                self.assertTrue(upload_resp["ok"])
+                self.assertTrue(upload_resp["result"]["ok"])
+                self.assertEqual(
+                    upload_resp["result"]["result"]["params"]["mask_name"],
+                    "m2_mask",
+                )
                 uploaded = upload_resp.get("path") or self._first_string_ending(upload_resp, (".npy",))
                 self.assertIsNotNone(uploaded, "upload/mask should echo the stored path")
                 uploaded = uploaded.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]  # preview 只接受文件名
@@ -766,6 +794,25 @@ class M2ApiContractTests(unittest.TestCase):
                 status, headers, raw = self._request(base, cookie, "GET", "/api/mask/preview_step?step_index=2")
                 self.assertEqual(status, 200, raw[:200])
                 check_binary(headers, raw, "/api/mask/preview_step")
+
+                # 非 NPY 图片保留源 MIME，防止文档再次把 preview 写死为 PNG。
+                bmp_boundary = "tcadcontractbmpboundary"
+                bmp_body = multipart_file(bmp_boundary, "m2_mask.bmp", b"BMtcad-contract")
+                status, headers, raw = self._request(
+                    base,
+                    cookie,
+                    "POST",
+                    "/api/upload/mask?step_index=2",
+                    raw_body=bmp_body,
+                    content_type=f"multipart/form-data; boundary={bmp_boundary}",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                bmp_upload = json.loads(raw)
+                bmp_name = bmp_upload["path"].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                status, headers, raw = self._request(base, cookie, "GET", f"/api/mask/preview?file={bmp_name}")
+                self.assertEqual(status, 200, raw[:200])
+                check_binary(headers, raw, "/api/mask/preview (.bmp)")
+                self.assertIn("image/bmp", headers.get("content-type", ""))
 
                 # --- preview geometry: JSON manifest + binary payloads ---
                 status, headers, raw = self._request(base, cookie, "GET", "/api/preview/manifest?mode=solid&face_limit=2000")
@@ -828,7 +875,20 @@ class M2ApiContractTests(unittest.TestCase):
                 status, headers, raw = self._request(base, cookie, "POST", "/api/run/all", {})
                 self.assertEqual(status, 200, raw[:200])
                 check_json(raw, "/api/run/all")
+
+                documented = M2ApiDocConsistencyTests._doc_entries()
+                expected = {
+                    (method, path)
+                    for path, method in documented.items()
+                    if path != "/api/run/until"
+                }
+                self.assertEqual(
+                    expected,
+                    self._contract_requests,
+                    "lifecycle walk must exercise every primary documented endpoint",
+                )
             finally:
+                self._record_contract_requests = False
                 manager.stop()
 
 
@@ -838,25 +898,33 @@ class M2ApiDocConsistencyTests(unittest.TestCase):
     DOCS_REL = Path("docs") / "ARCHITECTURE_TARGET.md"
 
     @classmethod
-    def _doc_entries(cls):
+    def _doc_rows(cls):
         import re
 
         repo_root = Path(__file__).resolve().parents[1]
         text = (repo_root / cls.DOCS_REL).read_text(encoding="utf-8")
         section = text.split("## M2 Compatibility API", 1)[1].split("## Frontend Structure", 1)[0]
-        entries = {}
+        rows = {}
         for line in section.splitlines():
             stripped = line.strip()
             if not stripped.startswith("| `/api/"):
                 continue
             cells = [c.strip() for c in stripped.strip("|").split("|")]
             match = re.match(r"`(/api/[a-z_/-]+)`", cells[0])
-            if not match or len(cells) < 2:
+            if not match or len(cells) < 4:
                 continue
             method = cells[1].strip().strip("`").upper()
             assert method in {"GET", "POST"}, f"bad method cell: {cells[:2]!r}"
-            entries[match.group(1)] = method
-        return entries
+            rows[match.group(1)] = {
+                "method": method,
+                "request": cells[2],
+                "response": cells[3],
+            }
+        return rows
+
+    @classmethod
+    def _doc_entries(cls):
+        return {path: row["method"] for path, row in cls._doc_rows().items()}
 
     @classmethod
     def _dispatcher_routes(cls):
@@ -907,6 +975,22 @@ class M2ApiDocConsistencyTests(unittest.TestCase):
     def test_documented_alias_matches_dispatcher(self):
         _get_routes, post_routes = self._dispatcher_routes()
         self.assertIn("/api/run/until", post_routes, "documented alias /api/run/until missing from POST dispatcher")
+
+    def test_special_response_contracts_match_runtime_shapes(self):
+        rows = self._doc_rows()
+        mask_response = rows["/api/mask/preview"]["response"]
+        self.assertIn("image/*", mask_response)
+        self.assertIn(".npy", mask_response)
+        self.assertIn("image/png", mask_response)
+
+        upload_response = rows["/api/upload/mask"]["response"]
+        self.assertIn("顶层 `path`", upload_response)
+        self.assertIn("`result.result.params.mask_name`", upload_response)
+        self.assertNotIn("`result.mask_name`", upload_response)
+
+        export_response = rows["/api/recipe/export"]["response"]
+        self.assertIn("裸 recipe blob", export_response)
+        self.assertIn("无 `ok` 封套", export_response)
 
 
 if __name__ == "__main__":
