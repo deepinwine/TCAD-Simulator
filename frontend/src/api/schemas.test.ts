@@ -7,6 +7,7 @@ import {
   parseRunEnvelope,
   parseSetStepEnvelope,
   parseTimelineEnvelope,
+  parseTimelineRestoreEnvelope,
 } from './schemas';
 
 const validStep = {
@@ -30,7 +31,12 @@ const validInit = {
   ok: true,
   result: {
     recipe: [validStep],
-    model: {grid_shape: [64, 64, 96], voxel_size_nm: 10, threads: 4},
+    model: {
+      grid_shape: [64, 64, 96],
+      voxel_size_nm: 10,
+      threads: 4,
+      metrics: [['Max height (nm)', '200.0'], ['Silicon volume (µm³)', '1.25']],
+    },
     recipe_factories: ['Initialize Wafer'],
     materials: [{id: 1, name: 'Silicon', color: [0.6, 0.6, 0.65], enabled: true}],
     ui_state: {selected: 0},
@@ -115,6 +121,29 @@ describe('mutation and timeline schemas', () => {
       reason: 'disabled',
     });
     expect(parseRunEnvelope({ok: true, result: {model_revision: 7}}).modelRevision).toBe(7);
+  });
+
+  it('run 和 timeline restore 容忍客户端未读取的真实 metrics 二维数组', () => {
+    const model = validInit.result.model;
+    expect(parseRunEnvelope({ok: true, result: {model}}).model).toMatchObject({
+      gridShape: [64, 64, 96],
+      voxelSizeNm: 10,
+    });
+
+    const restored = parseTimelineRestoreEnvelope({
+      ok: true,
+      result: {
+        timeline: {
+          items: [{index: 0, state: 'current', runtime_status: 'done', snapshot_valid: true}],
+          current: 0,
+        },
+        model,
+        recipe: [validStep],
+        log: ['restored'],
+      },
+    });
+    expect(restored.model).not.toHaveProperty('metrics');
+    expect(restored.recipe[0].index).toBe(0);
   });
 
   it('解析 Timeline 并校验 snapshot_valid', () => {

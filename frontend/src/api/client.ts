@@ -1,4 +1,5 @@
 import {
+  ApiContractError,
   parseInitEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
@@ -67,39 +68,53 @@ function booleanField(source: Record<string, unknown>, key: string): boolean | u
 }
 
 function flatStepDetails(source: Record<string, unknown>): Record<string, unknown> | undefined {
-  const fields: Array<[string, string]> = [
-    ['step_index', 'stepIndex'],
-    ['instance_name', 'instanceName'],
-    ['step_type', 'stepType'],
-    ['rollback_error', 'rollbackError'],
-  ];
   const details: Record<string, unknown> = {};
-  for (const [wireName, clientName] of fields) {
-    if (source[wireName] !== undefined) details[clientName] = source[wireName];
+  if (
+    typeof source.step_index === 'number'
+    && Number.isFinite(source.step_index)
+    && Number.isInteger(source.step_index)
+  ) {
+    details.stepIndex = source.step_index;
+  }
+  if (typeof source.instance_name === 'string') details.instanceName = source.instance_name;
+  if (typeof source.step_type === 'string') details.stepType = source.step_type;
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
+function safeExplicitDetails(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const details: Record<string, unknown> = {};
+  if (typeof value.index === 'number' && Number.isFinite(value.index) && Number.isInteger(value.index)) {
+    details.index = value.index;
   }
   return Object.keys(details).length > 0 ? details : undefined;
 }
 
 function toApiError(status: number, payload: unknown): TcadApiError {
   const source = isRecord(payload) ? payload : {};
-  const explicitDetails = source.details;
+  const explicitDetails = safeExplicitDetails(source.details);
   const stepDetails = flatStepDetails(source);
   let details = explicitDetails;
   if (stepDetails !== undefined) {
-    details = isRecord(explicitDetails) ? {...explicitDetails, ...stepDetails} : stepDetails;
+    details = explicitDetails !== undefined ? {...explicitDetails, ...stepDetails} : stepDetails;
   }
   const message = stringField(source, 'error')
     ?? stringField(source, 'message')
     ?? `TCAD 请求失败（HTTP ${status}）。`;
+  const code = stringField(source, 'code');
   return new TcadApiError(message, {
     status,
-    code: stringField(source, 'code'),
+    code,
     errorType: stringField(source, 'error_type'),
     parameterPath: stringField(source, 'parameter_path'),
     suggestion: stringField(source, 'suggestion'),
     rolledBack: booleanField(source, 'rolled_back'),
     details,
-    causeValue: payload,
+    causeValue: {
+      kind: 'server_error',
+      status,
+      ...(code !== undefined ? {code} : {}),
+    },
   });
 }
 
@@ -182,32 +197,55 @@ export async function apiBinary(path: string, signal?: AbortSignal): Promise<Arr
     credentials: 'same-origin',
     signal,
   });
-  if (response.ok) {
-    return response.arrayBuffer();
-  }
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (contentType.includes('json')) {
     const payload = await readJsonSafely(response);
-    throw toApiError(response.status, payload);
+    if (!response.ok || !isSuccessfulEnvelope(payload)) {
+      throw toApiError(response.status, payload);
+    }
+    throw new TcadApiError('期望二进制资源，但 TCAD 服务返回了 JSON。', {
+      status: response.status,
+      code: 'unexpected_json_response',
+    });
   }
-  throw new TcadApiError(`二进制资源请求失败（HTTP ${response.status}）。`, {
-    status: response.status,
-    code: 'binary_request_failed',
-  });
+  if (!response.ok) {
+    throw new TcadApiError(`二进制资源请求失败（HTTP ${response.status}）。`, {
+      status: response.status,
+      code: 'binary_request_failed',
+    });
+  }
+  try {
+    return await response.arrayBuffer();
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new TcadApiError('无法读取 TCAD 二进制资源。', {
+      status: response.status,
+      code: 'binary_read_failed',
+    });
+  }
+}
+
+function requireRequestInteger(value: number, path: string, minimum: number): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < minimum) {
+    throw new ApiContractError(path, `integer >= ${minimum}`);
+  }
+  return value;
 }
 
 function previewManifestPath(request: PreviewManifestRequest): string {
   const query = new URLSearchParams();
   if (request.mode !== undefined) query.set('mode', request.mode);
-  if (request.faceLimit !== undefined) query.set('face_limit', String(request.faceLimit));
+  if (request.faceLimit !== undefined) {
+    query.set('face_limit', String(requireRequestInteger(request.faceLimit, 'request.faceLimit', 1)));
+  }
   const suffix = query.toString();
   return suffix ? `/api/preview/manifest?${suffix}` : '/api/preview/manifest';
 }
 
 function previewStlPath(request: PreviewStlRequest): string {
   const query = new URLSearchParams({
-    mat_id: String(request.materialId),
-    rev: String(request.revision),
+    mat_id: String(requireRequestInteger(request.materialId, 'request.materialId', 1)),
+    rev: String(requireRequestInteger(request.revision, 'request.revision', 0)),
     mode: request.mode ?? 'solid',
   });
   return `/api/preview/stl?${query.toString()}`;
@@ -219,25 +257,28 @@ export function createTcadApi(): TcadApi {
       return apiGetJson('/api/init', parseInitEnvelope, signal);
     },
     setStep(request: SetStepRequest, signal?: AbortSignal): Promise<SetStepView> {
+      const index = requireRequestInteger(request.index, 'request.index', 0);
       return apiPostJson(
         '/api/step/set',
         {
-          index: request.index,
+          index,
           ...(request.enabled !== undefined ? {enabled: request.enabled} : {}),
           ...(request.params !== undefined ? {params: request.params} : {}),
           ...(request.loop !== undefined ? {loop: request.loop} : {}),
           ...(request.group !== undefined ? {group: request.group} : {}),
           ...(request.noAutosave !== undefined ? {no_autosave: request.noAutosave} : {}),
         },
-        payload => parseSetStepEnvelope(payload, request.index),
+        payload => parseSetStepEnvelope(payload, index),
         signal,
       );
     },
     runStep(index: number, signal?: AbortSignal): Promise<RunView> {
-      return apiPostJson('/api/run/step', {index}, parseRunEnvelope, signal);
+      const validatedIndex = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson('/api/run/step', {index: validatedIndex}, parseRunEnvelope, signal);
     },
     runTo(index: number, signal?: AbortSignal): Promise<RunView> {
-      return apiPostJson('/api/run/to', {index}, parseRunEnvelope, signal);
+      const validatedIndex = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson('/api/run/to', {index: validatedIndex}, parseRunEnvelope, signal);
     },
     runAll(signal?: AbortSignal): Promise<RunView> {
       return apiPostJson('/api/run/all', {}, parseRunEnvelope, signal);
@@ -246,7 +287,13 @@ export function createTcadApi(): TcadApi {
       return apiPostJson('/api/timeline/get', {}, parseTimelineEnvelope, signal);
     },
     restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView> {
-      return apiPostJson('/api/timeline/restore', {index}, parseTimelineRestoreEnvelope, signal);
+      const validatedIndex = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson(
+        '/api/timeline/restore',
+        {index: validatedIndex},
+        parseTimelineRestoreEnvelope,
+        signal,
+      );
     },
     getPreviewManifest(
       request: PreviewManifestRequest = {},
@@ -254,7 +301,7 @@ export function createTcadApi(): TcadApi {
     ): Promise<PreviewManifestView> {
       return apiGetJson(previewManifestPath(request), parsePreviewManifestEnvelope, signal);
     },
-    getPreviewStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer> {
+    getMaterialStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer> {
       return apiBinary(previewStlPath(request), signal);
     },
   };

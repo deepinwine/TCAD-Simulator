@@ -251,7 +251,6 @@ function parseModel(value: unknown, path: string): ModelSummaryView {
   if (threads !== undefined) parsed.threads = threads;
   if (substrateMaterial !== undefined) parsed.substrateMaterial = substrateMaterial;
   if (substrateThicknessNm !== undefined) parsed.substrateThicknessNm = substrateThicknessNm;
-  if (source.metrics !== undefined) parsed.metrics = requireRecord(source.metrics, `${path}.metrics`);
   return parsed;
 }
 

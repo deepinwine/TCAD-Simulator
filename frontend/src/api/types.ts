@@ -37,7 +37,6 @@ export interface ModelSummaryView {
   threads?: number;
   substrateMaterial?: string;
   substrateThicknessNm?: number;
-  metrics?: Record<string, unknown>;
 }
 
 export interface MaterialView {
@@ -154,5 +153,5 @@ export interface TcadApi {
     request?: PreviewManifestRequest,
     signal?: AbortSignal,
   ): Promise<PreviewManifestView>;
-  getPreviewStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer>;
+  getMaterialStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer>;
 }
