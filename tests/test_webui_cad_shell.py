@@ -626,6 +626,78 @@ class ReactStudioStaticTests(unittest.TestCase):
             finally:
                 manager.stop()
 
+    def test_studio_discards_bytes_when_file_changes_during_open(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist_dir = root / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            asset = assets_dir / "race.js"
+            asset.write_text("SAFE ASSET", encoding="utf-8")
+            resolved_asset = asset.resolve()
+            outside = root / "outside-secret.js"
+            outside.write_text("EXTERNAL SECRET", encoding="utf-8")
+            try:
+                probe = assets_dir / "symlink-probe"
+                probe.symlink_to(outside)
+                probe.unlink()
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+
+            original_open = Path.open
+            replaced = False
+
+            def replace_before_open(path_obj, *args, **kwargs):
+                nonlocal replaced
+                if path_obj == resolved_asset and not replaced:
+                    asset.unlink()
+                    asset.symlink_to(outside)
+                    replaced = True
+                return original_open(path_obj, *args, **kwargs)
+
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                with mock.patch.object(Path, "open", new=replace_before_open):
+                    status, headers, raw = self._request(
+                        manager.url, "GET", "/studio/assets/race.js"
+                    )
+                self.assertTrue(replaced, "race hook did not replace the asset")
+                self.assertIn(status, (400, 403, 404))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"EXTERNAL SECRET", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
+    def test_studio_rejects_real_directory_without_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            (assets_dir / "private.txt").write_text("DIRECTORY CONTENT", encoding="utf-8")
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(
+                    manager.url,
+                    "GET",
+                    "/studio/assets/",
+                    headers={"Accept": "text/html"},
+                )
+                self.assertIn(status, (403, 404))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"DIRECTORY CONTENT", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
 
 class M2ApiContractTests(unittest.TestCase):
     """Executable contract for the frozen M2 Compatibility API.

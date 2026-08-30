@@ -52,6 +52,7 @@ import pickle
 import re
 import random
 import secrets
+import stat
 import struct
 import sys
 import socket
@@ -73270,7 +73271,9 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
                 return
-            data = file_path.read_bytes()
+            data = self._read_studio_file_safely(file_path, dist_dir)
+            if data is None:
+                return
         except FileNotFoundError:
             self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
             return
@@ -73287,6 +73290,48 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             status=200,
             extra_headers={"Cache-Control": "no-store"},
         )
+
+    def _read_studio_file_safely(self, file_path: Path, dist_dir: Path) -> Optional[bytes]:
+        try:
+            before_resolved = file_path.resolve()
+            before_resolved.relative_to(dist_dir)
+            before_stat = file_path.lstat()
+            if stat.S_ISLNK(before_stat.st_mode) or not stat.S_ISREG(before_stat.st_mode):
+                self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
+                return None
+
+            with file_path.open("rb") as source:
+                opened_stat = os.fstat(source.fileno())
+                if not stat.S_ISREG(opened_stat.st_mode):
+                    self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
+                    return None
+                data = source.read()
+
+                after_resolved = file_path.resolve()
+                after_resolved.relative_to(dist_dir)
+                after_stat = file_path.lstat()
+                identities = {
+                    (before_stat.st_dev, before_stat.st_ino),
+                    (opened_stat.st_dev, opened_stat.st_ino),
+                    (after_stat.st_dev, after_stat.st_ino),
+                }
+                if (
+                    stat.S_ISLNK(after_stat.st_mode)
+                    or not stat.S_ISREG(after_stat.st_mode)
+                    or len(identities) != 1
+                ):
+                    self._send_json({"ok": False, "error": "Studio asset changed during read"}, status=403)
+                    return None
+                return data
+        except ValueError:
+            self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
+            return None
+        except FileNotFoundError:
+            self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
+            return None
+        except OSError as exc:
+            self._send_json({"ok": False, "error": f"Studio asset read failed: {exc}"}, status=500)
+            return None
 
     def _capacity_payload(self) -> Dict[str, Any]:
         mgr = self.server.manager
