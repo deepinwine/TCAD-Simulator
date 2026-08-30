@@ -10,7 +10,7 @@ decisions: `docs/DECISIONS.md`; pre-constitution milestone designs remain in
 Owner decision 2026-08-29: target stack React/TS/Vite + Three.js + Python (FastAPI path)
 + C++ ViennaPS route; strangler migration, never big-bang. GLM wrote; pending Codex review.
 
-## M1 — Existing Runtime Regression Baseline (in progress)
+## M1 — Existing Runtime Regression Baseline ✅
 
 Goal: make the current Process CAD workflow usable (done) and lock it with golden tests.
 
@@ -19,18 +19,20 @@ Already delivered (on `zcode/process-cad-shell`, pending merge + review):
   atomic undo/redo; structured step errors; five process primitives
   (Strip/Fill/Flip/Bonding/Thinning); WebGL2 viewer (7 views, dual camera, X/Y/Z
   clipping, MaterialVisual); full test suite green; reproducible baseline runner on a
-  fixed-physical-domain (640 nm) cubic grid with per-demo semantic structural checks
-  (`tools/run_process_cad_baseline.py`, commit `10f6fbd`).
+  fixed-physical-domain (640 nm) cubic grid with per-flow semantic structural checks.
+- Added the public `load_demo_flows(material_db)` registry shared by WebUI, Golden tests,
+  and `tools/run_process_cad_baseline.py`; the legacy private WebUI helper remains a
+  compatibility wrapper.
 
-Remaining for M1 — golden regression tests for five named flows:
+Golden regression tests now cover all five named flows:
 
 | Flow | Status |
 | --- | --- |
 | Basic Trench | ✅ demo + tests |
 | Spacer Formation | ✅ demo + tests |
 | Flip / Bond / Thin | ✅ demo + tests |
-| W Plug + CMP | ❌ to add |
-| Basic BEOL | ❌ to add |
+| W Plug + CMP | ✅ demo + tests |
+| Basic BEOL | ✅ demo + tests |
 
 Golden tests assert final geometry/material composition per flow so later migrations
 (M2–M12) can prove behavior preservation.
@@ -96,10 +98,6 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 
 ## Backlog (owner slots these into the sequence)
 
-- UI-agnostic demo/flow registry entry (e.g., `tcad.load_demo_flows(database)`) so
-  benchmarks and golden tests stop depending on the private `_webui_demo_recipes`
-  helper (currently used by `tools/run_process_cad_baseline.py`). Natural fit: M1
-  golden-test completion.
 - Parameter sweep / DOE runner with metrology comparison (natural fit after M4).
 - Device regions, electrodes, meshing export, electrical-solve interface stub.
 - Calibration data ingestion; reproducible experiment packages.
@@ -119,6 +117,4 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 没有内容冲突，合并即快进。**合并顺序、是否落 `main`、何时推送 `origin` 由仓库所有者
 决定；Agent 不得自行合并 feature 分支或推送 `origin`（ADR-010/017）。**
 
-- Next: Codex 复审本修复 diff（仅 BLOCK 项与新增 diff，按评审约定不重审已通过的
-  CAD Shell 行为）→ 所有者决定合并 → 开始 M1 golden-test 收尾（W Plug + CMP、
-  Basic BEOL）。
+- Next: 完成 M1 五流程最终验证与审查 → 所有者决定合并 → 开始 M2 React Shell。

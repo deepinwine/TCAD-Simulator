@@ -367,11 +367,20 @@ class BaselineRunnerTests(unittest.TestCase):
             self.assertEqual(payload["grid_shape"], [32, 32, 32])
             self.assertAlmostEqual(payload["physical_extent_nm"], 640.0)
             self.assertAlmostEqual(payload["voxel_nm"], 20.0)
-            self.assertEqual(set(payload["demos"]), {"Basic Trench", "Spacer Formation", "Bonding + Thinning"})
+            expected_names = {
+                "Basic Trench",
+                "Spacer Formation",
+                "Bonding + Thinning",
+                "W Plug + CMP",
+                "Basic BEOL",
+            }
+            self.assertEqual(set(payload["demos"]), expected_names)
             required_materials = {
                 "Basic Trench": {"Silicon", "Silicon Dioxide"},
                 "Spacer Formation": {"Silicon", "Silicon Nitride"},
                 "Bonding + Thinning": {"Silicon", "Silicon Dioxide"},
+                "W Plug + CMP": {"Silicon", "Silicon Dioxide", "Tungsten"},
+                "Basic BEOL": {"Silicon", "Silicon Dioxide", "Copper", "Tantalum"},
             }
             for name, demo in payload["demos"].items():
                 self.assertTrue(demo["ok"], f"{name}: {demo}")

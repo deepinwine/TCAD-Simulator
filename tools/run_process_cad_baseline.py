@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reproducible Process CAD baseline.
 
-Runs the three Process CAD demo recipes headless on a fixed-size cubic grid and
+Runs the five named Process CAD flows headless on a fixed-size cubic grid and
 records per-demo wall time, best-effort process RSS (see ``peak_rss_scope``),
 occupied-voxel/material counts, semantic acceptance checks, and preview-mesh triangle
 counts with mesh generation time. Results are written as JSON so runs can be archived
@@ -29,7 +29,13 @@ import numpy as np  # noqa: E402
 import tcad_simulator as tcad  # noqa: E402
 
 
-DEMO_NAMES = ("Basic Trench", "Spacer Formation", "Bonding + Thinning")
+DEMO_NAMES = (
+    "Basic Trench",
+    "Spacer Formation",
+    "Bonding + Thinning",
+    "W Plug + CMP",
+    "Basic BEOL",
+)
 MESH_FACE_LIMIT = 20000
 PHYSICAL_EXTENT_NM = 640.0
 
@@ -112,12 +118,49 @@ def _semantic_checks(
                 "active_side_bottom": str(model.active_side).strip().lower() == "bottom",
             }
         )
+    elif name == "W Plug + CMP":
+        tungsten = database.id_for("Tungsten")
+        checks.update(
+            {
+                "silicon_present": "Silicon" in material_names,
+                "oxide_present": "Silicon Dioxide" in material_names,
+                "tungsten_plugs_present": "Tungsten" in material_names,
+                "resist_stripped": "Photoresist" not in material_names,
+                "no_tungsten_blanket": not bool(
+                    np.any(np.all(model.grid == tungsten, axis=(0, 1)))
+                ),
+                "planar_surface": int(model.height_map.max())
+                - int(model.height_map.min())
+                <= 1,
+            }
+        )
+    elif name == "Basic BEOL":
+        copper = database.id_for("Copper")
+        tantalum = database.id_for("Tantalum")
+        checks.update(
+            {
+                "silicon_present": "Silicon" in material_names,
+                "oxide_present": "Silicon Dioxide" in material_names,
+                "copper_lines_present": "Copper" in material_names,
+                "tantalum_liner_present": "Tantalum" in material_names,
+                "resist_stripped": "Photoresist" not in material_names,
+                "no_copper_blanket": not bool(
+                    np.any(np.all(model.grid == copper, axis=(0, 1)))
+                ),
+                "no_tantalum_blanket": not bool(
+                    np.any(np.all(model.grid == tantalum, axis=(0, 1)))
+                ),
+                "planar_surface": int(model.height_map.max())
+                - int(model.height_map.min())
+                <= 1,
+            }
+        )
     return checks
 
 
 def _run_demo(name: str, grid: int, voxel_nm: float) -> Dict[str, Any]:
     database = tcad.MaterialDatabase()
-    recipe = tcad._webui_demo_recipes(database)[name]
+    recipe = tcad.load_demo_flows(database)[name]
     model = tcad.ProcessModel(
         database,
         grid_shape=(grid, grid, grid),

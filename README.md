@@ -551,15 +551,15 @@ Generated outputs include `tcad_simulator_split/docs/`, `tcad_simulator_split/do
 
 生成物包括 `tcad_simulator_split/docs/`、`tcad_simulator_split/docs_html/`、`SPLIT_REPORT.json` 和 `VERIFY_REPORT.json`，用于开发检查，默认被 Git 忽略。
 
-A reproducible Process CAD baseline runs the three demo recipes headless on a cubic 640 nm physical domain and records per-demo wall time, best-effort process RSS (see the `peak_rss_scope` field; falls back to `psutil` or `null` on Windows), occupied voxels, material-semantic checks, and preview-mesh triangle counts. `--grid` controls the resolution on all three axes, so `--grid 128` is a true 128³ run with 5 nm voxels:
+A reproducible Process CAD baseline runs five named flows headless on a cubic 640 nm physical domain and records per-flow wall time, best-effort process RSS (see the `peak_rss_scope` field; falls back to `psutil` or `null` on Windows), occupied voxels, material-semantic checks, and preview-mesh triangle counts. WebUI, Golden tests, and the baseline share the public `load_demo_flows(material_db)` registry. `--grid` controls the resolution on all three axes, so `--grid 128` is a true 128³ run with 5 nm voxels:
 
 ```bash
 TCAD_SKIP_QT=1 MPLBACKEND=Agg python3 tools/run_process_cad_baseline.py --grid 128 --output /tmp/tcad-cad-baseline.json
 ```
 
-Exit code 0 and `"ok": true` mean all three demos completed and passed their structural checks; the JSON is suitable for archiving and cross-revision comparison.
+Exit code 0 and `"ok": true` mean all five flows completed and passed their structural checks; the JSON is suitable for archiving and cross-revision comparison.
 
-可复现的 Process CAD 基准会在 640 nm 立方物理域中以 headless 方式运行三个示例配方。`--grid` 同时控制三轴分辨率，因此 `--grid 128` 表示真正的 128³ 网格和 5 nm 体素。报告包含每个 demo 的耗时、尽力而为的进程内存（语义见 `peak_rss_scope` 字段；Windows 上回退到 `psutil` 或置空）、占用体素数、材料语义检查和预览网格面数；退出码为 0 且 `"ok": true` 表示三个 demo 均已完成并通过结构检查。
+可复现的 Process CAD 基准会在 640 nm 立方物理域中以 headless 方式运行 5 套具名流程。WebUI、Golden 测试和基准共用公开的 `load_demo_flows(material_db)` 注册表。`--grid` 同时控制三轴分辨率，因此 `--grid 128` 表示真正的 128³ 网格和 5 nm 体素。报告包含每套流程的耗时、尽力而为的进程内存（语义见 `peak_rss_scope` 字段；Windows 上回退到 `psutil` 或置空）、占用体素数、材料语义检查和预览网格面数；退出码为 0 且 `"ok": true` 表示 5 套流程均已完成并通过结构检查。
 
 ## Runtime Data
 
