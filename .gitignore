@@ -15,3 +15,8 @@ tcad_simulator_split/
 /three.js
 /three.min.js
 tools/html_vendor/
+
+.superpowers/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
