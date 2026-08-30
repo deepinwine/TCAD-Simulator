@@ -1,3 +1,4 @@
+import inspect
 import time
 import tempfile
 import unittest
@@ -73,7 +74,7 @@ def geometry_checkpoint(database, model):
 
 def execute_demo(name):
     database = tcad.MaterialDatabase()
-    recipe = tcad._webui_demo_recipes(database)[name]
+    recipe = tcad.load_demo_flows(database)[name]
     model = tcad.ProcessModel(
         database,
         grid_shape=(64, 64, 96),
@@ -112,10 +113,16 @@ def execute_demo(name):
 
 
 class DemoRecipeRegistryTests(unittest.TestCase):
+    def test_golden_executor_uses_the_public_registry(self):
+        source = inspect.getsource(execute_demo)
+
+        self.assertIn("load_demo_flows", source)
+        self.assertNotIn("_webui_demo_recipes", source)
+
     def test_registry_returns_canonical_portable_recipes(self):
         database = tcad.MaterialDatabase()
 
-        demos = tcad._webui_demo_recipes(database)
+        demos = tcad.load_demo_flows(database)
 
         self.assertEqual(tuple(demos), DEMO_NAMES)
         for name, recipe in demos.items():
@@ -134,10 +141,10 @@ class DemoRecipeRegistryTests(unittest.TestCase):
 
     def test_registry_returns_fresh_mutable_blobs(self):
         database = tcad.MaterialDatabase()
-        first = tcad._webui_demo_recipes(database)
+        first = tcad.load_demo_flows(database)
         first["Basic Trench"]["steps"][0]["params"]["thickness_nm"] = -1
 
-        second = tcad._webui_demo_recipes(database)
+        second = tcad.load_demo_flows(database)
 
         self.assertGreater(
             second["Basic Trench"]["steps"][0]["params"]["thickness_nm"],
@@ -161,7 +168,7 @@ class DemoRecipeRegistryTests(unittest.TestCase):
 
     def test_demo_sequences_express_the_designed_process_order(self):
         database = tcad.MaterialDatabase()
-        demos = tcad._webui_demo_recipes(database)
+        demos = tcad.load_demo_flows(database)
 
         self.assertEqual(
             [step["name"] for step in demos["Basic Trench"]["steps"]],
@@ -243,7 +250,7 @@ class DemoRecipeRegistryTests(unittest.TestCase):
                 self.assertEqual(tuple(init_result["demo_recipes"]), DEMO_NAMES)
                 self.assertEqual(
                     init_result["demo_recipes"],
-                    tcad._webui_demo_recipes(tcad.MaterialDatabase()),
+                    tcad.load_demo_flows(tcad.MaterialDatabase()),
                 )
             finally:
                 if manager is not None:
