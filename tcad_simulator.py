@@ -34,6 +34,7 @@ import copy
 import contextlib
 import csv
 import datetime
+import errno
 import json
 import hashlib
 import hmac
@@ -73207,6 +73208,9 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             set_cookie=set_cookie,
         )
 
+    def _send_studio_error(self, code: str, message: str, status: int) -> None:
+        self._send_json({"ok": False, "code": code, "error": message}, status=status)
+
     def _serve_studio(self, path: str) -> None:
         mgr = self.server.manager
         try:
@@ -73214,14 +73218,17 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             index_path = (dist_dir / "index.html").resolve()
             index_path.relative_to(dist_dir)
         except ValueError:
-            self._send_json({"ok": False, "error": "Forbidden Studio index path"}, status=403)
+            self._send_studio_error("studio_index_forbidden", "Forbidden Studio index path", 403)
             return
-        except OSError as exc:
-            self._send_json({"ok": False, "error": f"Studio build path unavailable: {exc}"}, status=500)
+        except OSError:
+            self._send_studio_error("studio_build_unavailable", "Studio build path unavailable", 500)
             return
 
+        if not index_path.is_file() and (index_path.exists() or index_path.is_symlink()):
+            self._send_studio_error("studio_index_forbidden", "Forbidden Studio index", 403)
+            return
         if not index_path.is_file():
-            commands = html.escape("cd frontend\nnpm run build")
+            commands = html.escape("cd frontend && npm install && npm run build")
             body = (
                 "<!doctype html><meta charset=\"utf-8\">"
                 "<title>React Shell 尚未构建</title>"
@@ -73240,48 +73247,45 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             rel = urllib.parse.unquote(encoded_rel)
         except Exception:
-            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
             return
         if "\x00" in rel:
-            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
             return
         rel_path = Path(rel or "index.html")
         if rel_path.is_absolute() or any(part == ".." for part in rel_path.parts):
-            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
             return
 
         try:
             candidate = (dist_dir / rel_path).resolve()
             candidate.relative_to(dist_dir)
         except ValueError:
-            self._send_json({"ok": False, "error": "Forbidden Studio path"}, status=403)
+            self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
             return
-        except OSError as exc:
-            self._send_json({"ok": False, "error": f"Studio path unavailable: {exc}"}, status=500)
-            return
-
-        try:
-            if candidate.is_dir():
-                self._send_json({"ok": False, "error": "Studio directory access is forbidden"}, status=403)
-                return
-            if candidate.is_file():
-                file_path = candidate
-            elif "text/html" in str(self.headers.get("Accept", "")).lower():
-                file_path = index_path
-            else:
-                self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
-                return
-            data = self._read_studio_file_safely(file_path, dist_dir)
-            if data is None:
-                return
-        except FileNotFoundError:
-            self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
-            return
-        except OSError as exc:
-            self._send_json({"ok": False, "error": f"Studio asset read failed: {exc}"}, status=500)
+        except OSError:
+            self._send_studio_error("studio_path_unavailable", "Studio path unavailable", 500)
             return
 
-        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        if candidate.is_dir():
+            self._send_studio_error("studio_directory_forbidden", "Studio directory access is forbidden", 403)
+            return
+        if candidate.is_file():
+            file_rel_path = rel_path
+        elif candidate.exists() or candidate.is_symlink():
+            self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
+            return
+        elif "text/html" in str(self.headers.get("Accept", "")).lower():
+            file_rel_path = Path("index.html")
+        else:
+            self._send_studio_error("studio_asset_not_found", "Studio asset not found", 404)
+            return
+
+        data = self._read_studio_file_safely(file_rel_path, dist_dir)
+        if data is None:
+            return
+
+        content_type = mimetypes.guess_type(str(file_rel_path))[0] or "application/octet-stream"
         if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
             content_type += "; charset=utf-8"
         self._send_bytes(
@@ -73291,47 +73295,290 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             extra_headers={"Cache-Control": "no-store"},
         )
 
-    def _read_studio_file_safely(self, file_path: Path, dist_dir: Path) -> Optional[bytes]:
+    def _read_studio_file_safely(self, rel_path: Path, dist_dir: Path) -> Optional[bytes]:
+        if os.name == "posix":
+            return self._read_studio_file_posix(rel_path, dist_dir)
+        if os.name == "nt":
+            return self._read_studio_file_windows(rel_path, dist_dir)
+        self._send_studio_error(
+            "studio_safe_open_unavailable",
+            "Secure Studio asset access is unavailable on this platform",
+            500,
+        )
+        return None
+
+    def _read_studio_file_posix(self, rel_path: Path, dist_dir: Path) -> Optional[bytes]:
+        required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+        if (
+            os.open not in getattr(os, "supports_dir_fd", set())
+            or any(not hasattr(os, name) for name in required_flags)
+        ):
+            self._send_studio_error(
+                "studio_safe_open_unavailable",
+                "Secure Studio asset access is unavailable on this platform",
+                500,
+            )
+            return None
+
+        parts = tuple(rel_path.parts)
+        if not parts or rel_path.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+            self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
+            return None
+
+        opened_fds: List[int] = []
+        cloexec = int(getattr(os, "O_CLOEXEC", 0))
         try:
-            before_resolved = file_path.resolve()
-            before_resolved.relative_to(dist_dir)
-            before_stat = file_path.lstat()
-            if stat.S_ISLNK(before_stat.st_mode) or not stat.S_ISREG(before_stat.st_mode):
-                self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
+            root_fd = os.open(
+                str(dist_dir),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+            )
+            opened_fds.append(root_fd)
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
                 return None
 
-            with file_path.open("rb") as source:
-                opened_stat = os.fstat(source.fileno())
-                if not stat.S_ISREG(opened_stat.st_mode):
-                    self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
-                    return None
-                data = source.read()
+            parent_fd = root_fd
+            final_fd: Optional[int] = None
+            for index, part in enumerate(parts):
+                is_final = index == len(parts) - 1
+                if is_final:
+                    flags = os.O_RDONLY | os.O_NOFOLLOW | cloexec | int(getattr(os, "O_NONBLOCK", 0))
+                else:
+                    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+                opened_fds.append(child_fd)
+                child_stat = os.fstat(child_fd)
+                if is_final:
+                    if not stat.S_ISREG(child_stat.st_mode):
+                        self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
+                        return None
+                    final_fd = child_fd
+                else:
+                    if not stat.S_ISDIR(child_stat.st_mode):
+                        self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                        return None
+                    parent_fd = child_fd
 
-                after_resolved = file_path.resolve()
-                after_resolved.relative_to(dist_dir)
-                after_stat = file_path.lstat()
-                identities = {
-                    (before_stat.st_dev, before_stat.st_ino),
-                    (opened_stat.st_dev, opened_stat.st_ino),
-                    (after_stat.st_dev, after_stat.st_ino),
-                }
-                if (
-                    stat.S_ISLNK(after_stat.st_mode)
-                    or not stat.S_ISREG(after_stat.st_mode)
-                    or len(identities) != 1
-                ):
-                    self._send_json({"ok": False, "error": "Studio asset changed during read"}, status=403)
-                    return None
-                return data
-        except ValueError:
-            self._send_json({"ok": False, "error": "Forbidden Studio asset"}, status=403)
-            return None
+            if final_fd is None:
+                self._send_studio_error("studio_asset_not_found", "Studio asset not found", 404)
+                return None
+            chunks: List[bytes] = []
+            while True:
+                chunk = os.read(final_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
         except FileNotFoundError:
-            self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
+            self._send_studio_error("studio_asset_not_found", "Studio asset not found", 404)
             return None
         except OSError as exc:
-            self._send_json({"ok": False, "error": f"Studio asset read failed: {exc}"}, status=500)
+            if getattr(exc, "errno", None) == errno.ENOENT:
+                self._send_studio_error("studio_asset_not_found", "Studio asset not found", 404)
+            else:
+                self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
             return None
+        finally:
+            for fd in reversed(opened_fds):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _read_studio_file_windows(self, rel_path: Path, dist_dir: Path) -> Optional[bytes]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            self._send_studio_error(
+                "studio_safe_open_unavailable",
+                "Secure Studio asset access is unavailable on this platform",
+                500,
+            )
+            return None
+
+        parts = tuple(rel_path.parts)
+        if not parts or rel_path.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+            self._send_studio_error("studio_path_invalid", "Invalid Studio path", 400)
+            return None
+
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            create_file.restype = wintypes.HANDLE
+            get_final_path = kernel32.GetFinalPathNameByHandleW
+            get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+            get_final_path.restype = wintypes.DWORD
+            get_file_info = kernel32.GetFileInformationByHandle
+            get_file_info.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+            get_file_info.restype = wintypes.BOOL
+            read_file = kernel32.ReadFile
+            read_file.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                wintypes.LPVOID,
+            ]
+            read_file.restype = wintypes.BOOL
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+        except Exception:
+            self._send_studio_error(
+                "studio_safe_open_unavailable",
+                "Secure Studio asset access is unavailable on this platform",
+                500,
+            )
+            return None
+
+        class _ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        invalid_handle = ctypes.c_void_p(-1).value
+        generic_read = 0x80000000
+        share_all = 0x00000001 | 0x00000002 | 0x00000004
+        open_existing = 3
+        file_attribute_reparse_point = 0x00000400
+        file_attribute_directory = 0x00000010
+        file_flag_backup_semantics = 0x02000000
+        file_flag_open_reparse_point = 0x00200000
+        file_flag_sequential_scan = 0x08000000
+        root_handle: Optional[int] = None
+        file_handle: Optional[int] = None
+
+        def _open_handle(path: str, access: int, flags: int) -> int:
+            handle = create_file(path, access, share_all, None, open_existing, flags, None)
+            if handle == invalid_handle:
+                raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+            return int(handle)
+
+        def _handle_info(handle: int) -> Any:
+            info = _ByHandleFileInformation()
+            if not get_file_info(wintypes.HANDLE(handle), ctypes.byref(info)):
+                raise OSError(ctypes.get_last_error(), "GetFileInformationByHandle failed")
+            return info
+
+        def _handle_path(handle: int) -> str:
+            size = int(get_final_path(wintypes.HANDLE(handle), None, 0, 0))
+            if size <= 0:
+                raise OSError(ctypes.get_last_error(), "GetFinalPathNameByHandleW failed")
+            buffer = ctypes.create_unicode_buffer(size + 1)
+            written = int(get_final_path(wintypes.HANDLE(handle), buffer, len(buffer), 0))
+            if written <= 0 or written >= len(buffer):
+                raise OSError(ctypes.get_last_error(), "GetFinalPathNameByHandleW failed")
+            value = buffer.value
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+            return os.path.normcase(os.path.normpath(value))
+
+        target_path = dist_dir.joinpath(*parts)
+        try:
+            for component_count in range(1, len(parts) + 1):
+                component_path = dist_dir.joinpath(*parts[:component_count])
+                component_stat = os.lstat(component_path)
+                attributes = int(getattr(component_stat, "st_file_attributes", 0) or 0)
+                if attributes & file_attribute_reparse_point:
+                    self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                    return None
+
+            root_handle = _open_handle(
+                str(dist_dir),
+                0,
+                file_flag_backup_semantics | file_flag_open_reparse_point,
+            )
+            root_info = _handle_info(root_handle)
+            if (
+                not (root_info.dwFileAttributes & file_attribute_directory)
+                or (root_info.dwFileAttributes & file_attribute_reparse_point)
+            ):
+                self._send_studio_error("studio_root_forbidden", "Forbidden Studio root", 403)
+                return None
+
+            file_handle = _open_handle(str(target_path), generic_read, file_flag_sequential_scan)
+            file_info = _handle_info(file_handle)
+            if (
+                file_info.dwFileAttributes & file_attribute_directory
+                or file_info.dwFileAttributes & file_attribute_reparse_point
+            ):
+                self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
+                return None
+
+            root_final = _handle_path(root_handle)
+            file_final = _handle_path(file_handle)
+            try:
+                if os.path.commonpath([root_final, file_final]) != root_final:
+                    self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                    return None
+            except ValueError:
+                self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                return None
+
+            chunks: List[bytes] = []
+            buffer = ctypes.create_string_buffer(1024 * 1024)
+            while True:
+                read_count = wintypes.DWORD(0)
+                if not read_file(
+                    wintypes.HANDLE(file_handle),
+                    buffer,
+                    len(buffer),
+                    ctypes.byref(read_count),
+                    None,
+                ):
+                    raise OSError(ctypes.get_last_error(), "ReadFile failed")
+                if read_count.value == 0:
+                    break
+                chunks.append(buffer.raw[: read_count.value])
+
+            root_final_after = _handle_path(root_handle)
+            file_final_after = _handle_path(file_handle)
+            if (
+                root_final_after != root_final
+                or os.path.commonpath([root_final_after, file_final_after]) != root_final_after
+            ):
+                self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                return None
+            for component_count in range(1, len(parts) + 1):
+                component_path = dist_dir.joinpath(*parts[:component_count])
+                component_stat = os.lstat(component_path)
+                attributes = int(getattr(component_stat, "st_file_attributes", 0) or 0)
+                if attributes & file_attribute_reparse_point:
+                    self._send_studio_error("studio_path_forbidden", "Forbidden Studio path", 403)
+                    return None
+            return b"".join(chunks)
+        except FileNotFoundError:
+            self._send_studio_error("studio_asset_not_found", "Studio asset not found", 404)
+            return None
+        except (OSError, ValueError):
+            self._send_studio_error("studio_asset_forbidden", "Forbidden Studio asset", 403)
+            return None
+        finally:
+            if file_handle is not None:
+                close_handle(wintypes.HANDLE(file_handle))
+            if root_handle is not None:
+                close_handle(wintypes.HANDLE(root_handle))
 
     def _capacity_payload(self) -> Dict[str, Any]:
         mgr = self.server.manager

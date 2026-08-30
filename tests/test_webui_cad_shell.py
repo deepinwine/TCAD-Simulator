@@ -525,8 +525,7 @@ class ReactStudioStaticTests(unittest.TestCase):
                 self.assertIn("text/html", headers.get("content-type", ""))
                 self.assertEqual(headers.get("cache-control"), "no-store")
                 self.assertIn("React Shell 尚未构建", text)
-                self.assertIn("cd frontend", text)
-                self.assertIn("npm run build", text)
+                self.assertIn("cd frontend &amp;&amp; npm install &amp;&amp; npm run build", text)
                 self.assertNotIn("traceback", text.lower())
                 self.assertEqual(manager.sessions, {})
             finally:
@@ -648,6 +647,8 @@ class ReactStudioStaticTests(unittest.TestCase):
                 self.skipTest(f"symlink unsupported: {exc}")
 
             original_open = Path.open
+            import os
+            original_os_open = os.open
             replaced = False
 
             def replace_before_open(path_obj, *args, **kwargs):
@@ -658,9 +659,24 @@ class ReactStudioStaticTests(unittest.TestCase):
                     replaced = True
                 return original_open(path_obj, *args, **kwargs)
 
+            def replace_before_dir_fd_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal replaced
+                if path == "race.js" and dir_fd is not None and not replaced:
+                    asset.unlink()
+                    asset.symlink_to(outside)
+                    replaced = True
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)
+
+            patched_dir_fd_support = set(os.supports_dir_fd)
+            patched_dir_fd_support.add(replace_before_dir_fd_open)
+
             manager = self._manager(temp_dir, dist_dir)
             try:
-                with mock.patch.object(Path, "open", new=replace_before_open):
+                with (
+                    mock.patch.object(Path, "open", new=replace_before_open),
+                    mock.patch.object(os, "open", new=replace_before_dir_fd_open),
+                    mock.patch.object(os, "supports_dir_fd", patched_dir_fd_support),
+                ):
                     status, headers, raw = self._request(
                         manager.url, "GET", "/studio/assets/race.js"
                     )
@@ -694,6 +710,170 @@ class ReactStudioStaticTests(unittest.TestCase):
                 self.assertIn("error", json.loads(raw))
                 self.assertNotIn(b"DIRECTORY CONTENT", raw)
                 self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
+    def test_studio_rejects_ancestor_directory_switch_during_open(self):
+        import os
+        from unittest import mock
+
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            self.skipTest("POSIX dir_fd safe-open primitives unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist_dir = root / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            asset = assets_dir / "race.js"
+            asset.write_text("SAFE ASSET", encoding="utf-8")
+            resolved_asset = asset.resolve()
+            outside_assets = root / "outside-assets"
+            outside_assets.mkdir()
+            (outside_assets / "race.js").write_text("EXTERNAL SECRET", encoding="utf-8")
+            saved_assets = root / "saved-assets"
+            try:
+                probe = root / "symlink-probe"
+                probe.symlink_to(outside_assets, target_is_directory=True)
+                probe.unlink()
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+
+            original_lstat = Path.lstat
+            original_path_open = Path.open
+            original_os_open = os.open
+            switched = False
+
+            def switch_to_external():
+                nonlocal switched
+                if switched:
+                    return
+                assets_dir.rename(saved_assets)
+                assets_dir.symlink_to(outside_assets, target_is_directory=True)
+                switched = True
+
+            def switch_on_lstat(path_obj, *args, **kwargs):
+                if path_obj == resolved_asset:
+                    switch_to_external()
+                return original_lstat(path_obj, *args, **kwargs)
+
+            def restore_after_path_open(path_obj, *args, **kwargs):
+                source = original_path_open(path_obj, *args, **kwargs)
+                if path_obj == resolved_asset and assets_dir.is_symlink():
+                    assets_dir.unlink()
+                    outside_assets.rename(assets_dir)
+                return source
+
+            def switch_on_dir_fd_open(path, flags, mode=0o777, *, dir_fd=None):
+                if path == "assets" and dir_fd is not None:
+                    switch_to_external()
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)
+
+            patched_dir_fd_support = set(os.supports_dir_fd)
+            patched_dir_fd_support.add(switch_on_dir_fd_open)
+
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                with (
+                    mock.patch.object(Path, "lstat", new=switch_on_lstat),
+                    mock.patch.object(Path, "open", new=restore_after_path_open),
+                    mock.patch.object(os, "open", new=switch_on_dir_fd_open),
+                    mock.patch.object(os, "supports_dir_fd", patched_dir_fd_support),
+                ):
+                    status, headers, raw = self._request(
+                        manager.url, "GET", "/studio/assets/race.js"
+                    )
+                self.assertTrue(switched, "ancestor race hook did not run")
+                self.assertIn(status, (400, 403, 404, 500))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"EXTERNAL SECRET", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
+    def test_studio_errors_do_not_expose_oserror_details(self):
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            (assets_dir / "app.js").write_text("export {};", encoding="utf-8")
+            secret_detail = f"SENSITIVE-OS-ERROR {temp_dir}/private"
+
+            def fail_path_open(*_args, **_kwargs):
+                raise OSError(secret_detail)
+
+            def fail_os_open(*_args, **_kwargs):
+                raise OSError(secret_detail)
+
+            patched_dir_fd_support = set(os.supports_dir_fd)
+            patched_dir_fd_support.add(fail_os_open)
+
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                with (
+                    mock.patch.object(Path, "open", new=fail_path_open),
+                    mock.patch.object(os, "open", new=fail_os_open),
+                    mock.patch.object(os, "supports_dir_fd", patched_dir_fd_support),
+                ):
+                    status, headers, raw = self._request(
+                        manager.url, "GET", "/studio/assets/app.js"
+                    )
+                self.assertIn(status, (403, 500))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                payload = json.loads(raw)
+                self.assertIn("code", payload)
+                self.assertIn("error", payload)
+                self.assertNotIn("SENSITIVE-OS-ERROR", raw.decode("utf-8"))
+                self.assertNotIn(temp_dir, raw.decode("utf-8"))
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
+    def test_studio_rejects_fifo_without_spa_fallback(self):
+        import os
+
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO unsupported")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            fifo = assets_dir / "events.js"
+            try:
+                os.mkfifo(fifo)
+            except OSError as exc:
+                self.skipTest(f"FIFO unsupported: {exc}")
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(
+                    manager.url,
+                    "GET",
+                    "/studio/assets/events.js",
+                    headers={"Accept": "text/html"},
+                )
+                self.assertEqual(status, 403)
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"React Shell", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+
+                (dist_dir / "index.html").unlink()
+                os.mkfifo(dist_dir / "index.html")
+                status, headers, raw = self._request(manager.url, "GET", "/studio/")
+                self.assertEqual(status, 403)
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
                 self.assertNotIn("set-cookie", headers)
             finally:
                 manager.stop()
