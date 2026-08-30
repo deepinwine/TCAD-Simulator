@@ -42,6 +42,7 @@ import math
 import os
 import base64
 import gzip
+import html
 import http.server
 import io
 import mimetypes
@@ -73205,6 +73206,88 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             set_cookie=set_cookie,
         )
 
+    def _serve_studio(self, path: str) -> None:
+        mgr = self.server.manager
+        try:
+            dist_dir = mgr.studio_dist_dir.resolve()
+            index_path = (dist_dir / "index.html").resolve()
+            index_path.relative_to(dist_dir)
+        except ValueError:
+            self._send_json({"ok": False, "error": "Forbidden Studio index path"}, status=403)
+            return
+        except OSError as exc:
+            self._send_json({"ok": False, "error": f"Studio build path unavailable: {exc}"}, status=500)
+            return
+
+        if not index_path.is_file():
+            commands = html.escape("cd frontend\nnpm run build")
+            body = (
+                "<!doctype html><meta charset=\"utf-8\">"
+                "<title>React Shell 尚未构建</title>"
+                "<h1>React Shell 尚未构建</h1>"
+                f"<p>请先运行：</p><pre><code>{commands}</code></pre>"
+            ).encode("utf-8")
+            self._send_bytes(
+                body,
+                "text/html; charset=utf-8",
+                status=503,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+            return
+
+        encoded_rel = path[len("/studio/") :]
+        try:
+            rel = urllib.parse.unquote(encoded_rel)
+        except Exception:
+            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            return
+        if "\x00" in rel:
+            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            return
+        rel_path = Path(rel or "index.html")
+        if rel_path.is_absolute() or any(part == ".." for part in rel_path.parts):
+            self._send_json({"ok": False, "error": "Invalid Studio path"}, status=400)
+            return
+
+        try:
+            candidate = (dist_dir / rel_path).resolve()
+            candidate.relative_to(dist_dir)
+        except ValueError:
+            self._send_json({"ok": False, "error": "Forbidden Studio path"}, status=403)
+            return
+        except OSError as exc:
+            self._send_json({"ok": False, "error": f"Studio path unavailable: {exc}"}, status=500)
+            return
+
+        try:
+            if candidate.is_dir():
+                self._send_json({"ok": False, "error": "Studio directory access is forbidden"}, status=403)
+                return
+            if candidate.is_file():
+                file_path = candidate
+            elif "text/html" in str(self.headers.get("Accept", "")).lower():
+                file_path = index_path
+            else:
+                self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
+                return
+            data = file_path.read_bytes()
+        except FileNotFoundError:
+            self._send_json({"ok": False, "error": "Studio asset not found"}, status=404)
+            return
+        except OSError as exc:
+            self._send_json({"ok": False, "error": f"Studio asset read failed: {exc}"}, status=500)
+            return
+
+        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type += "; charset=utf-8"
+        self._send_bytes(
+            data,
+            content_type,
+            status=200,
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
     def _capacity_payload(self) -> Dict[str, Any]:
         mgr = self.server.manager
         return {
@@ -73358,6 +73441,17 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path or "/"
         query = urllib.parse.parse_qs(parsed.query or "")
+
+        if path == "/studio":
+            self.send_response(302)
+            self.send_header("Location", "/studio/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if path.startswith("/studio/"):
+            self._serve_studio(path)
+            return
 
         if path.startswith("/static/"):
             rel = path[len("/static/") :].lstrip("/")
@@ -74822,6 +74916,7 @@ class WebUIServerManager:
         enable_llm_settings: bool = False,
         default_domain: Optional[Dict[str, Any]] = None,
         storage_root: Optional[Path] = None,
+        studio_dist_dir: Optional[Path] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -74847,6 +74942,11 @@ class WebUIServerManager:
         self.default_domain = dict(default_domain) if isinstance(default_domain, dict) else {}
         self.idle_ttl_s = 60.0 * 60.0
         self.asset_version = secrets.token_hex(6)
+        self.studio_dist_dir = (
+            Path(studio_dist_dir)
+            if studio_dist_dir is not None
+            else _webui_launch_root() / "frontend" / "dist"
+        )
         if storage_root is None:
             storage_root = _tcad_default_webui_storage_root()
         # Ensure storage root is user-writable (packaged apps may be installed in read-only locations).

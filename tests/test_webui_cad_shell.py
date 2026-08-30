@@ -452,6 +452,181 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn("state.stepErrors[stepIndex] = failure", source)
 
 
+class ReactStudioStaticTests(unittest.TestCase):
+    def _request(self, base, method, path, headers=None):
+        import http.client
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base)
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=30)
+        conn.request(method, path, headers=dict(headers or {}))
+        response = conn.getresponse()
+        raw = response.read()
+        response_headers = {key.lower(): value for key, value in response.getheaders()}
+        status = response.status
+        conn.close()
+        return status, response_headers, raw
+
+    def _manager(self, temp_dir, dist_dir):
+        manager = tcad.WebUIServerManager(
+            host="127.0.0.1",
+            port=0,
+            storage_root=Path(temp_dir) / "storage",
+            studio_dist_dir=Path(dist_dir),
+        )
+        manager.start()
+        return manager
+
+    def test_studio_serves_index_assets_and_keeps_legacy_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            (dist_dir / "assets").mkdir(parents=True)
+            (dist_dir / "index.html").write_text(
+                "<!doctype html><title>React Shell</title>", encoding="utf-8"
+            )
+            (dist_dir / "assets" / "app.js").write_text("export {};", encoding="utf-8")
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(manager.url, "GET", "/studio")
+                self.assertEqual(status, 302)
+                self.assertEqual(headers.get("location"), "/studio/")
+                self.assertEqual(raw, b"")
+
+                status, headers, raw = self._request(manager.url, "GET", "/studio/")
+                self.assertEqual(status, 200)
+                self.assertIn("text/html", headers.get("content-type", ""))
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertIn(b"React Shell", raw)
+
+                status, headers, raw = self._request(
+                    manager.url, "GET", "/studio/assets/app.js"
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("javascript", headers.get("content-type", ""))
+                self.assertNotIn("text/html", headers.get("content-type", ""))
+                self.assertEqual(raw, b"export {};")
+
+                status, headers, raw = self._request(manager.url, "GET", "/")
+                self.assertEqual(status, 200)
+                self.assertIn(b"TCAD", raw)
+                self.assertEqual(manager.sessions, {})
+                self.assertNotIn("set-cookie", headers)
+            finally:
+                manager.stop()
+
+    def test_studio_missing_build_returns_actionable_503(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "missing-dist"
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(manager.url, "GET", "/studio/")
+                text = raw.decode("utf-8")
+                self.assertEqual(status, 503)
+                self.assertIn("text/html", headers.get("content-type", ""))
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertIn("React Shell 尚未构建", text)
+                self.assertIn("cd frontend", text)
+                self.assertIn("npm run build", text)
+                self.assertNotIn("traceback", text.lower())
+                self.assertEqual(manager.sessions, {})
+            finally:
+                manager.stop()
+
+    def test_studio_spa_fallback_requires_html_accept(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            dist_dir.mkdir()
+            (dist_dir / "index.html").write_text("React Shell SPA", encoding="utf-8")
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(
+                    manager.url,
+                    "GET",
+                    "/studio/recipe/1",
+                    headers={"Accept": "text/html"},
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("text/html", headers.get("content-type", ""))
+                self.assertIn(b"React Shell SPA", raw)
+
+                status, headers, raw = self._request(
+                    manager.url,
+                    "GET",
+                    "/studio/recipe/1",
+                    headers={"Accept": "application/json"},
+                )
+                self.assertEqual(status, 404)
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertEqual(manager.sessions, {})
+            finally:
+                manager.stop()
+
+    def test_studio_rejects_traversal_and_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir) / "dist"
+            dist_dir.mkdir()
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                for path in (
+                    "/studio/../",
+                    "/studio/%2e%2e/",
+                    "/studio//etc/passwd",
+                    "/studio/%2Fetc%2Fpasswd",
+                ):
+                    with self.subTest(path=path):
+                        status, headers, raw = self._request(manager.url, "GET", path)
+                        self.assertIn(status, (400, 403))
+                        self.assertIn("application/json", headers.get("content-type", ""))
+                        self.assertIn("error", json.loads(raw))
+                        self.assertNotIn(b"root:", raw)
+                self.assertEqual(manager.sessions, {})
+            finally:
+                manager.stop()
+
+    def test_studio_rejects_symlink_escape_when_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist_dir = root / "dist"
+            assets_dir = dist_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("React Shell", encoding="utf-8")
+            outside = root / "outside-secret.txt"
+            outside.write_text("EXTERNAL SECRET", encoding="utf-8")
+            link = assets_dir / "escape.txt"
+            try:
+                link.symlink_to(outside)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+
+            manager = self._manager(temp_dir, dist_dir)
+            try:
+                status, headers, raw = self._request(
+                    manager.url, "GET", "/studio/assets/escape.txt"
+                )
+                self.assertIn(status, (400, 403))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"EXTERNAL SECRET", raw)
+
+                (dist_dir / "index.html").unlink()
+                (dist_dir / "index.html").symlink_to(outside)
+                status, headers, raw = self._request(
+                    manager.url,
+                    "GET",
+                    "/studio/missing-route",
+                    headers={"Accept": "text/html"},
+                )
+                self.assertIn(status, (400, 403))
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertIn("error", json.loads(raw))
+                self.assertNotIn(b"EXTERNAL SECRET", raw)
+                self.assertEqual(manager.sessions, {})
+            finally:
+                manager.stop()
+
+
 class M2ApiContractTests(unittest.TestCase):
     """Executable contract for the frozen M2 Compatibility API.
 
