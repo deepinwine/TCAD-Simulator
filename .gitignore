@@ -1,0 +1,17 @@
+# Python runtime
+__pycache__/
+*.py[cod]
+
+# TCAD runtime and self-tests
+TCAD_Web_Data/
+TCAD_Selftest_Output_*/
+
+# Generated navigation view
+tcad_simulator_split/
+
+# Downloaded WebUI/docsite vendor
+/OrbitControls.js
+/STLLoader.js
+/three.js
+/three.min.js
+tools/html_vendor/

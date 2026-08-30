@@ -45,6 +45,28 @@ Recipe JSON/UI
 
 The same step protocol is used by the desktop GUI, WebUI, headless selftests, Agent proposals, and recipe import/export. This shared protocol is the main compatibility boundary.
 
+## Process CAD Shell Data Flow
+
+The WebUI CAD shell is a fixed three-pane workspace (Process Flow, Parameters, 3D Viewer) on top of the same execution chain:
+
+```text
+CAD Shell UI (browser-local: camera, clipping, material display)
+    -> WebUI HTTP API (recipe/step/timeline/undo/redo endpoints)
+    -> Session/Worker
+    -> ProcessStep.execute(model)  (transactional: snapshot before, rollback on failure)
+    -> ProcessModel (voxel truth)
+    -> per-step snapshot cache + runtime statuses (ready/dirty/running/done/error)
+    -> per-material .geom meshes by revision
+    -> Three.js WebGL2 viewer
+```
+
+Key semantics:
+
+- **Snapshot invalidation**: editing step N marks steps N..end dirty; snapshots for steps 0..N-1 stay valid and reviewable. Re-running restores from the nearest valid snapshot and computes incrementally.
+- **Timeline review**: `timeline_get`/`timeline_restore` only expose steps whose cached snapshot is valid (status `done`, cache context signature matches). Restoring a snapshot is a pure view operation — it never triggers recomputation, and Dirty/Ready/Error steps are rejected with a structured error instead of being recomputed implicitly.
+- **Undo/Redo**: both stacks hold spillable model snapshots capped at 20 entries. Undo pushes the current state onto the redo stack; any new edit or successful run clears redo. History entries are atomic — restoring also restores runtime statuses, structured step errors, the timeline position, and the recipe name.
+- **UI-only interactions** (camera poses, projection mode, clipping planes, material visibility) stay browser-local and must not trigger worker recomputes or geometry refetches.
+
 ## UI Boundaries
 
 The desktop GUI is a local controller around the same model:

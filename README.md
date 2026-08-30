@@ -45,6 +45,7 @@
 | Visualization | 3D stack preview, material components, cross-sections, doping/exposure heatmaps, WebGL/host-assisted render paths |
 | Metrology and export | CD/feature metrics, material inventory, interfaces, CSV, STL, TCAD geometry, PNG frame sequences, optional MP4 video |
 | Desktop and WebUI | PyQt5 desktop application, multi-user WebUI, isolated sessions where supported, Admin UI, encrypted library storage |
+| Process CAD Shell | Three-pane WebUI workspace (Process Flow / Parameters / 3D Viewer), step drag-and-drop and rename, snapshot timeline with Previous/Next, undo/redo, structured step errors |
 | Knowledge and Agent | Optional PDF/literature ingestion, local retrieval, process mapping, physics audit, skills, LLM-assisted recipe drafting |
 
 ## Architecture
@@ -438,6 +439,16 @@ Optional feature dependencies:
 - MP4 export: `imageio-ffmpeg` or system `ffmpeg`
 - Numeric acceleration: `numba`
 
+## Process CAD Shell
+
+The WebUI provides a fixed three-pane CAD workspace for process engineers: **Process Flow** (step list with drag-and-drop ordering, double-click rename, per-step execution status), **Parameters** (editor driven by `ProcessStep.parameter_specs()`, autosaved with dirty-marking of the current and later steps), and the **3D Viewer** (WebGL2 with seven standard views, perspective/orthographic cameras, independent X/Y/Z clipping planes, and MaterialVisual-driven display control). A timeline bar under the workspace supports Previous/Next and slider review of valid step snapshots without recomputation; undo/redo restores model state together with runtime statuses, step errors, and the timeline position.
+
+Three demo recipes are built in: **Basic Trench**, **Spacer Formation**, and **Bonding + Thinning** (select them under *Process Recipe → Demo Recipes*). Editing a step invalidates only that step and everything after it; earlier snapshots stay reviewable. Failed steps roll back automatically and surface structured errors (step index/type, parameter path, suggestion, rollback status). Secondary tools (Domain Settings, History, Export, AI Agent) stay in the collapsible left drawer.
+
+WebUI 提供固定三栏的 CAD 工作面：**Process Flow**（拖拽排序、双击重命名、逐步执行状态）、**Parameters**（由 `ProcessStep.parameter_specs()` 驱动、自动保存并使后续步骤 Dirty）和 **3D Viewer**（WebGL2、七个标准视图、透视/正交相机、X/Y/Z 独立裁剪、MaterialVisual 材质控制）。底部时间线支持 Previous/Next 与滑杆回看有效快照且不触发重算；撤销/重做会连同运行状态、步骤错误和时间线位置一起原子恢复。
+
+内置 **Basic Trench**、**Spacer Formation**、**Bonding + Thinning** 三个示例配方（在 *Process Recipe → Demo Recipes* 中加载）。编辑步骤只使当前及后续步骤失效，前序快照保持可回看；失败步骤自动回滚并展示结构化错误（步骤索引/类型、参数路径、建议操作、回滚状态）。Domain Settings、History、Export、AI Agent 等次级工具保留在左侧可折叠抽屉中。
+
 ## Run
 
 Desktop application:
@@ -539,6 +550,16 @@ split_tcad.bat
 Generated outputs include `tcad_simulator_split/docs/`, `tcad_simulator_split/docs_html/`, `SPLIT_REPORT.json`, and `VERIFY_REPORT.json`. They are for developer inspection and are ignored by default.
 
 生成物包括 `tcad_simulator_split/docs/`、`tcad_simulator_split/docs_html/`、`SPLIT_REPORT.json` 和 `VERIFY_REPORT.json`，用于开发检查，默认被 Git 忽略。
+
+A reproducible Process CAD baseline runs five named flows headless on a cubic 640 nm physical domain and records per-flow wall time, best-effort process RSS (see the `peak_rss_scope` field; falls back to `psutil` or `null` on Windows), occupied voxels, material-semantic checks, and preview-mesh triangle counts. WebUI, Golden tests, and the baseline share the public `load_demo_flows(material_db)` registry. `--grid` controls the resolution on all three axes, so `--grid 128` is a true 128³ run with 5 nm voxels:
+
+```bash
+TCAD_SKIP_QT=1 MPLBACKEND=Agg python3 tools/run_process_cad_baseline.py --grid 128 --output /tmp/tcad-cad-baseline.json
+```
+
+Exit code 0 and `"ok": true` mean all five flows completed and passed their structural checks; the JSON is suitable for archiving and cross-revision comparison.
+
+可复现的 Process CAD 基准会在 640 nm 立方物理域中以 headless 方式运行 5 套具名流程。WebUI、Golden 测试和基准共用公开的 `load_demo_flows(material_db)` 注册表。`--grid` 同时控制三轴分辨率，因此 `--grid 128` 表示真正的 128³ 网格和 5 nm 体素。报告包含每套流程的耗时、尽力而为的进程内存（语义见 `peak_rss_scope` 字段；Windows 上回退到 `psutil` 或置空）、占用体素数、材料语义检查和预览网格面数；退出码为 0 且 `"ok": true` 表示 5 套流程均已完成并通过结构检查。
 
 ## Runtime Data
 

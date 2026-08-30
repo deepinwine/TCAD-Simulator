@@ -2926,8 +2926,11 @@ if _numba is not None:
         seeds_f = seeds.reshape(n)
         mask_f = mask.reshape(n)
         reached_f = np.zeros(n, dtype=np.bool_)
-        # Use int32 to halve memory (domain sizes are already bounded by RAM).
-        q = np.empty(n, dtype=np.int32)
+        # A connected flood can enqueue each passable voxel at most once. Sizing
+        # the queue to the mask population avoids a full-grid int32 allocation
+        # for sparse material ROIs.
+        queue_capacity = int(np.count_nonzero(mask_f))
+        q = np.empty(queue_capacity, dtype=np.int32)
         head = 0
         tail = 0
         for idx in range(n):
@@ -3668,6 +3671,15 @@ def _binary_propagation_fallback_3d(
         reached |= nxt
         front = nxt
     return reached
+
+
+def _propagate_binary_3d(seeds: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Six-neighbour binary propagation with the available optimized backend."""
+
+    if _scipy_ndimage is not None:
+        structure = _scipy_ndimage.generate_binary_structure(3, 1)
+        return _scipy_ndimage.binary_propagation(seeds, structure=structure, mask=mask)
+    return _binary_propagation_fallback_3d(seeds, mask)
 
 
 def _binary_propagation_distance_3d(
@@ -5598,6 +5610,63 @@ class Material:
         return (*self.color, 0.92)
 
 
+@dataclass(frozen=True)
+class MaterialVisual:
+    material_id: int
+    display_name: str
+    color: Tuple[float, float, float]
+    opacity: float = 1.0
+    metallic: float = 0.0
+    roughness: float = 0.72
+    visible: bool = True
+
+    def __post_init__(self) -> None:
+        try:
+            material_id = int(self.material_id)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("material_id must be convertible to int") from None
+        if not isinstance(self.display_name, str) or not self.display_name.strip():
+            raise ValueError("display_name must be a non-empty string")
+        if isinstance(self.color, (str, bytes)):
+            raise ValueError("color must contain exactly three finite values")
+        try:
+            color = tuple(float(value) for value in self.color)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("color must contain exactly three finite values") from None
+        if len(color) != 3 or any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in color):
+            raise ValueError("color must contain exactly three finite values in [0, 1]")
+
+        def normalized_scalar(name: str, value: Any) -> float:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(f"{name} must be a finite value in [0, 1]") from None
+            if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+                raise ValueError(f"{name} must be a finite value in [0, 1]")
+            return number
+
+        if not isinstance(self.visible, bool):
+            raise ValueError("visible must be a bool")
+        object.__setattr__(self, "material_id", material_id)
+        object.__setattr__(self, "display_name", str(self.display_name))
+        object.__setattr__(self, "color", color)
+        object.__setattr__(self, "opacity", normalized_scalar("opacity", self.opacity))
+        object.__setattr__(self, "metallic", normalized_scalar("metallic", self.metallic))
+        object.__setattr__(self, "roughness", normalized_scalar("roughness", self.roughness))
+        object.__setattr__(self, "visible", bool(self.visible))
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "material_id": int(self.material_id),
+            "display_name": str(self.display_name),
+            "color": [float(v) for v in self.color],
+            "opacity": float(self.opacity),
+            "metallic": float(self.metallic),
+            "roughness": float(self.roughness),
+            "visible": bool(self.visible),
+        }
+
+
 @dataclass
 class ParameterSpec:
     key: str
@@ -6323,6 +6392,40 @@ class MaterialDatabase:
 
     def material(self, mat_id: int) -> Material:
         return self._id_to_material[mat_id]
+
+    def material_visual(self, material_id: int, override: Optional[Dict[str, Any]] = None) -> MaterialVisual:
+        material = self.material(int(material_id))
+        raw = override if isinstance(override, dict) else {}
+
+        def clamp01(value: Any, default: float) -> float:
+            try:
+                number = float(value)
+                if not math.isfinite(number):
+                    return float(default)
+                return float(np.clip(number, 0.0, 1.0))
+            except Exception:
+                return float(default)
+
+        source_color = raw.get("color", material.color)
+        if isinstance(source_color, (list, tuple)) and len(source_color) == 3:
+            color = tuple(clamp01(source_color[i], material.color[i]) for i in range(3))
+        else:
+            color = tuple(float(v) for v in material.color)
+        display_name = raw.get("display_name", material.name)
+        if not isinstance(display_name, str) or not display_name.strip():
+            display_name = material.name
+        visible = raw.get("visible", True)
+        if not isinstance(visible, bool):
+            visible = True
+        return MaterialVisual(
+            material_id=int(material_id),
+            display_name=display_name,
+            color=(float(color[0]), float(color[1]), float(color[2])),
+            opacity=clamp01(raw.get("opacity", 1.0), 1.0),
+            metallic=clamp01(raw.get("metallic", 0.0), 0.0),
+            roughness=clamp01(raw.get("roughness", 0.72), 0.72),
+            visible=visible,
+        )
 
     def palette(self) -> np.ndarray:
         palette = np.zeros((len(self._id_to_material), 4), dtype=float)
@@ -7194,6 +7297,208 @@ def parse_selectivity(spec: str, material_db: MaterialDatabase) -> Dict[int, flo
     return result
 
 
+def _normalize_strip_materials(material_db: MaterialDatabase, materials: Any) -> Tuple[List[int], List[str]]:
+    """Resolve Strip material selectors without ever treating Void as removable."""
+
+    if isinstance(materials, (bool, np.bool_)) or materials is None:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+    if isinstance(materials, str):
+        raw_items: List[Any] = [part.strip() for part in re.split(r"[;,]", materials) if part.strip()]
+    elif isinstance(materials, (int, np.integer)):
+        raw_items = [materials]
+    elif isinstance(materials, np.ndarray):
+        if materials.ndim == 0:
+            raw_items = [materials.item()]
+        elif materials.ndim == 1:
+            raw_items = materials.tolist()
+        else:
+            raise ValueError("Strip material arrays must be scalar or one-dimensional.")
+    elif isinstance(materials, (list, tuple, set)):
+        raw_items = list(materials)
+    else:
+        raise ValueError("Strip materials must be material names or IDs.")
+    if not raw_items:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+
+    material_ids: List[int] = []
+    material_names: List[str] = []
+    for raw in raw_items:
+        if isinstance(raw, (bool, np.bool_)):
+            raise ValueError("Boolean values are not valid Strip material IDs.")
+        if isinstance(raw, str):
+            token = raw.strip()
+            if not token:
+                raise ValueError("Strip materials cannot contain empty names.")
+            if re.fullmatch(r"[+-]?\d+", token):
+                material_id = int(token)
+                if material_id < 0:
+                    raise ValueError(f"Unknown Strip material ID: {material_id}")
+                try:
+                    material = material_db.material(material_id)
+                except Exception as exc:
+                    raise ValueError(f"Unknown Strip material ID: {material_id}") from exc
+            else:
+                try:
+                    material_id = int(material_db.id_for(token))
+                    material = material_db.material(material_id)
+                except Exception as exc:
+                    raise ValueError(f"Unknown Strip material: {token}") from exc
+        elif isinstance(raw, (int, np.integer)):
+            material_id = int(raw)
+            if material_id < 0:
+                raise ValueError(f"Unknown Strip material ID: {material_id}")
+            try:
+                material = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown Strip material ID: {material_id}") from exc
+        else:
+            raise ValueError(f"Invalid Strip material selector: {raw!r}")
+        if material_id == 0 or material.name == "Void":
+            raise ValueError("Void cannot be selected as a Strip material.")
+        if material_id not in material_ids:
+            material_ids.append(material_id)
+            material_names.append(str(material.name))
+    if not material_ids:
+        raise ValueError("Strip materials must contain at least one non-Void material.")
+    return material_ids, material_names
+
+
+def _normalize_nonvoid_material(
+    material_db: MaterialDatabase,
+    material: Any,
+    operation: str,
+) -> Tuple[int, str]:
+    """Resolve one non-Void material name or ID for a named operation."""
+
+    operation_name = str(operation or "Process").strip() or "Process"
+    raw = material
+    if isinstance(raw, np.ndarray):
+        if raw.ndim != 0:
+            raise ValueError(f"{operation_name} material arrays must be zero-dimensional IDs.")
+        raw = raw.item()
+    if isinstance(raw, (bool, np.bool_)) or raw is None:
+        raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
+    if isinstance(raw, str):
+        token = raw.strip()
+        if not token:
+            raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
+        if re.fullmatch(r"[+-]?\d+", token):
+            material_id = int(token)
+            try:
+                resolved = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown {operation_name} material ID: {material_id}") from exc
+        else:
+            try:
+                material_id = int(material_db.id_for(token))
+                resolved = material_db.material(material_id)
+            except Exception as exc:
+                raise ValueError(f"Unknown {operation_name} material: {token}") from exc
+    elif isinstance(raw, (int, np.integer)):
+        material_id = int(raw)
+        try:
+            resolved = material_db.material(material_id)
+        except Exception as exc:
+            raise ValueError(f"Unknown {operation_name} material ID: {material_id}") from exc
+    else:
+        raise ValueError(f"{operation_name} material must be one non-Void material name or ID.")
+    if material_id <= 0 or resolved.name == "Void":
+        raise ValueError(f"Void cannot be selected as a {operation_name} material.")
+    if material_id > int(np.iinfo(np.uint16).max):
+        raise ValueError(f"{operation_name} material ID is outside the voxel range: {material_id}")
+    return material_id, str(resolved.name)
+
+
+def _normalize_fill_material(material_db: MaterialDatabase, material: Any) -> Tuple[int, str]:
+    """Resolve one non-Void Fill material name or ID."""
+
+    return _normalize_nonvoid_material(material_db, material, "Fill")
+
+
+def _fill_enclosed_xy_holes(occupied_xy: np.ndarray) -> np.ndarray:
+    """Add XY holes enclosed by occupied columns to the physical wafer footprint.
+
+    Four-neighbour connectivity matches the XY cross-section of the simulator's
+    six-neighbour 3D accessibility rule.  Boundary-connected concavities remain
+    exterior; this is intentionally not a convex-hull operation.
+    """
+
+    occupied = np.asarray(occupied_xy, dtype=bool)
+    if occupied.ndim != 2:
+        raise ValueError("Fill wafer footprint must be a two-dimensional mask.")
+    if occupied.size == 0:
+        return occupied.copy()
+    if _scipy_ndimage is not None:
+        try:
+            structure = _scipy_ndimage.generate_binary_structure(2, 1)
+            return _scipy_ndimage.binary_fill_holes(occupied, structure=structure).astype(bool, copy=False)
+        except Exception:
+            pass
+
+    exterior_allowed = ~occupied
+    reached = np.zeros_like(occupied, dtype=bool)
+    reached[0, :] = exterior_allowed[0, :]
+    reached[-1, :] |= exterior_allowed[-1, :]
+    reached[:, 0] |= exterior_allowed[:, 0]
+    reached[:, -1] |= exterior_allowed[:, -1]
+    front = reached.copy()
+    while np.any(front):
+        next_front = np.zeros_like(front, dtype=bool)
+        next_front[1:, :] |= front[:-1, :]
+        next_front[:-1, :] |= front[1:, :]
+        next_front[:, 1:] |= front[:, :-1]
+        next_front[:, :-1] |= front[:, 1:]
+        next_front &= exterior_allowed
+        next_front &= ~reached
+        if not np.any(next_front):
+            break
+        reached |= next_front
+        front = next_front
+    return ~reached
+
+
+def _strip_target_seeds(target_mask: np.ndarray, accessible_void: np.ndarray, boundary_z: int) -> np.ndarray:
+    """Build exterior-adjacent Strip seeds with one full-size output allocation."""
+
+    target_mask = np.asarray(target_mask, dtype=bool)
+    accessible_void = np.asarray(accessible_void, dtype=bool)
+    if target_mask.shape != accessible_void.shape or target_mask.ndim != 3:
+        raise ValueError("Strip target/accessibility masks must be matching 3D arrays.")
+    if boundary_z not in {-1, 0}:
+        raise ValueError("Strip boundary must be top (-1) or bottom (0).")
+    target_seeds = np.zeros_like(target_mask, dtype=bool)
+    for output_view, void_view, target_view in (
+        (target_seeds[1:, :, :], accessible_void[:-1, :, :], target_mask[1:, :, :]),
+        (target_seeds[:-1, :, :], accessible_void[1:, :, :], target_mask[:-1, :, :]),
+        (target_seeds[:, 1:, :], accessible_void[:, :-1, :], target_mask[:, 1:, :]),
+        (target_seeds[:, :-1, :], accessible_void[:, 1:, :], target_mask[:, :-1, :]),
+        (target_seeds[:, :, 1:], accessible_void[:, :, :-1], target_mask[:, :, 1:]),
+        (target_seeds[:, :, :-1], accessible_void[:, :, 1:], target_mask[:, :, :-1]),
+    ):
+        np.logical_or(output_view, void_view, out=output_view, where=target_view)
+    np.logical_or(
+        target_seeds[:, :, boundary_z],
+        target_mask[:, :, boundary_z],
+        out=target_seeds[:, :, boundary_z],
+    )
+    return target_seeds
+
+
+def _strip_mask_bounds(mask: np.ndarray) -> Tuple[slice, slice, slice]:
+    """Return the tight 3D bounding box of a non-empty boolean mask."""
+
+    x_idx = np.flatnonzero(np.any(mask, axis=(1, 2)))
+    y_idx = np.flatnonzero(np.any(mask, axis=(0, 2)))
+    z_idx = np.flatnonzero(np.any(mask, axis=(0, 1)))
+    if not (x_idx.size and y_idx.size and z_idx.size):
+        raise ValueError("Cannot bound an empty Strip mask.")
+    return (
+        slice(int(x_idx[0]), int(x_idx[-1]) + 1),
+        slice(int(y_idx[0]), int(y_idx[-1]) + 1),
+        slice(int(z_idx[0]), int(z_idx[-1]) + 1),
+    )
+
+
 def resample_mask(mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
     """Resize a boolean mask to `target_shape`.
 
@@ -7517,6 +7822,7 @@ class ProcessModel:
         except Exception:
             self.resist_material_id = 0
         self.last_implant_species: Optional[str] = None
+        self.active_side = "top"
         self.current_time_s = 0.0
         self.history: List[str] = []
         self._mesh_cache.clear()
@@ -7600,6 +7906,296 @@ class ProcessModel:
 
     def material_at(self, x: int, y: int, z: int) -> int:
         return int(self.grid[x, y, z])
+
+    def _spatial_volume_field_names(self) -> Tuple[str, ...]:
+        """Model attributes whose arrays follow the full 3D voxel grid."""
+
+        return (
+            "doping",
+            "active_dopants",
+            "interstitials",
+            "vacancies",
+            "cluster_interstitial",
+            "cluster_bic",
+            "damage_concentration",
+            "temperature",
+            "defects_interstitial",
+            "defects_vacancy",
+        )
+
+    @staticmethod
+    def _normalize_active_side(value: Any) -> str:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"top", "bottom"}:
+                return normalized
+        return "top"
+
+    @staticmethod
+    def _state_field_names(state: Any) -> Tuple[str, ...]:
+        """Return stored field names without assuming the object supports vars()."""
+
+        names: Set[str] = set()
+        mapping = getattr(state, "__dict__", None)
+        if isinstance(mapping, dict):
+            names.update(str(name) for name in mapping)
+        dataclass_fields = getattr(state, "__dataclass_fields__", None)
+        if isinstance(dataclass_fields, dict):
+            names.update(str(name) for name in dataclass_fields)
+        for cls in getattr(type(state), "__mro__", ()):
+            slots = getattr(cls, "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            try:
+                names.update(str(name) for name in slots if name not in {"__dict__", "__weakref__"})
+            except TypeError:
+                continue
+        return tuple(sorted(names))
+
+    def flip_wafer(self) -> str:
+        """Reverse the wafer Z axis while keeping co-located volume fields aligned."""
+
+        shape = self.grid.shape
+        old_grid = self.grid
+        self.grid = np.flip(old_grid, axis=2).copy()
+        flipped_by_identity: Dict[int, np.ndarray] = {id(old_grid): self.grid}
+
+        def _flipped_volume(value: Any) -> Any:
+            if not isinstance(value, np.ndarray) or value.shape != shape:
+                return value
+            identity = id(value)
+            flipped = flipped_by_identity.get(identity)
+            if flipped is None:
+                flipped = np.flip(value, axis=2).copy()
+                flipped_by_identity[identity] = flipped
+            return flipped
+
+        for name in self._spatial_volume_field_names():
+            value = getattr(self, name, None)
+            flipped = _flipped_volume(value)
+            if flipped is not value:
+                setattr(self, name, flipped)
+
+        dopant_fields = getattr(self, "dopant_species_fields", None)
+        if isinstance(dopant_fields, dict):
+            for key, value in list(dopant_fields.items()):
+                flipped = _flipped_volume(value)
+                if flipped is not value:
+                    dopant_fields[key] = flipped
+
+        resist_state = getattr(self, "_resist_state", None)
+        if isinstance(resist_state, dict):
+            for key, value in list(resist_state.items()):
+                flipped = _flipped_volume(value)
+                if flipped is not value:
+                    resist_state[key] = flipped
+        elif resist_state is not None:
+            for name in self._state_field_names(resist_state):
+                try:
+                    value = getattr(resist_state, name)
+                except Exception:
+                    continue
+                flipped = _flipped_volume(value)
+                if flipped is value:
+                    continue
+                try:
+                    setattr(resist_state, name, flipped)
+                except Exception:
+                    continue
+
+        current_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        self.active_side = "bottom" if current_side == "top" else "top"
+        self._rebuild_height_map()
+        self._log(f"Wafer flipped: active side is now {self.active_side}")
+        return self.active_side
+
+    def bond_wafer(
+        self,
+        handle_material: Any,
+        handle_thickness_nm: float,
+        bonding_material: Any,
+        bonding_layer_nm: float,
+    ) -> Dict[str, Any]:
+        """Attach a bonding layer and handle wafer outside the current active side."""
+
+        handle_id, handle_name = _normalize_nonvoid_material(
+            self.material_db,
+            handle_material,
+            "Bonding handle",
+        )
+        bond_id, bond_name = _normalize_nonvoid_material(
+            self.material_db,
+            bonding_material,
+            "Bonding layer",
+        )
+
+        def _thickness_voxels(value: Any, label: str, *, allow_zero: bool) -> int:
+            if isinstance(value, (bool, np.bool_)):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.")
+            try:
+                thickness_nm = float(value)
+            except (TypeError, ValueError, OverflowError):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.") from None
+            valid = thickness_nm >= 0.0 if allow_zero else thickness_nm > 0.0
+            if not math.isfinite(thickness_nm) or not valid:
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{label} must be a {qualifier} finite number.")
+            if thickness_nm == 0.0:
+                return 0
+            return max(1, int(math.ceil(thickness_nm / float(self.voxel_size_nm))))
+
+        handle_voxels = _thickness_voxels(
+            handle_thickness_nm,
+            "Bonding handle thickness",
+            allow_zero=False,
+        )
+        bond_voxels = _thickness_voxels(
+            bonding_layer_nm,
+            "Bonding layer thickness",
+            allow_zero=True,
+        )
+        required_voxels = handle_voxels + bond_voxels
+        occupied_z = np.flatnonzero(np.any(self.grid != 0, axis=(0, 1)))
+        if occupied_z.size == 0:
+            raise ValueError("Cannot bond a wafer onto an empty model.")
+
+        active_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        nz = int(self.grid.shape[2])
+        if active_side == "top":
+            surface = int(occupied_z[-1])
+            available_voxels = nz - surface - 1
+            target_start = surface + 1
+            target_stop = target_start + required_voxels
+            bond_slice = slice(target_start, target_start + bond_voxels)
+            handle_slice = slice(target_start + bond_voxels, target_stop)
+        else:
+            surface = int(occupied_z[0])
+            available_voxels = surface
+            target_start = surface - required_voxels
+            target_stop = surface
+            handle_slice = slice(target_start, surface - bond_voxels)
+            bond_slice = slice(surface - bond_voxels, surface)
+
+        if required_voxels > available_voxels:
+            raise ValueError(
+                "Insufficient Z space for Bonding: "
+                f"required {required_voxels} voxels, available {available_voxels} voxels."
+            )
+
+        volume_roi = (slice(None), slice(None), slice(target_start, target_stop))
+        if np.any(self.grid[volume_roi] != 0):
+            raise ValueError("Bonding target volume contains non-Void voxels; existing material was not overwritten.")
+        spatial_arrays = self._require_writable_spatial_volumes("Bonding")
+
+        if bond_voxels:
+            self.grid[:, :, bond_slice] = np.uint16(bond_id)
+        self.grid[:, :, handle_slice] = np.uint16(handle_id)
+        self._clear_spatial_volume_mask(volume_roi, arrays=spatial_arrays)
+        self.active_side = active_side
+        self._rebuild_height_map([bond_id, handle_id])
+
+        nx, ny = int(self.grid.shape[0]), int(self.grid.shape[1])
+        bond_cells = nx * ny * bond_voxels
+        handle_cells = nx * ny * handle_voxels
+        self._log(
+            f"Bonding ({active_side}) added {bond_voxels} voxel layer(s) of {bond_name} "
+            f"and {handle_voxels} voxel layer(s) of handle {handle_name}"
+        )
+        return {
+            "bond_voxels": bond_voxels,
+            "handle_voxels": handle_voxels,
+            "bond_cells": bond_cells,
+            "handle_cells": handle_cells,
+            "active_side": active_side,
+        }
+
+    def thin_wafer(self, target_thickness_nm: float, material: Any) -> int:
+        """Thin the backside-facing, contiguous segment of one material.
+
+        Leading non-target cap layers are skipped when locating the segment and
+        are intentionally preserved. Within the selected Z layers, only target
+        material cells are removed, so mixed-material features remain. A
+        target-free Z plane separates same-material wafer components, such as a
+        device wafer and a bonded handle wafer.
+        """
+
+        material_id, material_name = _normalize_nonvoid_material(
+            self.material_db,
+            material,
+            "Thinning",
+        )
+        if isinstance(target_thickness_nm, (bool, np.bool_)):
+            raise ValueError("Thinning target thickness must be a positive finite number.")
+        try:
+            target_nm = float(target_thickness_nm)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Thinning target thickness must be a positive finite number.") from None
+        if not math.isfinite(target_nm) or target_nm <= 0.0:
+            raise ValueError("Thinning target thickness must be a positive finite number.")
+        target_layers = max(1, int(math.ceil(target_nm / float(self.voxel_size_nm))))
+
+        active_side = self._normalize_active_side(getattr(self, "active_side", "top"))
+        backside_is_low_z = active_side == "top"
+        nz = int(self.grid.shape[2])
+        material_value = np.uint16(material_id)
+        plane_mask = np.empty(self.grid.shape[:2], dtype=bool)
+        scan_z = range(nz) if backside_is_low_z else range(nz - 1, -1, -1)
+        segment_edge: Optional[int] = None
+        segment_stop: Optional[int] = None
+        for z in scan_z:
+            np.equal(self.grid[:, :, z], material_value, out=plane_mask)
+            present = bool(np.any(plane_mask))
+            if segment_edge is None:
+                if not present:
+                    continue
+                segment_edge = z
+                segment_stop = z
+            elif present:
+                segment_stop = z
+            else:
+                break
+        if segment_edge is None or segment_stop is None:
+            return 0
+
+        segment_layers = abs(segment_stop - segment_edge) + 1
+        if target_layers >= segment_layers:
+            return 0
+        remove_layers = segment_layers - target_layers
+        if backside_is_low_z:
+            removal_z = range(segment_edge, segment_edge + remove_layers)
+        else:
+            removal_z = range(segment_edge, segment_edge - remove_layers, -1)
+
+        removed_cells = 0
+        for z in removal_z:
+            np.equal(self.grid[:, :, z], material_value, out=plane_mask)
+            removed_cells += int(np.count_nonzero(plane_mask))
+        if removed_cells <= 0:
+            return 0
+
+        spatial_arrays = self._require_writable_spatial_volumes("Thinning")
+        layer_mask = plane_mask[..., np.newaxis]
+        for z in removal_z:
+            material_layer = self.grid[:, :, z]
+            np.equal(material_layer, material_value, out=plane_mask)
+            material_layer[plane_mask] = np.uint16(0)
+            layer_roi = (slice(None), slice(None), slice(z, z + 1))
+            self._clear_spatial_volume_mask(
+                layer_roi,
+                layer_mask,
+                arrays=spatial_arrays,
+            )
+        self.active_side = active_side
+        self._rebuild_height_map([material_id])
+        backside = "bottom (low Z)" if backside_is_low_z else "top (high Z)"
+        self._log(
+            f"Thinning {material_name} from backside {backside}: removed "
+            f"{remove_layers} voxel layer(s), {removed_cells} cell(s), "
+            f"target {target_layers} voxel layer(s)"
+        )
+        return removed_cells
 
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -7994,6 +8590,69 @@ class ProcessModel:
             except Exception:
                 continue
 
+    def _spatial_volume_arrays(self) -> Tuple[np.ndarray, ...]:
+        """Collect the grid and all co-located 3D state arrays once by identity."""
+
+        arrays: List[np.ndarray] = []
+        seen: Set[int] = set()
+
+        def _collect(value: Any) -> None:
+            if not isinstance(value, np.ndarray) or value.shape != self.grid.shape or id(value) in seen:
+                return
+            arrays.append(value)
+            seen.add(id(value))
+
+        _collect(self.grid)
+        for field_name in self._spatial_volume_field_names():
+            _collect(getattr(self, field_name, None))
+
+        dopant_fields = getattr(self, "dopant_species_fields", None)
+        if isinstance(dopant_fields, dict):
+            for field in dopant_fields.values():
+                _collect(field)
+
+        resist_state = getattr(self, "_resist_state", None)
+        if isinstance(resist_state, dict):
+            for field in resist_state.values():
+                _collect(field)
+        elif resist_state is not None:
+            for field_name in self._state_field_names(resist_state):
+                try:
+                    field = getattr(resist_state, field_name)
+                except Exception:
+                    continue
+                _collect(field)
+        return tuple(arrays)
+
+    def _require_writable_spatial_volumes(self, operation: str) -> Tuple[np.ndarray, ...]:
+        """Validate every array that an operation will mutate before its first write."""
+
+        arrays = self._spatial_volume_arrays()
+        if any(not bool(array.flags.writeable) for array in arrays):
+            operation_name = str(operation or "Process").strip() or "Process"
+            raise ValueError(
+                f"{operation_name} requires a writable voxel grid and writable co-located 3D state arrays."
+            )
+        return arrays
+
+    def _clear_spatial_volume_mask(
+        self,
+        roi: Tuple[slice, slice, slice],
+        mask: Optional[np.ndarray] = None,
+        *,
+        arrays: Optional[Sequence[np.ndarray]] = None,
+    ) -> None:
+        """Clear co-located 3D state once per array identity inside an ROI."""
+
+        spatial_arrays = tuple(arrays) if arrays is not None else self._spatial_volume_arrays()
+        for field in spatial_arrays:
+            if field is self.grid:
+                continue
+            if mask is None:
+                field[roi] = 0.0
+            else:
+                field[roi][mask] = 0.0
+
     def _clear_dopant_species_top_layers(
         self, xs: np.ndarray, ys: np.ndarray, heights_before: np.ndarray, removed_layers: np.ndarray
     ) -> None:
@@ -8275,12 +8934,23 @@ class ProcessModel:
             "cluster_interstitial": _pack_field(getattr(self, "cluster_interstitial", None), "cluster_interstitial"),
             "cluster_bic": _pack_field(getattr(self, "cluster_bic", None), "cluster_bic"),
             "damage_concentration": _pack_field(getattr(self, "damage_concentration", None), "damage_concentration"),
+            "temperature": _pack_field(getattr(self, "temperature", None), "temperature"),
             # Always pack 2D fields: big on large domains and used heavily by undo/time-travel caches.
             "height_map": _pack_field(getattr(self, "height_map", None), "height_map"),
             "open_mask": _pack_field(getattr(self, "open_mask", None), "open_mask"),
             "resist_exposure": _pack_field(getattr(self, "resist_exposure", None), "resist_exposure"),
             "last_intensity": _pack_field(getattr(self, "last_intensity", None), "last_intensity"),
             "resist_type": self.resist_type,
+            "resist_material_id": int(getattr(self, "resist_material_id", 0)),
+            "resist_diffusion_length_nm": float(getattr(self, "resist_diffusion_length_nm", 0.0)),
+            "last_implant_species": getattr(self, "last_implant_species", None),
+            "active_side": self._normalize_active_side(getattr(self, "active_side", "top")),
+            "wafer_orientation": getattr(self, "wafer_orientation", None),
+            "crystal_orientation": _pack_field(getattr(self, "crystal_orientation", None), "crystal_orientation"),
+            "pending_interstitial_injection": _pack_field(
+                getattr(self, "_pending_interstitial_injection", None), "pending_interstitial_injection"
+            ),
+            "last_step_stats": copy.deepcopy(getattr(self, "_last_step_stats", {})),
             "voxel_size_nm": self.voxel_size_nm,
             "substrate_material": self.substrate_material,
             "substrate_thickness_nm": self.substrate_thickness_nm,
@@ -8296,6 +8966,16 @@ class ProcessModel:
                 packed[str(sym).strip()] = _pack_field(arr, f"dopant_{sym}")
             if packed:
                 state["dopant_species"] = packed
+        fraction_fields = getattr(self, "_column_fraction", None)
+        packed_fractions: Dict[str, Any] = {}
+        if isinstance(fraction_fields, dict):
+            for key, arr in fraction_fields.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                blob = _pack_field(arr, f"column_fraction_{key}")
+                if blob is not None:
+                    packed_fractions[key] = blob
+        state["column_fraction"] = packed_fractions
         if grid_blob["mode"] == "dense":
             state["grid"] = grid_blob["payload"]
         if self._resist_state is not None:
@@ -8484,6 +9164,32 @@ class ProcessModel:
         else:
             self.last_intensity = np.zeros(self.grid.shape[:2], dtype=np.float64)
         self.resist_type = state.get("resist_type", self.resist_type)
+        try:
+            default_resist_material_id = int(self.material_db.id_for("Photoresist"))
+        except Exception:
+            default_resist_material_id = 0
+        try:
+            self.resist_material_id = int(
+                state.get("resist_material_id", default_resist_material_id)
+            )
+        except (TypeError, ValueError, OverflowError):
+            self.resist_material_id = default_resist_material_id
+        try:
+            self.resist_diffusion_length_nm = float(state.get("resist_diffusion_length_nm", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            self.resist_diffusion_length_nm = 0.0
+        species = state.get("last_implant_species")
+        self.last_implant_species = None if species is None else str(species)
+        self.active_side = self._normalize_active_side(state.get("active_side", "top"))
+        orientation = state.get("wafer_orientation")
+        self.wafer_orientation = None if orientation is None else str(orientation)
+        self.crystal_orientation = np.eye(3, dtype=np.float64)
+        if "crystal_orientation" in state:
+            crystal = _unpack_field(state.get("crystal_orientation"))
+            if isinstance(crystal, np.ndarray) and crystal.shape == (3, 3):
+                self.crystal_orientation = crystal.astype(np.float64, copy=False)
+        stats = state.get("last_step_stats")
+        self._last_step_stats = copy.deepcopy(stats) if isinstance(stats, dict) else {}
         self.voxel_size_nm = state.get("voxel_size_nm", self.voxel_size_nm)
         self.grid_shape = self.grid.shape
         self.substrate_material = state.get("substrate_material", self.substrate_material)
@@ -8504,7 +9210,20 @@ class ProcessModel:
                 self.open_mask &= stored_arr.astype(bool, copy=False)
             except Exception:
                 pass
-        self._pending_interstitial_injection = None
+        if "pending_interstitial_injection" in state:
+            self._pending_interstitial_injection = _unpack_field(state.get("pending_interstitial_injection"))
+        else:
+            self._pending_interstitial_injection = None
+        restored_fractions: Dict[str, np.ndarray] = {}
+        raw_fractions = state.get("column_fraction")
+        if isinstance(raw_fractions, dict):
+            for key, blob in raw_fractions.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                arr = _unpack_field(blob)
+                if isinstance(arr, np.ndarray):
+                    restored_fractions[key] = arr.astype(np.float32, copy=False)
+        self._column_fraction = restored_fractions
         resist_blob = state.get("resist_state")
         if resist_blob:
             try:
@@ -12271,6 +12990,174 @@ class ProcessModel:
         )
         results = self.reconstruct_material_components(material_id, enforced)
         return [res.brep_solid for res in results if res.brep_solid is not None]
+
+    # -- fill -------------------------------------------------------------------
+
+    def fill_voids(
+        self,
+        material: Any,
+        max_depth_nm: float,
+        direction: str = "top",
+        include_sealed: bool = False,
+    ) -> int:
+        """Fill directionally reachable voids inside a bounded surface-depth window."""
+
+        material_id, material_name = _normalize_fill_material(self.material_db, material)
+        if isinstance(max_depth_nm, (bool, np.bool_)):
+            raise ValueError("Fill max_depth_nm must be a positive finite number.")
+        try:
+            depth_nm = float(max_depth_nm)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Fill max_depth_nm must be a positive finite number.") from None
+        if not math.isfinite(depth_nm) or depth_nm <= 0.0:
+            raise ValueError("Fill max_depth_nm must be a positive finite number.")
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in {"top", "bottom"}:
+            raise ValueError("Fill direction must be 'top' or 'bottom'.")
+        if not isinstance(include_sealed, (bool, np.bool_)):
+            raise ValueError("Fill include_sealed must be a boolean.")
+
+        occupied_z = np.flatnonzero(np.any(self.grid, axis=(0, 1)))
+        if occupied_z.size == 0:
+            return 0
+        occupied_xy = np.any(self.grid, axis=2)
+        wafer_footprint = _fill_enclosed_xy_holes(occupied_xy)
+        occupied_x = np.flatnonzero(np.any(occupied_xy, axis=1))
+        occupied_y = np.flatnonzero(np.any(occupied_xy, axis=0))
+        if not (occupied_x.size and occupied_y.size):
+            return 0
+
+        nx, ny = (int(self.grid.shape[0]), int(self.grid.shape[1]))
+        x_slice = slice(max(0, int(occupied_x[0]) - 1), min(nx, int(occupied_x[-1]) + 2))
+        y_slice = slice(max(0, int(occupied_y[0]) - 1), min(ny, int(occupied_y[-1]) + 2))
+        grid_roi = self.grid[x_slice, y_slice, :]
+        footprint = wafer_footprint[x_slice, y_slice]
+        depth_voxels = max(1, int(math.ceil(depth_nm / float(self.voxel_size_nm))))
+        nz = int(self.grid.shape[2])
+        if direction_key == "top":
+            surface = int(occupied_z[-1])
+            z_start = max(0, surface - depth_voxels + 1)
+            z_stop = surface + 1
+            boundary_z = -1
+        else:
+            surface = int(occupied_z[0])
+            z_start = surface
+            z_stop = min(nz, surface + depth_voxels)
+            boundary_z = 0
+        z_slice = slice(z_start, z_stop)
+
+        if bool(include_sealed):
+            fill_mask = np.equal(grid_roi[:, :, z_slice], 0)
+        else:
+            void_roi = np.equal(grid_roi, 0)
+            exterior_seeds = np.zeros_like(void_roi, dtype=bool)
+            exterior_seeds[:, :, boundary_z] = void_roi[:, :, boundary_z]
+            if x_slice.start == 0:
+                exterior_seeds[0, :, :] |= void_roi[0, :, :]
+            if x_slice.stop == nx:
+                exterior_seeds[-1, :, :] |= void_roi[-1, :, :]
+            if y_slice.start == 0:
+                exterior_seeds[:, 0, :] |= void_roi[:, 0, :]
+            if y_slice.stop == ny:
+                exterior_seeds[:, -1, :] |= void_roi[:, -1, :]
+            reachable = _propagate_binary_3d(exterior_seeds, void_roi)
+            del exterior_seeds
+            del void_roi
+            fill_mask = np.ascontiguousarray(reachable[:, :, z_slice])
+            del reachable
+        np.logical_and(fill_mask, footprint[:, :, None], out=fill_mask)
+        filled = int(np.count_nonzero(fill_mask))
+        if filled <= 0:
+            return 0
+
+        volume_roi = (x_slice, y_slice, z_slice)
+        spatial_arrays = self._require_writable_spatial_volumes("Fill")
+        self.grid[volume_roi][fill_mask] = np.uint16(material_id)
+        self._clear_spatial_volume_mask(volume_roi, fill_mask, arrays=spatial_arrays)
+        self._rebuild_height_map([material_id])
+        mode = "including sealed" if bool(include_sealed) else "exterior-connected"
+        self._log(
+            f"Fill ({mode}, {direction_key}, max {depth_nm:.3g} nm) "
+            f"added {filled} voxels: {material_name}"
+        )
+        return filled
+
+    # -- strip ------------------------------------------------------------------
+
+    def strip_materials(
+        self,
+        materials: Any,
+        exposed_only: bool = False,
+        direction: str = "top",
+    ) -> int:
+        """Remove selected materials globally or only in exterior-connected components."""
+
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in {"top", "bottom"}:
+            raise ValueError("Strip direction must be 'top' or 'bottom'.")
+        if not isinstance(exposed_only, (bool, np.bool_)):
+            raise ValueError("Strip exposed_only must be a boolean.")
+        material_ids, material_names = _normalize_strip_materials(self.material_db, materials)
+        present_materials = set(self._ensure_material_z_cache()[2])
+        if not any(material_id in present_materials for material_id in material_ids):
+            return 0
+
+        if bool(exposed_only):
+            void_mask = self.grid == 0
+            void_seeds = np.zeros_like(void_mask, dtype=bool)
+            boundary_z = -1 if direction_key == "top" else 0
+            void_seeds[:, :, boundary_z] = void_mask[:, :, boundary_z]
+            if np.any(void_seeds):
+                accessible_void = _propagate_binary_3d(void_seeds, void_mask)
+            else:
+                accessible_void = np.zeros_like(void_mask, dtype=bool)
+            del void_seeds
+            del void_mask
+
+            target_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
+            target_seeds = _strip_target_seeds(target_mask, accessible_void, boundary_z)
+            del accessible_void
+            if not np.any(target_seeds):
+                return 0
+
+            target_bounds = _strip_mask_bounds(target_mask)
+            target_shape = tuple(int(s.stop - s.start) for s in target_bounds)
+            target_volume = int(np.prod(target_shape, dtype=np.int64))
+            if target_volume * 2 < int(target_mask.size):
+                propagation_mask = np.ascontiguousarray(target_mask[target_bounds])
+                propagation_seeds = np.ascontiguousarray(target_seeds[target_bounds])
+                del target_mask
+                del target_seeds
+                volume_roi = target_bounds
+            else:
+                propagation_mask = target_mask
+                propagation_seeds = target_seeds
+                volume_roi = (slice(None), slice(None), slice(None))
+            removal_mask = _propagate_binary_3d(propagation_seeds, propagation_mask)
+            del propagation_seeds
+            del propagation_mask
+        else:
+            removal_mask = np.isin(self.grid, np.asarray(material_ids, dtype=np.uint16))
+            volume_roi = (slice(None), slice(None), slice(None))
+
+        removed = int(np.count_nonzero(removal_mask))
+        if removed <= 0:
+            return 0
+        self.grid[volume_roi][removal_mask] = np.uint16(0)
+        for field_name in self._spatial_volume_field_names():
+            field = getattr(self, field_name, None)
+            if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
+                field[volume_roi][removal_mask] = 0.0
+        self._clear_dopant_species_mask(volume_roi, removal_mask)
+        resist_state = getattr(self, "_resist_state", None)
+        if resist_state is not None:
+            for field in vars(resist_state).values():
+                if isinstance(field, np.ndarray) and field.shape == self.grid.shape:
+                    field[volume_roi][removal_mask] = 0.0
+        self._rebuild_height_map(material_ids)
+        mode = "exposed" if bool(exposed_only) else "global"
+        self._log(f"Strip ({mode}, {direction_key}) removed {removed} voxels: {', '.join(material_names)}")
+        return removed
 
     # -- etch -------------------------------------------------------------------
 
@@ -18035,6 +18922,7 @@ class ProcessStep:
         self.material_db = material_db
         self.enabled = True
         self.params: Dict[str, Any] = {}
+        self.instance_name = str(self.name)
         # Optional UI-only grouping label (used to cluster steps into "loops"/stations for caching).
         # This must not affect execution semantics.
         self.loop = ""
@@ -18760,6 +19648,204 @@ class SelectiveEpitaxyStep(ProcessStep):
             model.last_implant_species = lattice_species
 
 
+class FillStep(ProcessStep):
+    name = "Fill"
+    group = "Deposition"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec("material", "Fill material", "enum", "Copper", choices=materials),
+            ParameterSpec(
+                "max_depth_nm",
+                "Maximum fill depth",
+                "float",
+                100.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "direction",
+                "Access direction",
+                "enum",
+                "top",
+                choices=[("top", "Top"), ("bottom", "Bottom")],
+            ),
+            ParameterSpec(
+                "include_sealed",
+                "Include sealed voids",
+                "bool",
+                False,
+                tooltip="Also fill sealed cavities inside the selected depth window.",
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        material_id, material_name = _normalize_fill_material(
+            model.material_db,
+            self.params.get("material"),
+        )
+        filled = model.fill_voids(
+            material_id,
+            self.params.get("max_depth_nm"),
+            direction=self.params.get("direction"),
+            include_sealed=self.params.get("include_sealed"),
+        )
+        return f"Fill {material_name}: added {filled} voxels"
+
+
+class StripStep(ProcessStep):
+    name = "Strip"
+    group = "Clean"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        return (
+            ParameterSpec(
+                "materials",
+                "Materials",
+                "text",
+                "Photoresist",
+                tooltip="Material names or IDs separated by semicolons (commas are also accepted).",
+            ),
+            ParameterSpec(
+                "exposed_only",
+                "Exposed components only",
+                "bool",
+                False,
+                tooltip="Only remove selected components reachable from the chosen Z boundary.",
+            ),
+            ParameterSpec(
+                "direction",
+                "Access direction",
+                "enum",
+                "top",
+                choices=[("top", "Top"), ("bottom", "Bottom")],
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        raw_materials = self.params.get("materials", "")
+        material_ids, material_names = _normalize_strip_materials(model.material_db, raw_materials)
+        exposed_only = self.params.get("exposed_only", False)
+        if not isinstance(exposed_only, (bool, np.bool_)):
+            raise ValueError("Strip exposed_only must be a boolean.")
+        direction = str(self.params.get("direction", "") or "").strip().lower()
+        if direction not in {"top", "bottom"}:
+            raise ValueError("Strip direction must be 'top' or 'bottom'.")
+        removed = model.strip_materials(
+            material_ids,
+            exposed_only=bool(exposed_only),
+            direction=direction,
+        )
+        return f"Strip {', '.join(material_names)}: removed {removed} voxels"
+
+
+class WaferFlipStep(ProcessStep):
+    name = "Wafer Flip"
+    group = "Wafer"
+
+    def execute(self, model: ProcessModel) -> str:
+        active_side = model.flip_wafer()
+        return f"Wafer Flip: active side {active_side}"
+
+
+class BondingStep(ProcessStep):
+    name = "Bonding"
+    group = "Wafer"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec(
+                "handle_material",
+                "Handle wafer material",
+                "enum",
+                "Silicon",
+                choices=materials,
+            ),
+            ParameterSpec(
+                "handle_thickness_nm",
+                "Handle wafer thickness",
+                "float",
+                40.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "bonding_material",
+                "Bonding layer material",
+                "enum",
+                "Silicon Dioxide",
+                choices=materials,
+            ),
+            ParameterSpec(
+                "bonding_layer_nm",
+                "Bonding layer thickness",
+                "float",
+                10.0,
+                0.0,
+                10000.0,
+                units="nm",
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        result = model.bond_wafer(
+            self.params.get("handle_material"),
+            self.params.get("handle_thickness_nm"),
+            self.params.get("bonding_material"),
+            self.params.get("bonding_layer_nm"),
+        )
+        return (
+            f"Bonding ({result['active_side']}): added {result['bond_voxels']} bond "
+            f"and {result['handle_voxels']} handle voxel layers"
+        )
+
+
+class ThinningStep(ProcessStep):
+    name = "Thinning"
+    group = "Wafer"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        materials = [(name, name) for name in self.material_db.names() if name != "Void"]
+        return (
+            ParameterSpec(
+                "target_thickness_nm",
+                "Target remaining thickness",
+                "float",
+                50.0,
+                0.001,
+                10000.0,
+                units="nm",
+            ),
+            ParameterSpec(
+                "material",
+                "Target material",
+                "enum",
+                "Silicon",
+                choices=materials,
+                tooltip=(
+                    "Selectively removes only this material from backside-facing layers; "
+                    "non-target cap material is preserved."
+                ),
+            ),
+        )
+
+    def execute(self, model: ProcessModel) -> str:
+        material_id, material_name = _normalize_nonvoid_material(
+            model.material_db,
+            self.params.get("material"),
+            "Thinning",
+        )
+        removed = model.thin_wafer(
+            self.params.get("target_thickness_nm"),
+            material_id,
+        )
+        return f"Thinning {material_name}: removed {removed} voxels from backside"
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
@@ -19080,6 +20166,11 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Resist Develop": DevelopStep,
     "Deposition": DepositionStep,
     "Selective Epitaxy": SelectiveEpitaxyStep,
+    "Fill": FillStep,
+    "Strip": StripStep,
+    "Wafer Flip": WaferFlipStep,
+    "Bonding": BondingStep,
+    "Thinning": ThinningStep,
     "Etch": EtchStep,
     "CMP": CMPProcessStep,
     "Ion Implant": ImplantationStep,
@@ -31062,9 +32153,158 @@ def _webui_serialize_parameter_spec(spec: ParameterSpec) -> Dict[str, Any]:
     }
 
 
+def _normalize_step_instance_name(value: Any, fallback: str) -> str:
+    fallback_name = str(fallback or "Process").strip() or "Process"
+    if not isinstance(value, str):
+        return fallback_name[:80]
+    normalized = value.strip()
+    return (normalized or fallback_name)[:80]
+
+
+_STEP_RUNTIME_STATES = frozenset({"ready", "dirty", "running", "done", "error"})
+
+
+def _step_runtime_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
+def _normalize_step_statuses(statuses: Any, recipe_length: int) -> List[str]:
+    source = list(statuses) if isinstance(statuses, (list, tuple)) else []
+    out: List[str] = []
+    for index in range(max(0, _step_runtime_int(recipe_length))):
+        raw = str(source[index]).lower() if index < len(source) else "ready"
+        out.append(raw if raw in _STEP_RUNTIME_STATES else "ready")
+    return out
+
+
+def _invalidate_step_statuses(statuses: Any, start_index: int, recipe_length: int) -> List[str]:
+    out = _normalize_step_statuses(statuses, recipe_length)
+    start = int(np.clip(_step_runtime_int(start_index), 0, len(out)))
+    for index in range(start, len(out)):
+        out[index] = "dirty"
+    return out
+
+
+def _record_history_edit(undo_items: List[Any], redo_items: List[Any], entry: Any, max_items: int = 20) -> None:
+    """Append a new edit to the undo stack; any new edit invalidates redo."""
+    undo_items.append(entry)
+    del redo_items[:]
+    limit = max(1, _step_runtime_int(max_items))
+    while len(undo_items) > limit:
+        undo_items.pop(0)
+
+
+def _history_undo(undo_items: List[Any], redo_items: List[Any], current: Any) -> Any:
+    """Pop the newest undo entry; the current state becomes redoable."""
+    if not undo_items:
+        return None
+    redo_items.append(current)
+    return undo_items.pop()
+
+
+def _history_redo(undo_items: List[Any], redo_items: List[Any], current: Any) -> Any:
+    """Pop the newest redo entry; the current state becomes undoable again."""
+    if not redo_items:
+        return None
+    undo_items.append(current)
+    return redo_items.pop()
+
+
+def _snapshot_timeline_manifest(
+    recipe_length: int,
+    valid_snapshot_indices: Any,
+    statuses: Any,
+    current_index: int,
+) -> List[Dict[str, Any]]:
+    """Timeline items for the CAD shell: per-step state plus snapshot validity.
+
+    ``state`` mirrors the runtime status, except the currently viewed step which
+    is reported as ``current``. ``snapshot_valid`` marks steps whose cached
+    snapshot can be restored without recomputation.
+    """
+    normalized = _normalize_step_statuses(statuses, recipe_length)
+    valid = set()
+    try:
+        for v in list(valid_snapshot_indices or []):
+            try:
+                valid.add(int(v))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        current = int(current_index)
+    except Exception:
+        current = -1
+    items: List[Dict[str, Any]] = []
+    for index, status in enumerate(normalized):
+        items.append(
+            {
+                "index": int(index),
+                "state": "current" if index == current else status,
+                "runtime_status": status,
+                "snapshot_valid": index in valid,
+            }
+        )
+    return items
+
+
+def _run_model_transaction(model: ProcessModel, operation: Callable[[], Any]) -> Dict[str, Any]:
+    """Run one model mutation and restore a dense snapshot when it raises."""
+    try:
+        before = model.snapshot_state(compression="dense")
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "rolled_back": False,
+            "snapshot_error": str(exc),
+        }
+
+    try:
+        value = operation()
+    except Exception as exc:
+        result: Dict[str, Any] = {
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "rolled_back": False,
+        }
+        try:
+            model.restore_state(before)
+            result["rolled_back"] = True
+        except Exception as rollback_exc:
+            result["rollback_error"] = str(rollback_exc)
+        return result
+    return {"ok": True, "value": value, "rolled_back": False}
+
+
+def _webui_step_execution_error(step: ProcessStep, step_index: int, transaction: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a stable, conservative error payload for a failed process step."""
+    response: Dict[str, Any] = {
+        "ok": False,
+        "step_index": int(step_index),
+        "instance_name": _normalize_step_instance_name(getattr(step, "instance_name", None), step.name),
+        "step_type": str(step.name),
+        "error": str(transaction.get("error", "Step execution failed.")),
+        "error_type": str(transaction.get("error_type", "Exception")),
+        "parameter_path": "",
+        "suggestion": "Review the step parameters and retry.",
+        "rolled_back": bool(transaction.get("rolled_back", False)),
+    }
+    if transaction.get("rollback_error"):
+        response["rollback_error"] = str(transaction["rollback_error"])
+    return response
+
+
 def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "name": step.name,
+        "instance_name": _normalize_step_instance_name(getattr(step, "instance_name", None), step.name),
         "group": getattr(step, "group", ""),
         "loop": getattr(step, "loop", ""),
         "enabled": bool(step.enabled),
@@ -31085,6 +32325,11 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     if not name or name not in PROCESS_STEP_FACTORIES:
         return None
     step = PROCESS_STEP_FACTORIES[name](material_db)
+    instance_name = data.get("instance_name")
+    if not isinstance(instance_name, str) or not instance_name.strip():
+        legacy_label = data.get("label")
+        instance_name = legacy_label if isinstance(legacy_label, str) and legacy_label.strip() else None
+    step.instance_name = _normalize_step_instance_name(instance_name, step.name)
     # Preserve optional UI grouping labels when loading recipes from disk/library.
     try:
         grp = data.get("group", None)
@@ -31130,6 +32375,419 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
         except Exception:
             pass
     return step
+
+
+def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Return fresh, portable definitions for the built-in Process CAD flows."""
+
+    def _step(
+        name: str,
+        instance_name: str,
+        params: Optional[Dict[str, Any]] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        step = PROCESS_STEP_FACTORIES[name](material_db)
+        if isinstance(params, dict):
+            step.params.update(copy.deepcopy(params))
+        blob: Dict[str, Any] = {
+            "name": name,
+            "instance_name": _normalize_step_instance_name(instance_name, name),
+            "enabled": True,
+            "params": copy.deepcopy(step.params),
+        }
+        blob.update(copy.deepcopy(extra))
+        return blob
+
+    mask_size = 32
+    trench_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    trench_mask[12:20, :] = 1
+    core_clear_mask = np.ones((mask_size, mask_size), dtype=np.uint8)
+    core_clear_mask[12:20, :] = 0
+    contact_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    for x0 in (7, 21):
+        for y0 in (7, 21):
+            contact_mask[x0 : x0 + 4, y0 : y0 + 4] = 1
+    beol_line_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    beol_line_mask[7:11, :] = 1
+    beol_line_mask[21:25, :] = 1
+
+    basic_steps = [
+        _step("Initialize Wafer", "300 nm silicon wafer", {"thickness_nm": 300.0}),
+        _step(
+            "Oxidation/Nitridation",
+            "20 nm pad oxide",
+            {
+                "reaction": "Oxidation",
+                "target": "Silicon",
+                "ambient": "Dry O2",
+                "coverage": "Full wafer",
+                "target_thickness": 20.0,
+            },
+        ),
+        _step("Spin Resist", "Trench photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose center trench",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Center trench",
+                "dose": 80.0,
+            },
+            custom_mask=trench_mask.tolist(),
+            mask_name="Center trench",
+        ),
+        _step(
+            "Resist Develop",
+            "Open trench resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Anisotropic oxide trench etch",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+                "pressure": 8.0,
+                "rf_bias": 240.0,
+                "passivation": 0.4,
+            },
+        ),
+        _step(
+            "Etch",
+            "Anisotropic silicon trench etch",
+            {
+                "material": "Silicon",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+                "pressure": 8.0,
+                "rf_bias": 240.0,
+                "passivation": 0.4,
+            },
+        ),
+        _step("Strip", "Strip trench resist", {"materials": "Photoresist"}),
+    ]
+
+    spacer_steps = [
+        _step("Initialize Wafer", "200 nm silicon wafer", {"thickness_nm": 200.0}),
+        _step(
+            "Deposition",
+            "Deposit polysilicon core",
+            {
+                "material": "Polysilicon",
+                "thickness": 80.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+                "directionality": 0.9,
+            },
+        ),
+        _step("Spin Resist", "Core photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose outside core",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Center core",
+                "dose": 80.0,
+            },
+            custom_mask=core_clear_mask.tolist(),
+            mask_name="Center core",
+        ),
+        _step(
+            "Resist Develop",
+            "Develop core pattern",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Pattern polysilicon core",
+            {
+                "material": "Polysilicon",
+                "chemistry": "Dry",
+                "time": 80.0,
+                "rate_override": 1500.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip core resist", {"materials": "Photoresist"}),
+        _step(
+            "Deposition",
+            "Conformal silicon nitride ALD",
+            {
+                "material": "Silicon Nitride",
+                "thickness": 30.0,
+                "method": "ALD",
+                "coverage": "Full wafer",
+                "directionality": 0.0,
+            },
+        ),
+        _step(
+            "Etch",
+            "Directional nitride etch-back",
+            {
+                "material": "Silicon Nitride",
+                "chemistry": "Dry",
+                "time": 30.0,
+                "rate_override": 600.0,
+                "selectivity": 50.0,
+                "sidewall": 90.0,
+                "pressure": 5.0,
+                "rf_bias": 300.0,
+                "passivation": 0.8,
+            },
+        ),
+        _step("Strip", "Selective core removal", {"materials": "Polysilicon"}),
+    ]
+
+    bonding_steps = [
+        _step("Initialize Wafer", "400 nm device silicon", {"thickness_nm": 400.0}),
+        _step(
+            "Oxidation/Nitridation",
+            "20 nm front-side oxide",
+            {
+                "reaction": "Oxidation",
+                "target": "Silicon",
+                "ambient": "Dry O2",
+                "coverage": "Full wafer",
+                "target_thickness": 20.0,
+            },
+        ),
+        _step("Wafer Flip", "Flip to bond side"),
+        _step(
+            "Bonding",
+            "Oxide bond to silicon handle",
+            {
+                "handle_material": "Silicon",
+                "handle_thickness_nm": 200.0,
+                "bonding_material": "Silicon Dioxide",
+                "bonding_layer_nm": 10.0,
+            },
+        ),
+        _step(
+            "Thinning",
+            "Thin device silicon to 80 nm",
+            {"material": "Silicon", "target_thickness_nm": 80.0},
+        ),
+    ]
+
+    w_plug_steps = [
+        _step("Initialize Wafer", "300 nm contact silicon", {"thickness_nm": 300.0}),
+        _step(
+            "Deposition",
+            "Deposit contact dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "thickness": 100.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+                "directionality": 0.0,
+            },
+        ),
+        _step("Spin Resist", "Contact photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose four contacts",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Four contacts",
+                "dose": 80.0,
+            },
+            custom_mask=contact_mask.tolist(),
+            mask_name="Four contacts",
+        ),
+        _step(
+            "Resist Develop",
+            "Open contact resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Etch contact dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip contact resist", {"materials": "Photoresist"}),
+        _step(
+            "Fill",
+            "Fill tungsten contacts",
+            {
+                "material": "Tungsten",
+                "max_depth_nm": 120.0,
+                "direction": "top",
+                "include_sealed": False,
+            },
+        ),
+        _step(
+            "Deposition",
+            "Deposit tungsten overburden",
+            {
+                "material": "Tungsten",
+                "thickness": 30.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+            },
+        ),
+        _step(
+            "CMP",
+            "Polish tungsten to oxide stop",
+            {
+                "target": 400.0,
+                "pressure": 4.0,
+                "time": 60.0,
+                "preston": 0.5,
+                "selectivity_mode": "Manual",
+                "selectivity_pairs": [{"material": "Tungsten", "ratio": 1.0}],
+            },
+        ),
+    ]
+
+    beol_steps = [
+        _step("Initialize Wafer", "300 nm BEOL silicon", {"thickness_nm": 300.0}),
+        _step(
+            "Deposition",
+            "Deposit interlayer dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "thickness": 100.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+                "directionality": 0.0,
+            },
+        ),
+        _step("Spin Resist", "Metal line photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose two metal lines",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Two metal lines",
+                "dose": 80.0,
+            },
+            custom_mask=beol_line_mask.tolist(),
+            mask_name="Two metal lines",
+        ),
+        _step(
+            "Resist Develop",
+            "Open metal line resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Etch oxide line trenches",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 600.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip metal line resist", {"materials": "Photoresist"}),
+        _step(
+            "Deposition",
+            "Deposit tantalum barrier",
+            {
+                "material": "Tantalum",
+                "thickness": 10.0,
+                "method": "PVD",
+                "coverage": "Full wafer",
+                "directionality": 0.8,
+            },
+        ),
+        _step(
+            "Fill",
+            "Fill copper lines",
+            {
+                "material": "Copper",
+                "max_depth_nm": 70.0,
+                "direction": "top",
+                "include_sealed": False,
+            },
+        ),
+        _step(
+            "Deposition",
+            "Electroplate copper overburden",
+            {
+                "material": "Copper",
+                "thickness": 30.0,
+                "method": "Electroplate",
+                "coverage": "Full wafer",
+            },
+        ),
+        _step(
+            "CMP",
+            "Polish copper to oxide stop",
+            {
+                "target": 400.0,
+                "pressure": 4.0,
+                "time": 90.0,
+                "preston": 0.5,
+                "selectivity_mode": "Manual",
+                "selectivity_pairs": [
+                    {"material": "Copper", "ratio": 1.0},
+                    {"material": "Tantalum", "ratio": 1.0},
+                ],
+            },
+        ),
+    ]
+
+    domain = {"grid_shape": [64, 64, 96], "voxel_size_nm": 10.0, "threads": 1}
+    return {
+        "Basic Trench": {
+            "name": "Basic Trench",
+            "description": "Pattern and anisotropically etch a trench opening through pad oxide.",
+            "domain": copy.deepcopy(domain),
+            "steps": basic_steps,
+        },
+        "Spacer Formation": {
+            "name": "Spacer Formation",
+            "description": "Pattern a sacrificial core, coat it conformally, etch back, and remove the core.",
+            "domain": copy.deepcopy(domain),
+            "steps": spacer_steps,
+        },
+        "Bonding + Thinning": {
+            "name": "Bonding + Thinning",
+            "description": "Flip a device wafer, oxide-bond a silicon handle, and thin only the device wafer.",
+            "domain": copy.deepcopy(domain),
+            "steps": bonding_steps,
+        },
+        "W Plug + CMP": {
+            "name": "W Plug + CMP",
+            "description": "Open contact holes, fill tungsten plugs, and polish the overburden to an oxide stop.",
+            "domain": copy.deepcopy(domain),
+            "steps": w_plug_steps,
+        },
+        "Basic BEOL": {
+            "name": "Basic BEOL",
+            "description": "Etch two damascene lines, add a tantalum barrier, fill copper, and polish to oxide.",
+            "domain": copy.deepcopy(domain),
+            "steps": beol_steps,
+        },
+    }
+
+
+def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Compatibility wrapper for callers that still use the legacy WebUI helper."""
+
+    return load_demo_flows(material_db)
 
 
 def _infer_exposure_advanced_enable(params: Any) -> int:
@@ -35382,6 +37040,95 @@ def _webui_worker_main(
             _webui_apply_admin_step_defaults(st, admin_cfg)
     except Exception:
         pass
+    step_runtime_statuses = _normalize_step_statuses([], len(steps))
+    step_runtime_errors: Dict[int, Dict[str, Any]] = {}
+
+    def _serialize_recipe_for_client() -> List[Dict[str, Any]]:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        result: List[Dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            blob = _webui_serialize_step(step)
+            blob["runtime_status"] = step_runtime_statuses[index]
+            if step_runtime_statuses[index] == "error" and index in step_runtime_errors:
+                blob["runtime_error"] = dict(step_runtime_errors[index])
+            result.append(blob)
+        return result
+
+    def _serialize_step_for_client(index: int) -> Dict[str, Any]:
+        nonlocal step_runtime_statuses
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        blob = _webui_serialize_step(steps[index])
+        blob["runtime_status"] = step_runtime_statuses[index]
+        if step_runtime_statuses[index] == "error" and index in step_runtime_errors:
+            blob["runtime_error"] = dict(step_runtime_errors[index])
+        return blob
+
+    def _reset_step_runtime_statuses() -> None:
+        nonlocal step_runtime_statuses, step_runtime_errors
+        step_runtime_statuses = _normalize_step_statuses([], len(steps))
+        step_runtime_errors = {}
+
+    def _invalidate_step_runtime_statuses(start_index: int) -> None:
+        nonlocal step_runtime_statuses, step_runtime_errors
+        step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, start_index, len(steps))
+        start = max(0, _step_runtime_int(start_index))
+        step_runtime_errors = {
+            int(index): dict(error)
+            for index, error in step_runtime_errors.items()
+            if int(index) < start and isinstance(error, dict)
+        }
+        try:
+            _clear_redo_history()
+        except Exception:
+            pass
+
+    # Timeline viewing position: -1 = derive from the latest valid snapshot.
+    # Any successful run resets the override so the timeline follows execution again.
+    timeline_current_index: int = -1
+
+    def _set_step_runtime_status(index: int, status: str) -> None:
+        nonlocal step_runtime_statuses, step_runtime_errors, timeline_current_index
+        step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
+        if 0 <= int(index) < len(step_runtime_statuses) and status in _STEP_RUNTIME_STATES:
+            step_runtime_statuses[int(index)] = status
+            if status != "error":
+                step_runtime_errors.pop(int(index), None)
+            if status == "done":
+                timeline_current_index = -1
+
+    def _timeline_valid_snapshot_indices() -> set:
+        try:
+            if step_cache_ctx_sig != _loop_cache_context_signature():
+                return set()
+        except Exception:
+            return set()
+        out = set()
+        try:
+            for idx, status in enumerate(step_runtime_statuses):
+                if status == "done" and int(idx) in step_cache_step_states:
+                    out.add(int(idx))
+        except Exception:
+            return set()
+        return out
+
+    def _timeline_current_index(valid_indices: set) -> int:
+        try:
+            if timeline_current_index in valid_indices:
+                return int(timeline_current_index)
+        except Exception:
+            pass
+        try:
+            return max(valid_indices) if valid_indices else -1
+        except Exception:
+            return -1
+
+    def _timeline_manifest_payload() -> Dict[str, Any]:
+        valid_indices = _timeline_valid_snapshot_indices()
+        current = _timeline_current_index(valid_indices)
+        items = _snapshot_timeline_manifest(len(steps), valid_indices, step_runtime_statuses, current)
+        return {"items": items, "current": int(current)}
+
     # Normalize any "material" role params to mat_id ints so recipes persist stably across renames.
     pending_warnings: List[str] = []
     try:
@@ -35397,6 +37144,8 @@ def _webui_worker_main(
     except Exception:
         pass
     undo_stack: List[Dict[str, Any]] = []
+    # Redo entries mirror undo tokens (spillable model snapshots, same cap).
+    redo_stack: List[Dict[str, Any]] = []
     max_undo = 20
 
     model_revision = 0
@@ -51684,6 +53433,7 @@ def _webui_worker_main(
             if not new_steps2:
                 raise RuntimeError("No valid steps after applying patches.")
             steps[:] = new_steps2
+            _invalidate_step_runtime_statuses(0)
             # Align meta length.
             meta2 = meta_blob if isinstance(meta_blob, list) else []
             if len(meta2) < len(new_steps2):
@@ -56084,6 +57834,7 @@ def _webui_worker_main(
             _write_session_state()
             model_revision += 1
             preview_ready.clear()
+            _reset_step_runtime_statuses()
             return True
         except Exception:
             return False
@@ -56233,6 +57984,7 @@ def _webui_worker_main(
                 pass
             model_revision += 1
             preview_ready.clear()
+            _reset_step_runtime_statuses()
             return True
         except Exception:
             return False
@@ -56334,6 +58086,7 @@ def _webui_worker_main(
                 _webui_apply_admin_step_defaults(st, admin_cfg)
         except Exception:
             pass
+        _reset_step_runtime_statuses()
         try:
             for st in steps:
                 msgs = _normalize_step_material_params(st, material_db, admin_cfg)
@@ -56489,19 +58242,270 @@ def _webui_worker_main(
     def _snap_drop(obj: Any) -> None:
         _tcad_snapshot_drop_maybe(obj)
 
-    def _push_undo() -> None:
+    def _history_recipe_signature() -> str:
+        try:
+            payload = [_webui_serialize_step(step) for step in steps]
+            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            return hashlib.blake2s(raw.encode("utf-8", "ignore"), digest_size=16).hexdigest()
+        except Exception:
+            return ""
+
+    def _history_entry_snapshot(entry: Any) -> Any:
+        if isinstance(entry, dict) and "model_snapshot" in entry:
+            return entry.get("model_snapshot")
+        return entry
+
+    def _history_entry_drop(entry: Any) -> None:
+        try:
+            _snap_drop(_history_entry_snapshot(entry))
+        except Exception:
+            pass
+
+    def _history_clear_stack(stack: List[Any]) -> None:
+        while stack:
+            _history_entry_drop(stack.pop())
+
+    def _clear_redo_history() -> None:
+        _history_clear_stack(redo_stack)
+
+    def _clear_all_history() -> None:
+        _history_clear_stack(undo_stack)
+        _history_clear_stack(redo_stack)
+
+    def _history_capture_entry(kind: str) -> Dict[str, Any]:
         ck = {
             "spill_dir": str(snap_undo_dir),
-            "spill_tag": f"undo_{int(time.time() * 1000):013d}_{secrets.token_hex(3)}",
+            "spill_tag": f"{str(kind)}_{int(time.time() * 1000):013d}_{secrets.token_hex(3)}",
             "spill_threshold_bytes": 48 * 1024 * 1024,
         }
         try:
             snap = model.snapshot_state(compression="dense-zlib", compression_kwargs=ck)
         except Exception:
             snap = model.snapshot_state(compression="dense-zlib")
-        undo_stack.append(_snap_store(snap, kind="undo"))
-        if len(undo_stack) > max_undo:
-            _snap_drop(undo_stack.pop(0))
+        return {
+            "model_snapshot": _snap_store(snap, kind=str(kind)),
+            "recipe": [_webui_serialize_step(step) for step in steps],
+            "recipe_name": str(current_recipe_name),
+            "runtime_statuses": list(_normalize_step_statuses(step_runtime_statuses, len(steps))),
+            "runtime_errors": {int(k): dict(v) for k, v in step_runtime_errors.items() if isinstance(v, dict)},
+            "timeline_current_index": int(timeline_current_index),
+            "recipe_signature": _history_recipe_signature(),
+        }
+
+    def _history_build_recipe(entry: Any) -> Optional[List[ProcessStep]]:
+        """Validate and rebuild a recipe before mutating the current history state."""
+        if not isinstance(entry, dict) or "recipe" not in entry:
+            return None
+        raw_recipe = entry.get("recipe")
+        if not isinstance(raw_recipe, list):
+            raise ValueError("History recipe is missing or corrupt.")
+        rebuilt: List[ProcessStep] = []
+        for index, raw_step in enumerate(raw_recipe):
+            if not isinstance(raw_step, dict):
+                raise ValueError(f"History recipe step {index} is invalid.")
+            step = _webui_deserialize_step(dict(raw_step), material_db)
+            if step is None:
+                raise ValueError(f"History recipe step {index} could not be restored.")
+            rebuilt.append(step)
+        return rebuilt
+
+    def _history_trim(stack: List[Any]) -> None:
+        while len(stack) > max_undo:
+            _history_entry_drop(stack.pop(0))
+
+    def _push_undo(*, defer_trim: bool = False) -> Any:
+        token = _history_capture_entry("undo")
+        undo_stack.append(token)
+        if not defer_trim:
+            _clear_redo_history()
+            _history_trim(undo_stack)
+        return token
+
+    def _commit_undo(token: Any) -> None:
+        if any(item is token for item in undo_stack):
+            _clear_redo_history()
+            _history_trim(undo_stack)
+
+    def _abort_undo(token: Any) -> None:
+        for index in range(len(undo_stack) - 1, -1, -1):
+            if undo_stack[index] is token:
+                _history_entry_drop(undo_stack.pop(index))
+                break
+
+    def _restore_history_metadata(entry: Any) -> None:
+        nonlocal step_runtime_statuses, step_runtime_errors, timeline_current_index, current_recipe_name
+        if not isinstance(entry, dict):
+            _reset_step_runtime_statuses()
+            timeline_current_index = -1
+            return
+        step_runtime_statuses = _normalize_step_statuses(entry.get("runtime_statuses"), len(steps))
+        raw_errors = entry.get("runtime_errors")
+        step_runtime_errors = {}
+        if isinstance(raw_errors, dict):
+            for key, value in raw_errors.items():
+                try:
+                    index = int(key)
+                except Exception:
+                    continue
+                if 0 <= index < len(steps) and step_runtime_statuses[index] == "error" and isinstance(value, dict):
+                    step_runtime_errors[index] = dict(value)
+        try:
+            timeline_current_index = int(entry.get("timeline_current_index", -1))
+        except Exception:
+            timeline_current_index = -1
+        saved_name = entry.get("recipe_name")
+        if isinstance(saved_name, str) and saved_name.strip():
+            current_recipe_name = saved_name.strip()[:80]
+
+    def _perform_history_transition(direction: str) -> Dict[str, Any]:
+        """Atomically move one model/status snapshot between undo and redo stacks."""
+        nonlocal model_revision
+        undoing = str(direction).lower() == "undo"
+        source = undo_stack if undoing else redo_stack
+        target_stack = redo_stack if undoing else undo_stack
+        result_key = "undone" if undoing else "redone"
+        if not source:
+            return {result_key: False, "log": model.history[-250:]}
+
+        target_entry = source[-1]
+        target_snapshot = _snap_load(_history_entry_snapshot(target_entry))
+        if not isinstance(target_snapshot, dict):
+            return {
+                result_key: False,
+                "error": "History snapshot missing or corrupt.",
+                "log": model.history[-250:],
+            }
+        try:
+            target_recipe = _history_build_recipe(target_entry)
+        except Exception as exc:
+            return {result_key: False, "error": str(exc), "log": model.history[-250:]}
+        try:
+            current_entry = _history_capture_entry("redo" if undoing else "undo")
+        except Exception as exc:
+            return {result_key: False, "error": f"Unable to snapshot current state: {exc}", "log": model.history[-250:]}
+        try:
+            current_recipe = _history_build_recipe(current_entry)
+        except Exception as exc:
+            _history_entry_drop(current_entry)
+            return {result_key: False, "error": f"Unable to snapshot current recipe: {exc}", "log": model.history[-250:]}
+
+        try:
+            model.restore_state(target_snapshot)
+            if target_recipe is not None:
+                steps[:] = target_recipe
+        except Exception as exc:
+            rollback_error = ""
+            try:
+                current_snapshot = _snap_load(_history_entry_snapshot(current_entry))
+                if not isinstance(current_snapshot, dict):
+                    raise RuntimeError("current snapshot unavailable")
+                model.restore_state(current_snapshot)
+                if current_recipe is not None:
+                    steps[:] = current_recipe
+            except Exception as rollback_exc:
+                rollback_error = str(rollback_exc)
+            _history_entry_drop(current_entry)
+            return {
+                result_key: False,
+                "error": f"History restore failed: {exc}",
+                "rollback_error": rollback_error,
+                "log": model.history[-250:],
+            }
+
+        source.pop()
+        target_stack.append(current_entry)
+        _history_trim(target_stack)
+        _history_entry_drop(target_entry)
+        try:
+            _invalidate_loop_cache()
+        except Exception:
+            pass
+        _restore_history_metadata(target_entry)
+        try:
+            model._log("Undo: restored the previous state." if undoing else "Redo: re-applied the undone state.")
+        except Exception:
+            pass
+        model_revision += 1
+        preview_ready.clear()
+        _autosave("undo" if undoing else "redo")
+        return {
+            result_key: True,
+            "model": _webui_model_summary(model),
+            "recipe": _serialize_recipe_for_client(),
+            "log": model.history[-250:],
+        }
+
+    def _finish_step_failure(
+        step: ProcessStep,
+        step_index: int,
+        transaction: Dict[str, Any],
+        *,
+        undo_token: Any = None,
+    ) -> Dict[str, Any]:
+        """Abort or retain a pending undo token and build the worker error payload."""
+        nonlocal model_revision, step_runtime_errors
+        _set_step_runtime_status(step_index, "error")
+        if undo_token is not None:
+            if transaction.get("rolled_back") or transaction.get("snapshot_error"):
+                _abort_undo(undo_token)
+            else:
+                # Rollback itself failed: preserve the pre-step undo entry and invalidate
+                # revision-keyed presentation caches because a partial mutation may remain.
+                _commit_undo(undo_token)
+                model_revision += 1
+                preview_ready.clear()
+        failure = _webui_step_execution_error(step, step_index, transaction)
+        try:
+            model._log(f"Error in step {int(step_index) + 1}: {failure['error']}")
+        except Exception:
+            pass
+        failure["model"] = _webui_model_summary(model)
+        failure["log"] = model.history[-250:]
+        failure["model_revision"] = int(model_revision)
+        step_runtime_errors[int(step_index)] = {
+            key: failure.get(key)
+            for key in (
+                "step_index",
+                "step_type",
+                "instance_name",
+                "parameter_path",
+                "error",
+                "error_type",
+                "suggestion",
+                "rolled_back",
+            )
+        }
+        return failure
+
+    def _begin_step_execution(step: ProcessStep, step_index: int) -> Dict[str, Any]:
+        """Run non-mutating preflight and allocate an uncommitted undo snapshot."""
+        try:
+            warnings = _webui_localize_exposure_mask_file(step)
+            if warnings:
+                for warning in warnings[:4]:
+                    try:
+                        model._log(f"[mask] {warning}")
+                    except Exception:
+                        pass
+            description = step.describe()
+        except Exception as exc:
+            transaction = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "rolled_back": True,
+            }
+            return {"ok": False, "failure": _finish_step_failure(step, step_index, transaction)}
+        try:
+            undo_token = _push_undo(defer_trim=True)
+        except Exception as exc:
+            transaction = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "rolled_back": True,
+            }
+            return {"ok": False, "failure": _finish_step_failure(step, step_index, transaction)}
+        _set_step_runtime_status(step_index, "running")
+        return {"ok": True, "description": description, "undo_token": undo_token}
 
     # WebUI preview caches (per isolated worker).
     # Keep `preview_mesh_cache` lightweight (metadata only) to avoid multi-user memory blow-ups.
@@ -56532,18 +58536,22 @@ def _webui_worker_main(
     step_cache_ctx_sig: str = ""
     step_cache_step_sigs: Dict[int, str] = {}
     step_cache_step_states: Dict[int, Any] = {}
+    # Direct run_step checkpoints are valid for timeline viewing, but they are not
+    # necessarily a recipe-prefix state and therefore must not seed incremental reuse.
+    step_cache_step_sources: Dict[int, str] = {}
     # May be adjusted by `_update_cache_policy()` based on domain size.
     step_cache_max_steps: int = int(step_cache_max_steps)
 
     def _invalidate_loop_cache() -> None:
         nonlocal loop_cache_ctx_sig, loop_cache_station_sigs, loop_cache_station_states, loop_cache_station_ends
-        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states
+        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_step_sources
         loop_cache_ctx_sig = ""
         loop_cache_station_sigs = []
         loop_cache_station_states = []
         loop_cache_station_ends = []
         step_cache_ctx_sig = ""
         step_cache_step_sigs = {}
+        step_cache_step_sources = {}
         try:
             for v in list(step_cache_step_states.values()):
                 _snap_drop(v)
@@ -56752,10 +58760,38 @@ def _webui_worker_main(
                 return int(si)
         return int(len(station_ends) - 1)
 
+    def _finalize_active_agent_run(
+        *,
+        status: str,
+        failed_step: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Close and detach the active Agent run report so later runs cannot reuse it."""
+        astate = current_ui_state.get("agent") if isinstance(current_ui_state, dict) else None
+        if not isinstance(astate, dict):
+            return None
+        run_id = str(astate.pop("_active_run_id", "") or "").strip()
+        runs = astate.get("run_reports")
+        if not run_id or not isinstance(runs, list):
+            return None
+        for report in reversed(runs):
+            if not isinstance(report, dict) or str(report.get("id", "")).strip() != run_id:
+                continue
+            report["ts_end"] = _webui_timestamp()
+            report["status"] = str(status)
+            if isinstance(failed_step, dict):
+                report["failed_step"] = dict(failed_step)
+            if isinstance(error, dict):
+                report["error"] = str(error.get("error", "Step execution failed."))
+                report["error_type"] = str(error.get("error_type", "Exception"))
+                report["rolled_back"] = bool(error.get("rolled_back", False))
+            return report
+        return None
+
     def _run_recipe_incremental(upto_step_index: Optional[int], *, autosave_note: str) -> Dict[str, Any]:
         """Run recipe from start to `upto_step_index` (inclusive), using per-step snapshot time-travel cache."""
         nonlocal model_revision, loop_cache_ctx_sig, loop_cache_station_sigs, loop_cache_station_states, loop_cache_station_ends
-        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_max_steps
+        nonlocal step_cache_ctx_sig, step_cache_step_sigs, step_cache_step_states, step_cache_step_sources, step_cache_max_steps
 
         # Agent safety: redact any secrets from agent-provided strings before logging/storing run_reports.
         agent_cfg_cache: Optional[Dict[str, Any]] = None
@@ -56820,6 +58856,24 @@ def _webui_worker_main(
         except Exception:
             pass
 
+        def _finalize_incremental_failure(step_index: int, failure: Dict[str, Any]) -> Dict[str, Any]:
+            _finalize_active_agent_run(
+                status="error",
+                failed_step={
+                    "index": int(step_index),
+                    "instance_name": failure["instance_name"],
+                    "step_type": failure["step_type"],
+                },
+                error=failure,
+            )
+            try:
+                WaferContextManager.end_run(
+                    current_ui_state, run_id=str(bb_run_id), ok=False, cache_only=False
+                )
+            except Exception:
+                pass
+            return failure
+
         target_station = _recipe_find_station_for_step(ends_all, int(upto_i))
         if target_station < 0:
             return {"ok": True, "result": {"model": _webui_model_summary(model), "log": model.history[-250:]}}
@@ -56835,6 +58889,8 @@ def _webui_worker_main(
                 break
             if int(i) not in step_cache_step_states:
                 break
+            if step_cache_step_sources.get(int(i)) != "incremental":
+                break
             reuse_last_step = int(i)
 
         # Drop any stale suffix cache entries once a mismatch is detected.
@@ -56842,6 +58898,7 @@ def _webui_worker_main(
             for k in list(step_cache_step_sigs.keys()):
                 if int(k) > int(reuse_last_step):
                     step_cache_step_sigs.pop(int(k), None)
+                    step_cache_step_sources.pop(int(k), None)
             for k in list(step_cache_step_states.keys()):
                 if int(k) > int(reuse_last_step):
                     _snap_drop(step_cache_step_states.pop(int(k), None))
@@ -56877,6 +58934,11 @@ def _webui_worker_main(
         if restore_idx < 0:
             model.reset_state()
 
+        for completed_index in range(0, int(restore_idx) + 1):
+            _set_step_runtime_status(completed_index, "done")
+
+        # Restoring a cached prefix or resetting to the substrate changes the visible model even
+        # when every remaining step is disabled or the first executable step later fails.
         model_revision += 1
         preview_ready.clear()
 
@@ -56904,7 +58966,6 @@ def _webui_worker_main(
 
         # If fully satisfied by cache (now allowed even inside a station), we are done.
         if int(restore_idx) >= int(upto_i):
-            model_revision += 1
             preview_ready.clear()
             _autosave(autosave_note)
             try:
@@ -56922,6 +58983,7 @@ def _webui_worker_main(
                     "log": model.history[-250:],
                     "cache_reused": int(reuse_n),
                     "stations_total": int(len(stations_all)),
+                    "model_revision": int(model_revision),
                     "blackboard_summary": bb_summary,
                 },
             }
@@ -56947,6 +59009,7 @@ def _webui_worker_main(
                 step = steps[i]
                 if not step.enabled:
                     # Disabled steps are no-ops but still participate in time-travel indexing.
+                    _set_step_runtime_status(i, "done")
                     try:
                         snap_obj = last_step_snap
                         if last_step_snap is None:
@@ -57380,17 +59443,6 @@ def _webui_worker_main(
                     pre_target = ""
                     pre_base_cols = None
                     pre_base_cols_frac = None
-                # Ensure Mask Exposure custom mask files are session-local/available (portable flows).
-                try:
-                    mw = _webui_localize_exposure_mask_file(step)
-                    if mw:
-                        for w in mw[:4]:
-                            try:
-                                model._log(f"[mask] {w}")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
                 # Runtime blackboard pre-snapshot (offline-safe; no logging).
                 pre_h_bb = None
                 pre_open_frac_bb = None
@@ -57404,8 +59456,11 @@ def _webui_worker_main(
                         pre_open_frac_bb = float(np.mean(om0.astype(np.float32, copy=False)))
                 except Exception:
                     pre_open_frac_bb = None
-                desc = step.describe()
-                _push_undo()
+                execution = _begin_step_execution(step, i)
+                if not execution["ok"]:
+                    return _finalize_incremental_failure(i, execution["failure"])
+                desc = execution["description"]
+                undo_token = execution["undo_token"]
                 # Clear any stale kernel-provided metrics so per-step run reports don't accidentally
                 # reuse the previous step's stats when a kernel is a no-op.
                 try:
@@ -57419,7 +59474,13 @@ def _webui_worker_main(
                     )
                 except Exception:
                     pass
-                result_str = step.execute(model)
+                transaction = _run_model_transaction(model, lambda: step.execute(model))
+                if not transaction["ok"]:
+                    failure = _finish_step_failure(step, i, transaction, undo_token=undo_token)
+                    return _finalize_incremental_failure(i, failure)
+                result_str = transaction.get("value")
+                _commit_undo(undo_token)
+                _set_step_runtime_status(i, "done")
                 if result_str:
                     try:
                         # Include step index in the completion marker so WebUI can stay in-sync
@@ -57991,6 +60052,7 @@ def _webui_worker_main(
                     snap_obj = _snap_store(snap_i, kind="step", step_idx=int(i))
                     step_cache_step_sigs[int(i)] = step_sigs_all[int(i)]
                     step_cache_step_states[int(i)] = snap_obj
+                    step_cache_step_sources[int(i)] = "incremental"
                     last_step_snap = snap_obj
                     # Bound memory in pathological runs (very long flows).
                     if int(step_cache_max_steps) > 0 and len(step_cache_step_states) > int(step_cache_max_steps):
@@ -57998,13 +60060,13 @@ def _webui_worker_main(
                         for k in drop:
                             _snap_drop(step_cache_step_states.pop(int(k), None))
                             step_cache_step_sigs.pop(int(k), None)
+                            step_cache_step_sources.pop(int(k), None)
                 except Exception:
                     pass
             # Loop-station snapshots are intentionally disabled: per-step snapshots already enable
             # "modify step 40 -> restore from 39" time travel with finer granularity and avoids
             # double-caching large model states.
 
-        model_revision += 1
         preview_ready.clear()
         _autosave(autosave_note)
         # Finalize any active AI-agent run report record.
@@ -58035,7 +60097,7 @@ def _webui_worker_main(
                             model._log("[agent] End-metric delta: " + " | ".join(parts))
                 except Exception:
                     metrics = {}
-                run_id = str(astate.pop("_active_run_id", "") or "").strip()
+                run_id = str(astate.get("_active_run_id", "") or "").strip()
                 runs = astate.get("run_reports")
                 if run_id and isinstance(runs, list):
                     for rr in reversed(runs):
@@ -58088,6 +60150,10 @@ def _webui_worker_main(
         except Exception:
             pass
         try:
+            _finalize_active_agent_run(status="done")
+        except Exception:
+            pass
+        try:
             model._log(
                 f"[cache] Loop-station rerun from {int(first_rerun_station)+1} → {int(target_station)+1} (of {len(stations_all)})"
             )
@@ -58109,6 +60175,7 @@ def _webui_worker_main(
                 "cache_reused": int(reuse_n),
                 "cache_rerun_from": int(first_rerun_station),
                 "stations_total": int(len(stations_all)),
+                "model_revision": int(model_revision),
                 "blackboard_summary": bb_summary,
             },
         }
@@ -58330,9 +60397,29 @@ def _webui_worker_main(
             preview_mesh_cache[mode] = {"rev": int(model_revision), "face_limit": int(target_faces), "voxel_um": float(voxel_um), "meshes": mesh_items}
 
         # Return mesh metadata (the browser fetches actual geometry via `/api/preview/geom`).
+        # Geometry metadata is revision-cached, while visual preferences are attached on every
+        # response.  User color preferences can change without a model revision and therefore
+        # must never be captured inside the geometry cache.
         pack = preview_mesh_cache.get(mode, {}) if isinstance(preview_mesh_cache.get(mode, {}), dict) else {}
         meshes = pack.get("meshes", []) if isinstance(pack.get("meshes", []), list) else []
-        return {"rev": int(model_revision), "mode": mode, "meshes": meshes}
+        meshes_out: List[Dict[str, Any]] = []
+        for item in meshes:
+            if not isinstance(item, dict):
+                continue
+            item_out = dict(item)
+            mat_id = int(item_out.get("mat_id", 0))
+            visual_override: Dict[str, Any] = {}
+            # `user_material_colors` is a presentation preference.  Runtime solid/fast/off
+            # maps intentionally stay client-local and are not physical MaterialVisual data.
+            if isinstance(user_material_colors, dict):
+                color_override = user_material_colors.get(str(mat_id), user_material_colors.get(mat_id))
+                if color_override is not None:
+                    visual_override["color"] = color_override
+            item_out["visual"] = model.material_db.material_visual(
+                mat_id, visual_override or None
+            ).as_dict()
+            meshes_out.append(item_out)
+        return {"rev": int(model_revision), "mode": mode, "meshes": meshes_out}
 
     def _cache_put(cache: Dict[str, Dict[str, Any]], key: str, value: Dict[str, Any], *, max_items: int = 6) -> None:
         cache[key] = value
@@ -60156,8 +62243,9 @@ def _webui_worker_main(
                     "model": _webui_model_summary(model),
                     "materials": _webui_material_list(material_db),
                     "present_material_ids": _present_material_ids(),
-                    "recipe": [_webui_serialize_step(step) for step in steps],
+                    "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
+                    "demo_recipes": load_demo_flows(material_db),
                     "history": history_index,
                     "recipes": history_index,
                     "exports": exports_list,
@@ -62451,6 +64539,7 @@ def _webui_worker_main(
                                 warnings2.append(f"Variant inject: failed: {exc}")
 
                         steps[:] = new_steps
+                        _invalidate_step_runtime_statuses(0)
                         # Install step_meta for run-time logging.
                         meta2 = pending.get("step_meta")
                         if not isinstance(meta2, list):
@@ -62466,7 +64555,7 @@ def _webui_worker_main(
                             {
                                 "ok": True,
                                 "result": {
-                                    "recipe": [_webui_serialize_step(s) for s in steps],
+                                    "recipe": _serialize_recipe_for_client(),
                                     "model": _webui_model_summary(model),
                                     "ui_state": current_ui_state,
                                     "log": model.history[-250:],
@@ -63268,7 +65357,7 @@ def _webui_worker_main(
                             {
                                 "ok": True,
                                 "result": {
-                                    "recipe": [_webui_serialize_step(s) for s in steps],
+                                    "recipe": _serialize_recipe_for_client(),
                                     "model": _webui_model_summary(model),
                                     "ui_state": current_ui_state,
                                     "log": model.history[-250:],
@@ -64799,6 +66888,7 @@ def _webui_worker_main(
                             if not new_steps2:
                                 break
                             steps[:] = new_steps2
+                            _invalidate_step_runtime_statuses(0)
                             a["step_meta"] = meta_new if isinstance(meta_new, list) else [None] * len(new_steps2)
                             warnings_all.extend([str(w) for w in apply_warns if str(w).strip()])
                             _autosave(f"agent iterate loopwise apply {loop_label} {li + 1}/{per_loop_rounds}")
@@ -64885,7 +66975,7 @@ def _webui_worker_main(
                         {
                             "ok": True,
                             "result": {
-                                "recipe": [_webui_serialize_step(s) for s in steps],
+                                "recipe": _serialize_recipe_for_client(),
                                 "model": _webui_model_summary(model),
                                 "ui_state": current_ui_state,
                                 "log": model.history[-250:],
@@ -65368,6 +67458,7 @@ def _webui_worker_main(
                         except Exception as exc:
                             warnings2.append(f"Variant inject: failed: {exc}")
                     steps[:] = new_steps2
+                    _invalidate_step_runtime_statuses(0)
                     meta2 = pending.get("step_meta")
                     if not isinstance(meta2, list):
                         meta2 = [None] * len(new_steps2)
@@ -65520,7 +67611,7 @@ def _webui_worker_main(
                     {
                         "ok": True,
                         "result": {
-                            "recipe": [_webui_serialize_step(s) for s in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "model": _webui_model_summary(model),
                             "ui_state": current_ui_state,
                             "log": model.history[-250:],
@@ -65655,6 +67746,7 @@ def _webui_worker_main(
                         warnings2.append(f"Variant inject: failed: {exc}")
 
                 steps[:] = new_steps2
+                _invalidate_step_runtime_statuses(0)
                 meta2 = pending.get("step_meta")
                 if not isinstance(meta2, list):
                     meta2 = [None] * len(new_steps2)
@@ -65669,7 +67761,7 @@ def _webui_worker_main(
                     {
                         "ok": True,
                         "result": {
-                            "recipe": [_webui_serialize_step(s) for s in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "model": _webui_model_summary(model),
                             "ui_state": current_ui_state,
                             "log": model.history[-250:],
@@ -65829,6 +67921,7 @@ def _webui_worker_main(
                     except Exception as exc:
                         conn.send({"ok": False, "error": f"Apply mask failed: {exc}", "rid": rid})
                         continue
+                    _invalidate_step_runtime_statuses(idx)
                     try:
                         _autosave("mask ai")
                     except Exception:
@@ -68020,6 +70113,7 @@ def _webui_worker_main(
                 except Exception as exc:
                     conn.send({"ok": False, "error": f"Apply mask failed: {exc}", "rid": rid})
                     continue
+                _invalidate_step_runtime_statuses(idx)
                 try:
                     _autosave("mask ai")
                 except Exception:
@@ -68265,6 +70359,7 @@ def _webui_worker_main(
                         if st is not None:
                             rebuilt.append(st)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 # Ensure Mask Exposure mask_file paths are session-local/available for immediate preview/run.
                 try:
                     for st in steps:
@@ -68308,12 +70403,7 @@ def _webui_worker_main(
                         current_ui_state.pop("dock_layout", None)
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 preview_ready.clear()
                 model_revision += 1
                 _manual_save("import library recipe")
@@ -68323,7 +70413,7 @@ def _webui_worker_main(
                         "result": {
                             "imported": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "ui_state": current_ui_state,
@@ -68983,7 +71073,7 @@ def _webui_worker_main(
                 continue
 
             if cmd == "get_recipe":
-                conn.send({"ok": True, "result": [_webui_serialize_step(step) for step in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "set_step":
@@ -69049,7 +71139,12 @@ def _webui_worker_main(
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave(f"edit step {idx}")
-                resp = {"ok": True, "result": _webui_serialize_step(step), "rid": rid}
+                if any(key in payload for key in ("enabled", "group", "loop", "params", "custom_mask")):
+                    _invalidate_step_runtime_statuses(idx)
+                resp = {"ok": True, "result": _serialize_step_for_client(idx), "rid": rid}
+                # Authoritative post-edit statuses so the browser can mark the
+                # edited step and its successors Dirty without a full refetch.
+                resp["statuses"] = list(step_runtime_statuses)
                 if step_warn:
                     resp["warnings"] = step_warn[:12]
                 conn.send(resp)
@@ -69158,6 +71253,7 @@ def _webui_worker_main(
 
                 if inserted_count <= 0:
                     raise ValueError("No steps inserted")
+                _invalidate_step_runtime_statuses(inserted_pos)
                 try:
                     _agent_shift_step_meta_insert(int(inserted_pos), int(inserted_count))
                 except Exception:
@@ -69168,7 +71264,7 @@ def _webui_worker_main(
                 conn.send(
                     {
                         "ok": True,
-                        "result": [_webui_serialize_step(s) for s in steps],
+                        "result": _serialize_recipe_for_client(),
                         "meta": {"inserted_at": int(inserted_pos), "inserted_count": int(inserted_count)},
                         "rid": rid,
                     }
@@ -69204,6 +71300,7 @@ def _webui_worker_main(
                     pass
                 if insert_index is None:
                     steps.append(step)
+                    pos = len(steps) - 1
                     try:
                         _agent_shift_step_meta_insert(len(steps) - 1, 1)
                     except Exception:
@@ -69216,10 +71313,11 @@ def _webui_worker_main(
                         _agent_shift_step_meta_insert(int(pos), 1)
                     except Exception:
                         pass
+                _invalidate_step_runtime_statuses(pos)
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave("add step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_remove":
@@ -69227,12 +71325,13 @@ def _webui_worker_main(
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
                 del steps[idx]
+                _invalidate_step_runtime_statuses(idx)
                 try:
                     _agent_shift_step_meta_remove(int(idx))
                 except Exception:
                     pass
                 _autosave("remove step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_duplicate":
@@ -69269,12 +71368,13 @@ def _webui_worker_main(
                     if getattr(original, "image_mask", None) is not None:
                         dup.image_mask = original.image_mask.copy()
                 steps.insert(idx + 1, dup)
+                _invalidate_step_runtime_statuses(idx + 1)
                 try:
                     _agent_shift_step_meta_duplicate(int(idx))
                 except Exception:
                     pass
                 _autosave("duplicate step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
             if cmd == "recipe_move":
@@ -69282,20 +71382,104 @@ def _webui_worker_main(
                 direction = str(payload.get("direction", "")).strip().lower()
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
-                if direction == "up" and idx > 0:
+                moved_to = idx
+                to_raw = payload.get("to", None)
+                if to_raw is not None:
+                    to = int(to_raw)
+                    if not (0 <= to < len(steps)):
+                        raise ValueError("Invalid step index")
+                    if to != idx:
+                        steps.insert(to, steps.pop(idx))
+                        moved_to = to
+                        try:
+                            _agent_shift_step_meta_move(int(idx), int(to))
+                        except Exception:
+                            pass
+                elif direction == "up" and idx > 0:
                     steps[idx - 1], steps[idx] = steps[idx], steps[idx - 1]
+                    moved_to = idx - 1
                     try:
                         _agent_shift_step_meta_move(int(idx), int(idx - 1))
                     except Exception:
                         pass
                 elif direction == "down" and idx < len(steps) - 1:
                     steps[idx + 1], steps[idx] = steps[idx], steps[idx + 1]
+                    moved_to = idx + 1
                     try:
                         _agent_shift_step_meta_move(int(idx), int(idx + 1))
                     except Exception:
                         pass
+                if moved_to != idx:
+                    _invalidate_step_runtime_statuses(min(idx, moved_to))
                 _autosave("move step")
-                conn.send({"ok": True, "result": [_webui_serialize_step(s) for s in steps], "rid": rid})
+                conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
+                continue
+
+            if cmd == "recipe_rename_step":
+                index = int(payload.get("index", -1))
+                instance_name = str(payload.get("instance_name", "")).strip()
+                if not (0 <= index < len(steps)):
+                    raise ValueError("Step index out of range")
+                if not instance_name or len(instance_name) > 80:
+                    raise ValueError("Step name must contain 1-80 characters")
+                steps[index].instance_name = _normalize_step_instance_name(instance_name, steps[index].name)
+                _clear_redo_history()
+                _autosave("rename step")
+                conn.send({"ok": True, "result": _serialize_step_for_client(index), "rid": rid})
+                continue
+
+            if cmd == "timeline_get":
+                conn.send({"ok": True, "result": _timeline_manifest_payload(), "rid": rid})
+                continue
+
+            if cmd == "timeline_restore":
+                index = int(payload.get("index", -1))
+                valid_indices = _timeline_valid_snapshot_indices()
+                if index not in valid_indices:
+                    conn.send({
+                        "ok": False,
+                        "error": "该步骤没有可恢复的有效快照（Dirty/Error/Ready 状态不隐式重算）",
+                        "code": "no_valid_snapshot",
+                        "rid": rid,
+                    })
+                    continue
+                snap_ref = step_cache_step_states.get(int(index))
+                snap = _snap_load(snap_ref) if snap_ref is not None else None
+                if not isinstance(snap, dict):
+                    conn.send({
+                        "ok": False,
+                        "error": "快照数据不可用或已被换出",
+                        "code": "snapshot_unavailable",
+                        "rid": rid,
+                    })
+                    continue
+                restored = _run_model_transaction(
+                    model,
+                    lambda: model.restore_state(snap, emit_log=True, log_prefix="[timeline] "),
+                )
+                if not restored.get("ok"):
+                    conn.send({
+                        "ok": False,
+                        "error": f"快照恢复失败：{restored.get('error', 'unknown error')}",
+                        "code": "restore_failed",
+                        "rolled_back": bool(restored.get("rolled_back", False)),
+                        "rollback_error": str(restored.get("rollback_error", "") or ""),
+                        "rid": rid,
+                    })
+                    continue
+                timeline_current_index = int(index)
+                model_revision += 1
+                preview_ready.clear()
+                conn.send({
+                    "ok": True,
+                    "result": {
+                        "timeline": _timeline_manifest_payload(),
+                        "model": _webui_model_summary(model),
+                        "log": model.history[-120:],
+                        "recipe": _serialize_recipe_for_client(),
+                    },
+                    "rid": rid,
+                })
                 continue
 
             if cmd == "apply_domain":
@@ -69348,6 +71532,7 @@ def _webui_worker_main(
             if cmd == "reset":
                 _push_undo()
                 model.reset_state()
+                _reset_step_runtime_statuses()
                 try:
                     model._log("Model reset to substrate state.")
                 except Exception:
@@ -69359,33 +71544,13 @@ def _webui_worker_main(
                 continue
 
             if cmd == "undo":
-                if not undo_stack:
-                    try:
-                        model._log("Nothing to undo.")
-                    except Exception:
-                        pass
-                    conn.send({"ok": True, "result": {"undone": False, "log": model.history[-250:]}, "rid": rid})
-                    continue
-                ref = undo_stack.pop()
-                snap0 = _snap_load(ref)
-                if not isinstance(snap0, dict):
-                    try:
-                        model._log("Undo snapshot missing/corrupt; skipping.")
-                    except Exception:
-                        pass
-                    conn.send({"ok": True, "result": {"undone": False, "log": model.history[-250:]}, "rid": rid})
-                    continue
-                model.restore_state(snap0)
-                # Drop the popped snapshot file (lossless; disk cache is an implementation detail).
-                _snap_drop(ref)
-                try:
-                    model._log("Reverted last completed step.")
-                except Exception:
-                    pass
-                model_revision += 1
-                preview_ready.clear()
-                _autosave("undo")
-                conn.send({"ok": True, "result": {"undone": True, "model": _webui_model_summary(model), "log": model.history[-250:]}, "rid": rid})
+                result = _perform_history_transition("undo")
+                conn.send({"ok": True, "result": result, "rid": rid})
+                continue
+
+            if cmd == "redo":
+                result = _perform_history_transition("redo")
+                conn.send({"ok": True, "result": result, "rid": rid})
                 continue
 
             if cmd == "run_step":
@@ -69396,25 +71561,27 @@ def _webui_worker_main(
                 if not step.enabled:
                     conn.send({"ok": True, "result": {"skipped": True, "reason": "disabled"}, "rid": rid})
                     continue
-                # Ensure custom mask_file is usable even when the recipe was imported from another
-                # session (absolute uploads path). This keeps single-step runs stable.
-                try:
-                    mw = _webui_localize_exposure_mask_file(step)
-                    if mw:
-                        for w in mw[:4]:
-                            try:
-                                model._log(f"[mask] {w}")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                _push_undo()
-                desc = step.describe()
+                execution = _begin_step_execution(step, idx)
+                if not execution["ok"]:
+                    failure = execution["failure"]
+                    failure["rid"] = rid
+                    conn.send(failure)
+                    continue
+                desc = execution["description"]
+                undo_token = execution["undo_token"]
                 try:
                     model._log(f"Running: {desc}")
                 except Exception:
                     pass
-                result_str = step.execute(model)
+                transaction = _run_model_transaction(model, lambda: step.execute(model))
+                if not transaction["ok"]:
+                    failure = _finish_step_failure(step, idx, transaction, undo_token=undo_token)
+                    failure["rid"] = rid
+                    conn.send(failure)
+                    continue
+                result_str = transaction.get("value")
+                _commit_undo(undo_token)
+                _set_step_runtime_status(idx, "done")
                 if result_str:
                     try:
                         model._log(f"→ {result_str}")
@@ -69422,6 +71589,42 @@ def _webui_worker_main(
                         pass
                 model_revision += 1
                 preview_ready.clear()
+                # A direct single-step run is also a valid timeline checkpoint. Replace any
+                # cached state for this step and discard the now-stale suffix so time travel
+                # cannot silently restore a model produced by older parameters.
+                try:
+                    ctx_sig = _loop_cache_context_signature()
+                    if step_cache_ctx_sig != ctx_sig:
+                        _invalidate_loop_cache()
+                    step_cache_ctx_sig = ctx_sig
+                    for cache_index in list(step_cache_step_sigs.keys()):
+                        if int(cache_index) > int(idx):
+                            step_cache_step_sigs.pop(int(cache_index), None)
+                            step_cache_step_sources.pop(int(cache_index), None)
+                    for cache_index in list(step_cache_step_states.keys()):
+                        if int(cache_index) > int(idx):
+                            _snap_drop(step_cache_step_states.pop(int(cache_index), None))
+                    try:
+                        ck_step = {
+                            "spill_dir": str(snap_step_dir),
+                            "spill_tag": f"step_{int(idx):06d}",
+                            "spill_threshold_bytes": 48 * 1024 * 1024,
+                        }
+                        step_snapshot = model.snapshot_state(
+                            compression="dense-zlib", compression_kwargs=ck_step
+                        )
+                    except Exception:
+                        step_snapshot = model.snapshot_state()
+                    step_cache_step_sigs[int(idx)] = _step_exec_signature(step)
+                    step_cache_step_states[int(idx)] = _snap_store(
+                        step_snapshot, kind="step", step_idx=int(idx)
+                    )
+                    step_cache_step_sources[int(idx)] = "direct"
+                except Exception:
+                    # Execution already committed; a cache write failure only disables time travel.
+                    step_cache_step_sigs.pop(int(idx), None)
+                    step_cache_step_sources.pop(int(idx), None)
+                    _snap_drop(step_cache_step_states.pop(int(idx), None))
                 _autosave(f"run step {step.name}")
                 conn.send(
                     {
@@ -69429,6 +71632,8 @@ def _webui_worker_main(
                         "result": {
                             "description": desc,
                             "result": result_str,
+                            "runtime_status": step_runtime_statuses[idx],
+                            "model_revision": int(model_revision),
                             "model": _webui_model_summary(model),
                             "log": model.history[-250:],
                         },
@@ -69568,13 +71773,18 @@ def _webui_worker_main(
                         idx = -1
                     if 0 <= idx < len(steps):
                         step_obj = steps[idx]
+                        step_edited = False
                         if "enabled" in step_blob:
                             step_obj.enabled = bool(step_blob.get("enabled"))
+                            step_edited = True
                         step_params = step_blob.get("params")
                         if isinstance(step_params, dict):
                             step_obj.params.update(step_params)
+                            step_edited = True
                             if isinstance(step_obj, ExposureStep) and "mask_file" in step_params:
                                 step_obj.image_mask = None
+                        if step_edited:
+                            _invalidate_step_runtime_statuses(idx)
                 _autosave(note or "save", immediate=True)
                 conn.send(
                     {
@@ -69587,6 +71797,8 @@ def _webui_worker_main(
 
             if cmd == "load_autosave":
                 loaded = _load_autosave()
+                if loaded:
+                    _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
@@ -69612,13 +71824,14 @@ def _webui_worker_main(
                 _autosave("auto-saved before recipe switch", immediate=True)
                 if not _load_recipe_entry(entry_id):
                     raise ValueError("History entry not found")
+                _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
                         "result": {
                             "loaded": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "history": history_index,
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
@@ -69639,6 +71852,7 @@ def _webui_worker_main(
                 if not name:
                     name = "Untitled"
                 current_recipe_name = name
+                _clear_redo_history()
                 no_autosave = bool(payload.get("no_autosave", False))
                 if not no_autosave:
                     _autosave("recipe name")
@@ -69775,6 +71989,7 @@ def _webui_worker_main(
                     if not current_recipe_id:
                         current_recipe_name = "Untitled"
                         steps = _webui_default_recipe(material_db)
+                        _reset_step_runtime_statuses()
                         _set_threads_quiet(default_domain_threads)
                         try:
                             model.configure_domain(default_domain_shape, default_domain_voxel_nm)
@@ -69786,6 +72001,8 @@ def _webui_worker_main(
                         current_recipe_id = ""
                         _manual_save("init")
                         switched = True
+                if switched:
+                    _clear_all_history()
                 conn.send(
                     {
                         "ok": True,
@@ -69812,16 +72029,12 @@ def _webui_worker_main(
                 # New recipe should start minimal: keep only "Initialize Wafer".
                 init_step = InitializeWaferStep(material_db)
                 steps = [init_step]
+                _reset_step_runtime_statuses()
                 try:
                     _invalidate_loop_cache()
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 # New recipe should not inherit prior domain/wafer settings.
                 # Reset domain to default and reset substrate/temperature to Initialize Wafer defaults.
                 try:
@@ -69859,7 +72072,7 @@ def _webui_worker_main(
                         "ok": True,
                         "result": {
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
@@ -69917,6 +72130,7 @@ def _webui_worker_main(
                         if rebuilt_step is not None:
                             rebuilt.append(rebuilt_step)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 try:
                     _invalidate_loop_cache()
                 except Exception:
@@ -69953,12 +72167,7 @@ def _webui_worker_main(
                             pass
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 model_revision += 1
                 preview_ready.clear()
                 current_recipe_id = ""
@@ -69968,7 +72177,7 @@ def _webui_worker_main(
                         "result": {
                             "loaded": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
@@ -70029,6 +72238,7 @@ def _webui_worker_main(
                         if rebuilt_step is not None:
                             rebuilt.append(rebuilt_step)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                _reset_step_runtime_statuses()
                 if not rebuilt:
                     try:
                         for st in steps:
@@ -70091,12 +72301,7 @@ def _webui_worker_main(
                         current_ui_state.pop("dock_layout", None)
                 except Exception:
                     pass
-                try:
-                    for s in list(undo_stack):
-                        _snap_drop(s)
-                except Exception:
-                    pass
-                undo_stack.clear()
+                _clear_all_history()
                 model_revision += 1
                 preview_ready.clear()
                 current_recipe_id = ""
@@ -70107,7 +72312,7 @@ def _webui_worker_main(
                         "result": {
                             "imported": True,
                             "model": _webui_model_summary(model),
-                            "recipe": [_webui_serialize_step(step) for step in steps],
+                            "recipe": _serialize_recipe_for_client(),
                             "recipes": history_index,
                             "current_recipe": {"name": current_recipe_name, "id": current_recipe_id},
                             "log": model.history[-250:],
@@ -71948,6 +74153,24 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
+        if path == "/api/recipe/rename-step":
+            payload = self._read_json()
+            resp = sess.rpc("recipe_rename_step", payload)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/timeline/get":
+            payload = self._read_json()
+            resp = sess.rpc("timeline_get", payload)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/timeline/restore":
+            payload = self._read_json()
+            resp = sess.rpc("timeline_restore", payload, timeout_s=300.0)
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
         if path == "/api/run/step":
             payload = self._read_json()
             resp = sess.rpc("run_step", payload, timeout_s=1200.0)
@@ -71979,6 +74202,11 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/undo":
             resp = sess.rpc("undo", {})
+            self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/redo":
+            resp = sess.rpc("redo", {})
             self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
@@ -80063,12 +82291,13 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-		  <div class="main-container">
+		  <div class="main-container drawer-collapsed">
 		    <div class="left-panel dock-col" data-dock-idx="0">
 		      <div class="left-frame">
 		        <div class="dock-nav" id="dock-nav" data-dock-idx="0" aria-label="Control bar">
 		          <div class="dock-tabs" id="dock-tabs" data-dock-idx="0" role="tablist" aria-label="Panels"></div>
 		          <div class="dock-actions">
+		            <button class="btn btn-sm" id="cad-drawer-toggle" title="展开工具面板">»</button>
 		            <button class="btn btn-sm" id="layout-reset-btn" title="恢复默认布局">恢复默认布局</button>
 		          </div>
 		        </div>
@@ -80111,61 +82340,6 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
               </div>
 
-	          <div class="card" id="recipe-card" data-panel-id="recipe" data-panel-title="Process Recipe">
-	            <div class="card-header">Process Recipe</div>
-	            <div class="card-body">
-              <div class="form-row">
-                <div class="form-group" style="flex:1">
-                  <label>新增步骤（选中即添加）</label>
-                  <select id="add-step-select"></select>
-                </div>
-              </div>
-              <div class="form-row" id="demo-recipe-row">
-                <div class="form-group" style="flex:1">
-                  <label>Demo Recipes（替换当前 Recipe）</label>
-                  <select id="demo-recipe-select">
-                    <option value="" selected>-- Select --</option>
-                    <option value="demo_trench_lpcvd">Demo：深孔/沟槽沉积（LPCVD/CVD）</option>
-                    <option value="demo_trench_ald">Demo：深孔/沟槽沉积（ALD）</option>
-                  </select>
-                </div>
-                <div class="form-group" style="width:160px">
-                  <label>&nbsp;</label>
-                  <button class="btn" id="demo-recipe-load-btn">Load</button>
-                </div>
-              </div>
-                  <div class="form-row" id="preset-seq-row">
-                    <div class="form-group" style="flex:1">
-                      <label>Preset Sequences（追加多个步骤）</label>
-                      <select id="preset-seq-select">
-                        <option value="" selected>-- Select --</option>
-                      </select>
-                    </div>
-                <div class="form-group" style="width:160px">
-                  <label>&nbsp;</label>
-                  <button class="btn" id="preset-seq-insert-btn">Insert</button>
-                </div>
-              </div>
-
-                  <div class="step-list" id="step-list"></div>
-
-              <div class="btn-row">
-                <button class="btn btn-primary" id="run-step-btn">运行选中</button>
-                <button class="btn btn-primary" id="run-to-btn">运行到选中</button>
-                <button class="btn btn-primary" id="run-all-btn">运行全部</button>
-              </div>
-              <div class="btn-row">
-                <button class="btn" id="dup-step-btn">复制</button>
-                <button class="btn" id="move-up-btn">上移</button>
-                <button class="btn" id="move-down-btn">下移</button>
-                <button class="btn btn-danger" id="remove-step-btn">删除</button>
-              </div>
-              <div class="btn-row">
-                <button class="btn" id="undo-btn">撤销</button>
-                <button class="btn btn-danger" id="reset-btn">重置</button>
-              </div>
-            </div>
-          </div>
 
 	          <div class="card" id="agent-card" data-panel-id="agent" data-panel-title="AI Agent" style="display:none">
 	            <div class="card-header">AI Agent</div>
@@ -80471,6 +82645,216 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
             </div>
           </div>
 
+
+	          <div class="card" id="history-card" data-panel-id="history" data-panel-title="History">
+	            <div class="card-header">
+	              <span>History（Recipes）</span>
+              <div class="header-actions">
+                <div class="capsule-switch capsule-small" id="history-mode-switch" role="tablist" aria-label="History 模式">
+                  <input type="radio" name="history-mode" id="history-mode-personal" checked />
+                  <label for="history-mode-personal">个人</label>
+                  <input type="radio" name="history-mode" id="history-mode-library" />
+                  <label for="history-mode-library">公档</label>
+                  <div class="capsule-indicator" aria-hidden="true"></div>
+                </div>
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="history-personal">
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>当前 Recipe 名称</label>
+                    <input id="current-recipe-name" type="text" placeholder="Untitled" />
+                  </div>
+                </div>
+                <div class="btn-row">
+                  <button class="btn" id="new-recipe-btn">新建</button>
+                  <button class="btn btn-primary" id="save-recipe-btn">保存</button>
+                  <button class="btn" id="import-recipe-btn">导入</button>
+                  <button class="btn" id="export-recipe-btn">导出</button>
+                </div>
+                <input id="import-recipe-input" type="file" accept=".json,application/json" style="display:none" />
+                <div class="divider"></div>
+                <div class="history-list" id="history-list"></div>
+              </div>
+
+              <div id="history-library" style="display:none">
+                <div class="profile-row">
+                  <div class="profile-chip" id="library-profile-chip">未登记</div>
+                  <button class="btn btn-sm" id="library-profile-btn">登记/更新</button>
+                  <button class="btn btn-sm" id="library-refresh-btn">刷新公档</button>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Department</label>
+                    <select id="library-dept-filter"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Folder</label>
+                    <select id="library-cat1-filter"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Subfolder</label>
+                    <select id="library-cat2-filter"></select>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>Search</label>
+                    <input id="library-search" type="text" placeholder="Search..." />
+                  </div>
+                </div>
+                <div class="divider"></div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:1">
+                    <label>Upload title/comment</label>
+                    <input id="library-upload-title" type="text" placeholder="Dept-Name-ID-Note" />
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Upload dept</label>
+                    <select id="library-upload-dept"></select>
+                  </div>
+                  <div class="form-group">
+                    <label>Folder</label>
+                    <input id="library-upload-cat1" type="text" value="General" />
+                  </div>
+                  <div class="form-group">
+                    <label>Subfolder</label>
+                    <input id="library-upload-cat2" type="text" value="" />
+                  </div>
+                </div>
+                <div class="btn-row">
+                  <button class="btn btn-primary" id="library-upload-recipe-btn">上传当前 Recipe</button>
+                </div>
+                <div class="divider"></div>
+                <div class="history-list" id="library-recipes-list"></div>
+                <div class="hint-inline">提示：公档只会显示你有权限的部门；只能覆盖/删除自己上传的条目。</div>
+              </div>
+            </div>
+          </div>
+
+	          <div class="card" id="export-card" data-panel-id="export" data-panel-title="Export">
+	            <div class="card-header">Export</div>
+	            <div class="card-body">
+              <div class="form-row export-checks">
+                <label class="check"><input id="export-sti" type="checkbox" checked /> STL/XYZ</label>
+                <label class="check"><input id="export-merge-materials" type="checkbox" /> 合并同材质</label>
+                <label class="check"><input id="export-metrics" type="checkbox" /> Metrics</label>
+              </div>
+              <div class="form-row export-checks">
+                <label class="check"><input id="export-cross" type="checkbox" /> Cross</label>
+                <label class="check"><input id="export-video" type="checkbox" /> Video (MP4)</label>
+                <label class="check"><input id="export-images" type="checkbox" /> Image array</label>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Axis</label>
+                  <select id="export-cross-axis"><option>Z</option><option>X</option><option>Y</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Index</label>
+                  <input id="export-cross-index" type="number" value="0" />
+                </div>
+              </div>
+              <div class="form-row" id="export-video-row" style="display:none">
+                <div class="form-group">
+                  <label>Seconds / frame</label>
+                  <input id="export-video-spf" type="number" min="0.05" step="0.05" value="0.60" />
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label>View</label>
+                  <select id="export-video-view">
+                    <option value="current" selected>当前 3D View（默认）</option>
+                    <option value="Z">Z</option>
+                    <option value="X">X</option>
+                    <option value="Y">Y</option>
+                    <option value="OBL60">斜 60°</option>
+                    <option value="OBL45">斜 45°</option>
+                    <option value="XTOP45">X 正上方 45°</option>
+                    <option value="YTOP45">Y 正上方 45°</option>
+                  </select>
+                </div>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-primary" id="export-btn">导出 ZIP</button>
+                <button class="btn" id="export-video-btn" disabled>导出视频</button>
+                <a class="download-link" id="export-link" href="#" style="display:none"></a>
+              </div>
+              <div class="divider"></div>
+              <div class="export-files" id="export-files"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <main id="cad-workspace" class="cad-workspace">
+      <section id="process-flow-panel" class="cad-panel cad-process-flow">
+        <div class="left-frame">
+          <div class="left-scroll">
+	          <div class="card" id="recipe-card" data-panel-id="recipe" data-panel-title="Process Recipe">
+	            <div class="card-header">Process Recipe</div>
+	            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>新增步骤（选中即添加）</label>
+                  <select id="add-step-select"></select>
+                </div>
+              </div>
+              <div class="form-row" id="demo-recipe-row">
+                <div class="form-group" style="flex:1">
+                  <label>Demo Recipes（替换当前 Recipe）</label>
+                  <select id="demo-recipe-select">
+                    <option value="" selected>-- Select --</option>
+                  </select>
+                </div>
+                <div class="form-group" style="width:160px">
+                  <label>&nbsp;</label>
+                  <button class="btn" id="demo-recipe-load-btn">Load</button>
+                </div>
+              </div>
+                  <div class="form-row" id="preset-seq-row">
+                    <div class="form-group" style="flex:1">
+                      <label>Preset Sequences（追加多个步骤）</label>
+                      <select id="preset-seq-select">
+                        <option value="" selected>-- Select --</option>
+                      </select>
+                    </div>
+                <div class="form-group" style="width:160px">
+                  <label>&nbsp;</label>
+                  <button class="btn" id="preset-seq-insert-btn">Insert</button>
+                </div>
+              </div>
+
+                  <div class="step-list" id="step-list"></div>
+
+              <div class="btn-row">
+                <button class="btn btn-primary" id="run-step-btn">运行选中</button>
+                <button class="btn btn-primary" id="run-to-btn">运行到选中</button>
+                <button class="btn btn-primary" id="run-all-btn">运行全部</button>
+              </div>
+              <div class="btn-row">
+                <button class="btn" id="dup-step-btn">复制</button>
+                <button class="btn" id="move-up-btn">上移</button>
+                <button class="btn" id="move-down-btn">下移</button>
+                <button class="btn btn-danger" id="remove-step-btn">删除</button>
+              </div>
+              <div class="btn-row">
+                <button class="btn" id="undo-btn">撤销</button>
+                <button class="btn" id="redo-btn">重做</button>
+                <button class="btn btn-danger" id="reset-btn">重置</button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+      </section>
+      <section id="parameters-panel" class="cad-panel cad-parameters">
+        <button class="btn btn-sm cad-panel-collapse" id="cad-params-collapse" title="折叠参数面板">«</button>
+        <div class="left-frame">
+          <div class="left-scroll">
 	          <div class="card" id="params-card" data-panel-id="params" data-panel-title="Step Parameters">
 	            <div class="card-header"><span id="param-step-title">Step Parameters</span></div>
 	            <div class="card-body">
@@ -80705,151 +83089,11 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
             </div>
           </div>
           </div>
-
-	          <div class="card" id="history-card" data-panel-id="history" data-panel-title="History">
-	            <div class="card-header">
-	              <span>History（Recipes）</span>
-              <div class="header-actions">
-                <div class="capsule-switch capsule-small" id="history-mode-switch" role="tablist" aria-label="History 模式">
-                  <input type="radio" name="history-mode" id="history-mode-personal" checked />
-                  <label for="history-mode-personal">个人</label>
-                  <input type="radio" name="history-mode" id="history-mode-library" />
-                  <label for="history-mode-library">公档</label>
-                  <div class="capsule-indicator" aria-hidden="true"></div>
-                </div>
-              </div>
-            </div>
-            <div class="card-body">
-              <div id="history-personal">
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>当前 Recipe 名称</label>
-                    <input id="current-recipe-name" type="text" placeholder="Untitled" />
-                  </div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn" id="new-recipe-btn">新建</button>
-                  <button class="btn btn-primary" id="save-recipe-btn">保存</button>
-                  <button class="btn" id="import-recipe-btn">导入</button>
-                  <button class="btn" id="export-recipe-btn">导出</button>
-                </div>
-                <input id="import-recipe-input" type="file" accept=".json,application/json" style="display:none" />
-                <div class="divider"></div>
-                <div class="history-list" id="history-list"></div>
-              </div>
-
-              <div id="history-library" style="display:none">
-                <div class="profile-row">
-                  <div class="profile-chip" id="library-profile-chip">未登记</div>
-                  <button class="btn btn-sm" id="library-profile-btn">登记/更新</button>
-                  <button class="btn btn-sm" id="library-refresh-btn">刷新公档</button>
-                </div>
-                <div class="form-row">
-                  <div class="form-group">
-                    <label>Department</label>
-                    <select id="library-dept-filter"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Folder</label>
-                    <select id="library-cat1-filter"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Subfolder</label>
-                    <select id="library-cat2-filter"></select>
-                  </div>
-                </div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>Search</label>
-                    <input id="library-search" type="text" placeholder="Search..." />
-                  </div>
-                </div>
-                <div class="divider"></div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:1">
-                    <label>Upload title/comment</label>
-                    <input id="library-upload-title" type="text" placeholder="Dept-Name-ID-Note" />
-                  </div>
-                </div>
-                <div class="form-row">
-                  <div class="form-group">
-                    <label>Upload dept</label>
-                    <select id="library-upload-dept"></select>
-                  </div>
-                  <div class="form-group">
-                    <label>Folder</label>
-                    <input id="library-upload-cat1" type="text" value="General" />
-                  </div>
-                  <div class="form-group">
-                    <label>Subfolder</label>
-                    <input id="library-upload-cat2" type="text" value="" />
-                  </div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn btn-primary" id="library-upload-recipe-btn">上传当前 Recipe</button>
-                </div>
-                <div class="divider"></div>
-                <div class="history-list" id="library-recipes-list"></div>
-                <div class="hint-inline">提示：公档只会显示你有权限的部门；只能覆盖/删除自己上传的条目。</div>
-              </div>
-            </div>
-          </div>
-
-	          <div class="card" id="export-card" data-panel-id="export" data-panel-title="Export">
-	            <div class="card-header">Export</div>
-	            <div class="card-body">
-              <div class="form-row export-checks">
-                <label class="check"><input id="export-sti" type="checkbox" checked /> STL/XYZ</label>
-                <label class="check"><input id="export-merge-materials" type="checkbox" /> 合并同材质</label>
-                <label class="check"><input id="export-metrics" type="checkbox" /> Metrics</label>
-              </div>
-              <div class="form-row export-checks">
-                <label class="check"><input id="export-cross" type="checkbox" /> Cross</label>
-                <label class="check"><input id="export-video" type="checkbox" /> Video (MP4)</label>
-                <label class="check"><input id="export-images" type="checkbox" /> Image array</label>
-              </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label>Axis</label>
-                  <select id="export-cross-axis"><option>Z</option><option>X</option><option>Y</option></select>
-                </div>
-                <div class="form-group">
-                  <label>Index</label>
-                  <input id="export-cross-index" type="number" value="0" />
-                </div>
-              </div>
-              <div class="form-row" id="export-video-row" style="display:none">
-                <div class="form-group">
-                  <label>Seconds / frame</label>
-                  <input id="export-video-spf" type="number" min="0.05" step="0.05" value="0.60" />
-                </div>
-                <div class="form-group" style="flex:1">
-                  <label>View</label>
-                  <select id="export-video-view">
-                    <option value="current" selected>当前 3D View（默认）</option>
-                    <option value="Z">Z</option>
-                    <option value="X">X</option>
-                    <option value="Y">Y</option>
-                    <option value="OBL60">斜 60°</option>
-                    <option value="OBL45">斜 45°</option>
-                    <option value="XTOP45">X 正上方 45°</option>
-                    <option value="YTOP45">Y 正上方 45°</option>
-                  </select>
-                </div>
-              </div>
-              <div class="btn-row">
-                <button class="btn btn-primary" id="export-btn">导出 ZIP</button>
-                <button class="btn" id="export-video-btn" disabled>导出视频</button>
-                <a class="download-link" id="export-link" href="#" style="display:none"></a>
-              </div>
-              <div class="divider"></div>
-              <div class="export-files" id="export-files"></div>
-            </div>
           </div>
         </div>
-      </div>
-    </div>
-
+      </section>
+      <section id="viewer-panel" class="cad-viewer">
+        <button class="btn btn-sm cad-params-restore" id="cad-params-restore" title="展开参数面板" style="display:none">参数 »</button>
 	    <div class="right-panel" id="right-panel">
 	      <div class="right-frame">
 	        <div class="right-scroll" id="right-scroll">
@@ -80881,15 +83125,50 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                         <input id="slice-overlay-toggle" type="checkbox" />
                         切片
                       </label>
-                  <label class="check slice-toggle slot-hidden" id="slice-cutaway-toggle-wrap" title="切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）">
+                  <label class="check slice-toggle" id="slice-cutaway-toggle-wrap" title="兼容开关：沿当前切片轴启用或关闭三维裁剪">
                     <input id="slice-cutaway-toggle" type="checkbox" />
-                    切开
+                    裁剪
                   </label>
                       <button class="btn btn-sm" id="toggle-ruler3d-btn" title="切换 3D 标尺：网格 → 数值 → Off（循环）">标尺: Off</button>
+                      <div class="viewer-camera-controls" id="viewer-camera-controls" role="group" aria-label="WebGL 相机与标准视图">
+                        <select id="viewer-camera-mode" aria-label="相机投影模式" title="切换透视或正交投影">
+                          <option value="perspective" selected>透视</option>
+                          <option value="orthographic">正交</option>
+                        </select>
+                        <button type="button" class="btn btn-sm" id="viewer-view-iso" data-standard-view="ISO" aria-label="切换到等轴测标准视图" title="等轴测标准视图">等轴 ISO</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-top" data-standard-view="TOP" aria-label="切换到顶部标准视图" title="顶部标准视图">顶 TOP</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-bottom" data-standard-view="BOTTOM" aria-label="切换到底部标准视图" title="底部标准视图">底 BOTTOM</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-front" data-standard-view="FRONT" aria-label="切换到前部标准视图" title="前部标准视图">前 FRONT</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-back" data-standard-view="BACK" aria-label="切换到后部标准视图" title="后部标准视图">后 BACK</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-left" data-standard-view="LEFT" aria-label="切换到左侧标准视图" title="左侧标准视图">左 LEFT</button>
+                        <button type="button" class="btn btn-sm" id="viewer-view-right" data-standard-view="RIGHT" aria-label="切换到右侧标准视图" title="右侧标准视图">右 RIGHT</button>
+                      </div>
                       <button class="btn btn-sm" id="refresh-preview-btn" title="恢复默认相机视角与缩放">恢复默认视图</button>
                       <button class="btn btn-sm slot-hidden" id="refresh-slice-3d-btn">刷新切片</button>
                     </div>
                     <div class="viewer-actions-bottom" id="viewer-actions-3d-bottom" aria-label="3D slice controls">
+                      <div class="axis-clipping-toolbar" id="axis-clipping-toolbar" role="group" aria-label="三维 X Y Z 独立裁剪">
+                        <span class="slice-chip-title">三维裁剪</span>
+                        <div class="axis-clipping-chip" data-clip-axis="X">
+                          <label title="启用 X 轴裁剪"><input id="clip-x-enabled" type="checkbox" aria-label="启用 X 轴裁剪" />X</label>
+                          <input id="clip-x-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="X 轴裁剪位置" title="X 轴裁剪位置（0 到 1）" />
+                          <input id="clip-x-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="X 轴裁剪位置数值" title="X 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 X 轴保留方向"><input id="clip-x-invert" type="checkbox" aria-label="反转 X 轴裁剪方向" />反向</label>
+                        </div>
+                        <div class="axis-clipping-chip" data-clip-axis="Y">
+                          <label title="启用 Y 轴裁剪"><input id="clip-y-enabled" type="checkbox" aria-label="启用 Y 轴裁剪" />Y</label>
+                          <input id="clip-y-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Y 轴裁剪位置" title="Y 轴裁剪位置（0 到 1）" />
+                          <input id="clip-y-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="Y 轴裁剪位置数值" title="Y 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 Y 轴保留方向"><input id="clip-y-invert" type="checkbox" aria-label="反转 Y 轴裁剪方向" />反向</label>
+                        </div>
+                        <div class="axis-clipping-chip" data-clip-axis="Z">
+                          <label title="启用 Z 轴裁剪"><input id="clip-z-enabled" type="checkbox" aria-label="启用 Z 轴裁剪" />Z</label>
+                          <input id="clip-z-position" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Z 轴裁剪位置" title="Z 轴裁剪位置（0 到 1）" />
+                          <input id="clip-z-value" type="number" min="0" max="1" step="0.01" value="0.5" aria-label="Z 轴裁剪位置数值" title="Z 轴裁剪位置数值（0 到 1）" />
+                          <label title="反转 Z 轴保留方向"><input id="clip-z-invert" type="checkbox" aria-label="反转 Z 轴裁剪方向" />反向</label>
+                        </div>
+                        <span class="axis-clipping-status" id="axis-clipping-status" role="status">未启用裁剪</span>
+                      </div>
                       <div class="slice-style slice-toolbar slot-hidden" id="slice-style-3d" aria-label="切片设置">
                         <div class="slice-chip slice-chip-primary">
                           <span class="slice-chip-title">切片1</span>
@@ -80998,6 +83277,7 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
                   <input id="material-color-picker" type="color" style="position:fixed; left:-1000px; top:-1000px; width:1px; height:1px; opacity:0" />
                   <div class="viewer-slice-info" id="slice-info" style="display:none"></div>
                   <div class="viewer-ruler" id="viewer-ruler" style="display:none"></div>
+                  <div class="viewer-backend-status" id="viewer-backend-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
                   <div class="viewer-hint" id="viewer-hint">提示：鼠标拖拽旋转，滚轮缩放，右键平移</div>
             </div>
           </div>
@@ -81135,7 +83415,17 @@ _WEBUI_INDEX_HTML = r"""<!DOCTYPE html>
               <input id="theme-import-input" type="file" accept=".json,application/json" style="display:none" />
 	            </div>
 	          </div>
+      </section>
+    </main>
 	
+  <footer class="cad-timeline" id="cad-timeline" aria-label="Process timeline">
+    <button class="btn btn-sm" id="timeline-prev" title="回看上一个有效快照">‹ Prev</button>
+    <div class="cad-timeline-position" id="timeline-position">Step - / -</div>
+    <button class="btn btn-sm" id="timeline-next" title="前进到下一个有效快照">Next ›</button>
+    <input type="range" id="timeline-range" class="cad-timeline-range" min="0" max="0" value="0" step="1" aria-label="步骤时间线" />
+    <span class="cad-timeline-label" id="timeline-label">无有效快照</span>
+  </footer>
+
 	      <div id="dock-split-hint" class="dock-split-hint" style="display:none" aria-hidden="true"></div>
 	      <div id="floating-panels" class="floating-panels" aria-label="Floating panels"></div>
 	
@@ -81405,6 +83695,78 @@ header p { font-size: 12px; opacity: 1; color: var(--header-subtext); }
   gap: 12px;
 }
 
+/* Process CAD Shell: fixed three-column workspace */
+.cad-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(300px, 360px) minmax(420px, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+}
+.cad-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cad-panel.is-collapsed { display: none; }
+.cad-workspace.params-collapsed { grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr); }
+.cad-panel-collapse {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  opacity: 0.6;
+}
+.cad-viewer { position: relative; min-width: 0; min-height: 0; display: flex; }
+.cad-viewer > .right-panel { flex: 1; }
+.cad-params-restore {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 24;
+}
+.cad-timeline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(255,255,255,0.66);
+  flex: 0 0 auto;
+}
+.cad-timeline-position {
+  font-size: 12px;
+  font-weight: 800;
+  color: #1e3a5f;
+  min-width: 110px;
+  text-align: center;
+  white-space: nowrap;
+}
+.cad-timeline-range { flex: 1; min-width: 120px; }
+.cad-timeline-label {
+  font-size: 12px;
+  color: rgba(71,85,105,0.9);
+  min-width: 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.main-container.drawer-collapsed .left-panel { width: 42px; }
+.main-container.drawer-collapsed .left-panel .left-frame { padding: 8px 4px; }
+.main-container.drawer-collapsed .left-panel .dock-tabs,
+.main-container.drawer-collapsed .left-panel .left-scroll { display: none; }
+.main-container.drawer-collapsed .left-panel .dock-actions { flex-direction: column; }
+.main-container.drawer-collapsed .left-panel #layout-reset-btn { display: none; }
+@media (max-width: 1100px) {
+  .cad-workspace {
+    grid-template-columns: minmax(220px, 260px) minmax(260px, 300px) minmax(360px, 1fr);
+  }
+}
+
 .card {
   background: var(--card);
   border-radius: var(--radius);
@@ -81601,6 +83963,37 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
 
 /* Slice toolbars should shrink and scroll instead of forcing header wrap/reflow. */
 .viewer-card .slice-toolbar { flex: 1 1 auto; min-width: 0; }
+
+.axis-clipping-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border: 1px solid rgba(148,163,184,0.34);
+  border-radius: 14px;
+  background: rgba(248,250,252,0.78);
+  white-space: nowrap;
+}
+.axis-clipping-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border-left: 1px solid rgba(148,163,184,0.28);
+  font-size: 11px;
+  color: #334155;
+}
+.axis-clipping-chip label { display: inline-flex; align-items: center; gap: 2px; cursor: pointer; }
+.axis-clipping-chip input[type="range"] { width: clamp(62px, 7vw, 92px); }
+.axis-clipping-chip input[type="number"] {
+  width: 50px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  background: #fff;
+}
+.axis-clipping-status { font-size: 10px; color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
 
 /* 2D toolbar switches between single/multi without resizing the header. */
 .slice-toolbar-stack {
@@ -81828,6 +84221,44 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
 }
 .step-item:last-child { border-bottom: none; }
 .step-item.active { background: var(--select-bg); }
+.step-item.dragging { opacity: 0.55; }
+.step-item.drop-target { outline: 2px dashed rgba(var(--accent-rgb), 0.65); outline-offset: -2px; }
+.step-item.st-ready { border-left: 3px solid rgba(148,163,184,0.75); }
+.step-item.st-dirty { border-left: 3px solid #d97706; }
+.step-item.st-running { border-left: 3px solid #2563eb; }
+.step-item.st-done { border-left: 3px solid #16a34a; }
+.step-item.st-error { border-left: 3px solid #dc2626; background: rgba(220,38,38,0.07); }
+.step-error-badge {
+  flex: 1 0 100%;
+  font-size: 11px;
+  color: #b91c1c;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-error-detail {
+  border: 1px solid rgba(220,38,38,0.45);
+  background: rgba(220,38,38,0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #7f1d1d;
+  line-height: 1.55;
+}
+.step-error-detail .err-title { font-weight: 800; color: #b91c1c; margin-bottom: 4px; }
+.step-error-detail .err-row b { font-weight: 700; }
+.step-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.96);
+  color: inherit;
+}
 .step-item .name {
   flex: 1;
   min-width: 0;
@@ -82428,6 +84859,52 @@ header .header-actions { flex-direction: column; align-items: flex-end; }
   background: rgba(15,23,42,0.55);
   border: 1px solid rgba(148,163,184,0.18);
 }
+.viewer-backend-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 8;
+  max-width: min(72%, 720px);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.28);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+#viewer-backend-status[data-backend="webgl"] {
+  left: auto;
+  right: 10px;
+  max-width: min(calc(100% - 20px), 96px);
+  box-sizing: border-box;
+  color: #ccfbf1;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(6, 78, 59, 0.78);
+  border: 1px solid rgba(45, 212, 191, 0.50);
+}
+#viewer-backend-status[data-backend="remote"] {
+  top: auto;
+  bottom: 50px;
+  left: 10px;
+  right: auto;
+  max-width: min(72%, 720px);
+  color: #fef3c7;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: rgba(120, 53, 15, 0.90);
+  border: 1px solid rgba(251, 191, 36, 0.62);
+}
+.viewer-container.host-render-active .viewer-legend {
+  max-height: calc(100% - 96px);
+}
+.viewer-container.webgl-active .viewer-legend {
+  max-width: calc(100% - 110px);
+  box-sizing: border-box;
+}
+.viewer-backend-status[hidden] { display: none !important; }
 
         .viewer-ruler {
           position: absolute;
@@ -82762,6 +85239,7 @@ body.waiting header, body.waiting .main-container {
   .main-container { flex-direction: column; overflow: visible; }
   .left-panel { width: 100%; }
   .right-panel { width: 100%; }
+  .cad-workspace { display: flex; flex-direction: column; }
 }
 """
 
@@ -82772,6 +85250,7 @@ _WEBUI_SCRIPT_JS = r"""// TCAD Simulator WebUI
 const state = {
   recipe: [],
   recipeFactories: [],
+  demoRecipes: {},
   recipes: [],
   exports: [],
   currentRecipe: { name: 'Untitled' },
@@ -82798,10 +85277,12 @@ const state = {
   elementVisible: {}, // el:<name> -> boolean (persisted in recipe config)
   meshes: new Map(), // mat_id -> THREE.Mesh
   viewerReady: false,
-  viewerBackend: 'webgl', // 'webgl' | 'remote'
+  viewerBackend: 'pending', // 'pending' | 'webgl' | 'remote'
+  viewerWebglVersion: 0,
+  viewerFallbackReason: '',
   viewerMode: '3d', // '3d' | '2d'
   ruler3d: 0, // 0=off, 1=grid, 2=grid+labels
-  view3d: null, // { pos:[x,y,z], target:[x,y,z], up:[x,y,z], zoom:number }
+  view3d: null, // { pos, target, up, zoom, cameraMode?, orthographicVisibleHalfHeight? }
   _viewApplying: false,
       sliceAxis: 'X',
       sliceIndex: 0,
@@ -82813,7 +85294,12 @@ const state = {
       sliceLast2: null, // { axis, index, w, h, data: Uint16Array } for second slice
       sliceOverlay: false, // show 2D slice inset + 3D slice plane in 3D view
       sliceOverlay2: false, // enable second slice inset/plane (max 2 directions)
-      sliceCutaway: false, // cut away mesh by slice plane(s) to reveal the interior
+      sliceCutaway: false, // legacy mirror of whether any clipPlanes3d axis is enabled
+      clipPlanes3d: {
+        X: { enabled: false, position: 0.5, invert: false },
+        Y: { enabled: false, position: 0.5, invert: false },
+        Z: { enabled: false, position: 0.5, invert: false },
+      },
       sliceStepOverrides: {}, // step_index -> { axis:'X'|'Y'|'Z', index:int } (persisted in recipe config)
       sliceStepOverrides2: {}, // second slice per-step overrides
       // 2D multi-axis slice preview (show X/Y/Z slices simultaneously in a grid).
@@ -83407,6 +85893,7 @@ function applyUiFeaturesFromServer() {
   const demoBtn = $('demo-recipe-load-btn');
   if (demoSel) { try { demoSel.disabled = !feats.demoRecipes; } catch (e) {} }
   if (demoBtn) { try { demoBtn.disabled = !feats.demoRecipes; } catch (e) {} }
+  try { renderDemoRecipes(); } catch (e) {}
   try { renderPresetSequences(); } catch (e) {}
 
   // Variant selector + badges are rendered dynamically; re-render to reflect toggles.
@@ -86278,6 +88765,9 @@ function _applyMaterialColorOverridesToMaterials() {
       if (!m) continue;
       const id = parseInt(m.id) || 0;
       if (!(id > 0)) continue;
+      if (!Array.isArray(m._tcadPhysicalColor) && Array.isArray(m.color) && m.color.length >= 3) {
+        m._tcadPhysicalColor = [Number(m.color[0]), Number(m.color[1]), Number(m.color[2])];
+      }
       const ov = overrides[String(id)];
       if (!Array.isArray(ov) || ov.length < 3) continue;
       const rgb = [_clamp01(ov[0]), _clamp01(ov[1]), _clamp01(ov[2])];
@@ -86524,6 +89014,25 @@ function applyUiStateFromServer(ui) {
         state.sliceIndex2 = clampInt(idx2, 0, max2);
         changed = true;
       } catch (e) {}
+      try {
+        const hasClipPlanes = Object.prototype.hasOwnProperty.call(ui, 'clipPlanes3d') ||
+          Object.prototype.hasOwnProperty.call(ui, 'clip_planes_3d');
+        if (hasClipPlanes) {
+          state.clipPlanes3d = _sanitizeClipPlanes3d(ui.clipPlanes3d || ui.clip_planes_3d);
+        } else {
+          // One-time migration from the old slice-driven cutaway preference. From this point on,
+          // clipPlanes3d is the only source of truth and sliceCutaway is only a compatibility mirror.
+          state.clipPlanes3d = _sanitizeClipPlanes3d(null);
+          if (state.sliceCutaway) {
+            const axis = _sanitizeSliceAxis(state.sliceAxis);
+            const max = Math.max(1, axisMax(axis));
+            state.clipPlanes3d[axis].enabled = true;
+            state.clipPlanes3d[axis].position = Math.max(0, Math.min(1, Number(state.sliceIndex) / max));
+          }
+        }
+        state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+        changed = true;
+      } catch (e) {}
       // 2D multi-axis slice preview (optional).
       try {
         const has = ('slice2dMulti' in ui) || ('slice_2d_multi' in ui) || ('sliceMulti2d' in ui) || ('slice_multi_2d' in ui);
@@ -86570,6 +89079,7 @@ function applyUiStateFromServer(ui) {
       try { syncSliceControls2dMulti(false); } catch (e) {}
       try { applySliceOverlayUI(false); } catch (e) {}
       try { applySlice2dMultiUI(false); } catch (e) {}
+      try { updateAxisClippingPlanes(false); } catch (e) {}
       // Keep raw server UI state (includes server-managed namespaces like AI Agent metadata).
       try {
         let ui2 = ui;
@@ -86610,7 +89120,8 @@ function collectUiState() {
             uiLayout: (state.uiLayout && typeof state.uiLayout === 'object') ? state.uiLayout : null,
             sliceOverlay: !!state.sliceOverlay,
             sliceOverlay2: !!state.sliceOverlay2,
-            sliceCutaway: !!state.sliceCutaway,
+            sliceCutaway: _activeAxisClippingAxes().length > 0,
+            clipPlanes3d: _serializeClipPlanes3d(),
         sliceAxis: _sanitizeSliceAxis(state.sliceAxis),
         sliceIndex: clampInt(state.sliceIndex, 0, axisMax(state.sliceAxis)),
         sliceAxis2: _sanitizeSliceAxis(state.sliceAxis2),
@@ -86794,9 +89305,12 @@ function _dockCreateDockColumn(dockIdx) {
 
 function _dockEnsureDockColumnsDom(dockCount) {
   const want = Math.max(1, Math.min(_DOCK_MAX_DOCKS, _dockParseDockIdx(dockCount, 1)));
+  const workspace = $('cad-workspace');
   const right = $('right-panel') || document.querySelector('.right-panel');
-  const main = right ? right.parentElement : null;
-  if (!main) return want;
+  // Dock columns are inserted before the fixed CAD workspace (right-panel fallback for robustness).
+  const main = workspace ? workspace.parentElement : (right ? right.parentElement : null);
+  const dockAnchor = workspace || right;
+  if (!main || !dockAnchor) return want;
 
   const cols = _dockAllDockCols();
   const have = new Set();
@@ -86806,7 +89320,7 @@ function _dockEnsureDockColumnsDom(dockCount) {
     if (have.has(i)) continue;
     try {
       const col = _dockCreateDockColumn(i);
-      main.insertBefore(col, right);
+      main.insertBefore(col, dockAnchor);
     } catch (e) {}
   }
 
@@ -87473,10 +89987,66 @@ function _dockDockPanel(panelId, dockIdx = null) {
   scheduleUiStatePersist(0);
 }
 
+function _cadNotifyLayoutResized() {
+  try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+}
+
+function _cadSetParamsCollapsed(collapsed) {
+  try {
+    const panel = $('parameters-panel');
+    const ws = $('cad-workspace');
+    if (panel) panel.classList.toggle('is-collapsed', !!collapsed);
+    if (ws) ws.classList.toggle('params-collapsed', !!collapsed);
+    const colBtn = $('cad-params-collapse');
+    const showBtn = $('cad-params-restore');
+    if (colBtn) colBtn.style.display = collapsed ? 'none' : '';
+    if (showBtn) showBtn.style.display = collapsed ? '' : 'none';
+    _cadNotifyLayoutResized();
+  } catch (e) {}
+}
+
+function _cadResetShellState() {
+  try {
+    const mc = document.querySelector('.main-container');
+    if (mc) mc.classList.add('drawer-collapsed');
+    const dt = $('cad-drawer-toggle');
+    if (dt) { dt.textContent = '\u00BB'; dt.title = '\u5C55\u5F00\u5DE5\u5177\u9762\u677F'; }
+    _cadSetParamsCollapsed(false);
+  } catch (e) {}
+}
+
+function _cadBindShellControls() {
+  const drawerBtn = $('cad-drawer-toggle');
+  if (drawerBtn && !drawerBtn.dataset._cadBound) {
+    drawerBtn.dataset._cadBound = '1';
+    drawerBtn.addEventListener('click', () => {
+      try {
+        const mc = document.querySelector('.main-container');
+        if (!mc) return;
+        const collapsed = mc.classList.toggle('drawer-collapsed');
+        drawerBtn.textContent = collapsed ? '\u00BB' : '\u00AB';
+        drawerBtn.title = collapsed ? '\u5C55\u5F00\u5DE5\u5177\u9762\u677F' : '\u6298\u53E0\u5DE5\u5177\u9762\u677F';
+        _cadNotifyLayoutResized();
+      } catch (e) {}
+    });
+  }
+  const paramsColBtn = $('cad-params-collapse');
+  if (paramsColBtn && !paramsColBtn.dataset._cadBound) {
+    paramsColBtn.dataset._cadBound = '1';
+    paramsColBtn.addEventListener('click', () => _cadSetParamsCollapsed(true));
+  }
+  const paramsShowBtn = $('cad-params-restore');
+  if (paramsShowBtn && !paramsShowBtn.dataset._cadBound) {
+    paramsShowBtn.dataset._cadBound = '1';
+    paramsShowBtn.addEventListener('click', () => _cadSetParamsCollapsed(false));
+  }
+}
+
 function _dockResetLayout() {
   const ids = _dockKnownPanelIds();
   const lay = _dockDefaultLayout(ids);
   state.uiLayout = lay;
+  try { _cadResetShellState(); } catch (e) {}
   _dockApplyLayoutFromState(true);
   scheduleUiStatePersist(0);
   try { showNotification('已恢复默认布局', 1800, 'success'); } catch (e) {}
@@ -87795,6 +90365,8 @@ function initDockingUI() {
       btn.addEventListener('click', () => { try { _dockResetLayout(); } catch (e) {} });
     }
   } catch (e) {}
+  // Process CAD Shell: drawer collapse + parameters panel collapse.
+  try { _cadBindShellControls(); } catch (e) {}
   // Mouse wheel: when cursor is on a dock-nav bar, scroll that dock's tabs horizontally.
   // (Do not affect page scroll elsewhere.)
   try { _dockBindAllNavWheels(); } catch (e) {}
@@ -87843,6 +90415,17 @@ async function applyParamsNow(noAutosave = false, timeoutMs = 0) {
     try {
       if (resp && Array.isArray(resp.warnings) && resp.warnings.length) {
         showNotification(String(resp.warnings[0] || '参数已回退到默认材料'), 5200);
+      }
+    } catch (e) {}
+    // Adopt the server's authoritative runtime statuses so edited steps and
+    // their successors turn Dirty immediately (snapshot review stays in sync).
+    try {
+      if (resp && Array.isArray(resp.statuses) && Array.isArray(state.recipe)) {
+        for (let i = 0; i < state.recipe.length && i < resp.statuses.length; i++) {
+          state.recipe[i].runtime_status = String(resp.statuses[i] || 'ready');
+        }
+        renderRecipe();
+        try { refreshTimeline(); } catch (e2) {}
       }
     } catch (e) {}
     // Keep Mask Exposure preview aligned with the step's *effective* mask after parameter edits.
@@ -88085,6 +90668,31 @@ function _sliceOverrideKey(idx) {
       state.sliceStepOverrides2 = swap(state.sliceStepOverrides2);
     }
 
+    function _sliceOverridesMove(cur0, from0, to0) {
+      const cur = (cur0 && typeof cur0 === 'object') ? cur0 : {};
+      const from = parseInt(from0, 10);
+      const to = parseInt(to0, 10);
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < 0 || from === to) {
+        return Object.assign({}, cur);
+      }
+      const out = {};
+      for (const key of Object.keys(cur)) {
+        const index = parseInt(key, 10);
+        if (!Number.isFinite(index) || index < 0) continue;
+        let next = index;
+        if (index === from) next = to;
+        else if (from < to && index > from && index <= to) next = index - 1;
+        else if (from > to && index >= to && index < from) next = index + 1;
+        out[String(next)] = cur[key];
+      }
+      return out;
+    }
+
+    function _sliceOverridesMoveBoth(from, to) {
+      state.sliceStepOverrides = _sliceOverridesMove(state.sliceStepOverrides, from, to);
+      state.sliceStepOverrides2 = _sliceOverridesMove(state.sliceStepOverrides2, from, to);
+    }
+
 function _uiLockDisabled(el, locked) {
   if (!el) return;
   try {
@@ -88109,7 +90717,7 @@ function _setProcessRecipeUiLocked(locked) {
     'preset-seq-select', 'preset-seq-insert-btn',
     'run-step-btn', 'run-to-btn', 'run-all-btn',
     'dup-step-btn', 'move-up-btn', 'move-down-btn', 'remove-step-btn',
-    'undo-btn', 'reset-btn',
+    'undo-btn', 'redo-btn', 'reset-btn',
   ];
   for (const id of ids) {
     try { _uiLockDisabled($(id), !!locked); } catch (e) {}
@@ -88168,7 +90776,8 @@ function renderRecipe() {
       prevLoopLabel = loopLabel;
     }
     const item = document.createElement('div');
-    item.className = 'step-item' + (!locked && idx === state.selectedIndex ? ' active' : '');
+    const stCls = ' st-' + String((step && step.runtime_status) || 'ready');
+    item.className = 'step-item' + stCls + (!locked && idx === state.selectedIndex ? ' active' : '');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = !!(step && step.enabled);
@@ -88188,7 +90797,8 @@ function renderRecipe() {
     }
     const name = document.createElement('div');
     name.className = 'name';
-    name.textContent = String((step && step.name) || '');
+    name.textContent = String((step && (step.instance_name || step.name)) || '');
+    name.title = String((step && step.name) || '');
     const group = document.createElement('div');
     group.className = 'group';
     group.textContent = String((step && (step.loop || step.group)) || '');
@@ -88238,12 +90848,48 @@ function renderRecipe() {
           } catch (e) {}
         }
     if (!locked) {
+      // Native drag-and-drop reordering (up/down buttons remain as the accessible fallback).
+      item.draggable = true;
+      item.addEventListener('dragstart', (ev) => {
+        try {
+          ev.dataTransfer.effectAllowed = 'move';
+          ev.dataTransfer.setData('text/tcad-step-index', String(idx));
+          item.classList.add('dragging');
+        } catch (e) {}
+      });
+      item.addEventListener('dragend', () => { try { item.classList.remove('dragging'); } catch (e) {} });
+      item.addEventListener('dragover', (ev) => {
+        ev.preventDefault();
+        try { item.classList.add('drop-target'); } catch (e) {}
+      });
+      item.addEventListener('dragleave', () => { try { item.classList.remove('drop-target'); } catch (e) {} });
+      item.addEventListener('drop', async (ev) => {
+        ev.preventDefault();
+        try { item.classList.remove('drop-target'); } catch (e) {}
+        const from = Number(ev.dataTransfer.getData('text/tcad-step-index'));
+        if (!Number.isInteger(from) || from === idx) return;
+        await moveRecipeStep(from, idx);
+      });
+      name.addEventListener('dblclick', (ev) => {
+        ev.stopPropagation();
+        renameStep(idx);
+      });
       item.addEventListener('click', () => {
         state.selectedIndex = idx;
         renderRecipe();
         renderParams();
         try { applyEffectiveSliceForSelectedStep(true); } catch (e) {}
       });
+    }
+    if (!locked && String((step && step.runtime_status) || '') === 'error') {
+      try {
+        const errInfo = (state.stepErrors || {})[idx];
+        const badge = document.createElement('div');
+        badge.className = 'step-error-badge';
+        badge.textContent = '\u26A0 ' + String((errInfo && errInfo.error) || '\u6B65\u9AA4\u5931\u8D25').slice(0, 46);
+        badge.title = String((errInfo && errInfo.error) || 'Step failed');
+        item.appendChild(badge);
+      } catch (e) {}
     }
     list.appendChild(item);
   });
@@ -88547,11 +91193,44 @@ function renderCmpSelectivity(container, step) {
   container.appendChild(wrapper);
 }
 
+function _renderStepErrorBox(container, idx) {
+  try {
+    const step = (state.recipe || [])[idx];
+    if (!step || String(step.runtime_status || '') !== 'error') return;
+    const err = (state.stepErrors || {})[idx];
+    const box = document.createElement('div');
+    box.className = 'step-error-detail';
+    const title = document.createElement('div');
+    title.className = 'err-title';
+    title.textContent = `\u26A0 \u6B65\u9AA4 ${idx + 1} \u6267\u884C\u5931\u8D25${err && err.rolled_back ? '\uFF08\u5DF2\u81EA\u52A8\u56DE\u6EDA\uFF09' : ''}`;
+    box.appendChild(title);
+    const rows = [
+      ['\u5B9E\u4F8B\u540D', String((err && err.instance_name) || step.instance_name || step.name || '-')],
+      ['\u6B65\u9AA4\u7C7B\u578B', String((err && err.step_type) || step.name || '-')],
+      ['\u53C2\u6570\u8DEF\u5F84', String((err && err.parameter_path) || '\u672A\u5B9A\u4F4D')],
+      ['\u9519\u8BEF', String((err && err.error) || '\u672A\u77E5\u9519\u8BEF')],
+      ['\u5F02\u5E38\u7C7B\u578B', String((err && err.error_type) || '-')],
+      ['\u5EFA\u8BAE\u64CD\u4F5C', String((err && err.suggestion) || '\u68C0\u67E5\u53C2\u6570\u540E\u91CD\u8BD5')],
+    ];
+    for (const [k, v] of rows) {
+      const row = document.createElement('div');
+      row.className = 'err-row';
+      const b = document.createElement('b');
+      b.textContent = k + '\uFF1A';
+      row.appendChild(b);
+      row.appendChild(document.createTextNode(v));
+      box.appendChild(row);
+    }
+    container.insertBefore(box, container.firstChild);
+  } catch (e) {}
+}
+
 function renderParams() {
   const step = state.recipe[state.selectedIndex];
   $('param-step-title').textContent = step ? `Step Parameters — ${step.name}` : 'Step Parameters';
   const container = $('param-container');
   container.innerHTML = '';
+  if (step) _renderStepErrorBox(container, state.selectedIndex);
   const isExposure = isMaskExposureStep(step);
   let exposureAdvEnabled = false;
   try {
@@ -88955,6 +91634,27 @@ function renderParams() {
         } catch (e) {}
       });
       group.appendChild(sel);
+    } else if (spec.type === 'bool') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      const rawBool = (step.params && step.params[spec.key] !== undefined)
+        ? step.params[spec.key]
+        : spec.default;
+      let normalizedBool = false;
+      if (typeof rawBool === 'boolean') normalizedBool = rawBool;
+      else if (typeof rawBool === 'number') normalizedBool = (rawBool === 1);
+      else if (typeof rawBool === 'string') {
+        normalizedBool = ['true', '1', 'yes', 'on'].includes(rawBool.trim().toLowerCase());
+      }
+      input.checked = normalizedBool;
+      input.addEventListener('change', () => {
+        step.params[spec.key] = Boolean(input.checked);
+        scheduleApplyParams(0);
+        try {
+          if (isExposure && String(spec.key || '') === 'advanced_enable') renderParams();
+        } catch (e) {}
+      });
+      group.appendChild(input);
     } else {
       const input = document.createElement(spec.type === 'text' ? 'input' : 'input');
       input.type = (spec.type === 'float' || spec.type === 'int') ? 'number' : 'text';
@@ -91023,6 +93723,12 @@ function _runUiBuildPlan(mode0, targetIdx0) {
 }
 
 function _runUiStart(mode, targetIdx) {
+  try {
+    for (const id of ['run-step-btn', 'run-to-btn', 'run-all-btn']) {
+      const el = $(id);
+      if (el) _uiLockDisabled(el, true);
+    }
+  } catch (e) {}
   const plan = _runUiBuildPlan(mode, targetIdx);
   const posByIndex = {};
   for (let k = 0; k < plan.length; k++) posByIndex[String(plan[k])] = k + 1;
@@ -91047,6 +93753,12 @@ function _runUiStart(mode, targetIdx) {
 }
 
 function _runUiStop() {
+  try {
+    for (const id of ['run-step-btn', 'run-to-btn', 'run-all-btn']) {
+      const el = $(id);
+      if (el) _uiLockDisabled(el, false);
+    }
+  } catch (e) {}
   const run = _runUiProgress;
   if (run) {
     run.active = false;
@@ -91389,6 +94101,19 @@ async function refreshAll(doPreview, retry = 0) {
     }
     if (state.waiting) exitWaiting();
     state.recipe = init.result.recipe || [];
+    state.demoRecipes = init.result.demo_recipes || {};
+    try { renderDemoRecipes(); } catch (e) {}
+    try { refreshTimeline(); } catch (e) {}
+    try {
+      const previous = (state.stepErrors && typeof state.stepErrors === 'object') ? state.stepErrors : {};
+      const keep = {};
+      (state.recipe || []).forEach((st, i) => {
+        if (!st || String(st.runtime_status || '') !== 'error') return;
+        if (st.runtime_error && typeof st.runtime_error === 'object') keep[i] = st.runtime_error;
+        else if (previous[i]) keep[i] = previous[i];
+      });
+      state.stepErrors = keep;
+    } catch (e) {}
     state.recipes = init.result.recipes || init.result.history || [];
     state.exports = init.result.exports || [];
     state.recipeFactories = init.result.recipe_factories || [];
@@ -91538,9 +94263,13 @@ async function refreshAll(doPreview, retry = 0) {
 let renderer = null;
 let scene = null;
 let camera = null;
+let perspectiveCamera = null;
+let orthographicCamera = null;
+let cameraMode = 'perspective';
 let controls = null;
 let loader = null;
 let meshGroup = null;
+let _viewerResizeHandler = null;
 let rulerGroup = null;
 let rulerGrid = null;
 let rulerGridMajor = null;
@@ -91585,15 +94314,16 @@ let slicePlaneVoidTex1 = null;
 let slicePlaneVoidTex2 = null;
 let meshCenterOffset = null; // THREE.Vector3 (pre-centering; in µm) for mapping domain coords -> centered coords
 
-// 3D cutaway: clip the structure by slice plane(s) and render "caps" (cross-sections) so the
-// cut surface stays closed. Planes are updated every frame to always remove the camera-facing side.
-let cutawayPlaneCount = 0; // 0/1/2 currently applied to main meshes
-let cutawayPlane1 = null;
-let cutawayPlane2 = null;
-let cutawayPlane1Front = null; // opposite of keep-plane (camera side)
-let cutawayPlane2Front = null;
-let cutawayPlanes1 = null; // [cutawayPlane1]
-let cutawayPlanes2 = null; // [cutawayPlane1, cutawayPlane2]
+// X/Y/Z WebGL clipping runtime. Serializable settings live only in state.clipPlanes3d;
+// Plane/Box3 instances stay here and are rebuilt from visible world-space geometry.
+let activeClippingPlanes = [];
+let activeAxisClippingBounds = null;
+let activeAxisClippingMeta = {};
+let axisClippingCapMode = 'none'; // 'none' | 'single' | 'multi-disabled'
+let axisClippingCapKey = '';
+
+// Legacy cap resources are reused only for a single active axis. Multi-axis clipping always
+// remains active, but caps are disabled because the old texture algorithm cannot seal corners.
 let cutawayCapsKey = ''; // rebuild key for cap geometry (primary)
 let cutawayCapsKey2 = ''; // rebuild key for cap geometry (secondary)
 let cutawayCapsGroup = null;
@@ -91609,10 +94339,6 @@ let cutawayCapTex1 = null;
 let cutawayCapTex2 = null;
 let cutawayCapTexKey1 = '';
 let cutawayCapTexKey2 = '';
-let cutawayTmpPos1 = null;
-let cutawayTmpPos2 = null;
-let cutawayTmpN1 = null;
-let cutawayTmpN2 = null;
 
 // WebGL render throttling (approximate client CPU limiting by capping FPS/DPR and using on-demand rendering).
 let _webglAnimActive = false;
@@ -91692,13 +94418,26 @@ function captureView3dNow() {
     try { tar = (controls && controls.target) ? controls.target : null; } catch (e) { tar = null; }
     if (!tar) tar = { x: 0, y: 0, z: 0 };
     const up = camera.up || { x: 0, y: 0, z: 1 };
+    const upX = Number(up.x), upY = Number(up.y), upZ = Number(up.z);
     const zoom = Number.isFinite(camera.zoom) ? camera.zoom : 1.0;
-    state.view3d = {
+    const capturedView = {
       pos: [Number(pos.x) || 0, Number(pos.y) || 0, Number(pos.z) || 0],
       target: [Number(tar.x) || 0, Number(tar.y) || 0, Number(tar.z) || 0],
-      up: [Number(up.x) || 0, Number(up.y) || 0, Number(up.z) || 1],
+      up: [
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1,
+      ],
       zoom: zoom,
+      cameraMode: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
     };
+    if (camera.isOrthographicCamera) {
+      const visibleHalfHeight = viewerVisibleHalfHeight(camera, tar);
+      if (Number.isFinite(visibleHalfHeight) && visibleHalfHeight > 0) {
+        capturedView.orthographicVisibleHalfHeight = visibleHalfHeight;
+      }
+    }
+    state.view3d = capturedView;
   } catch (e) {}
 }
 
@@ -91721,18 +94460,35 @@ function applyView3d(view) {
   if (!pos || pos.length < 3 || !target || target.length < 3) return false;
   state._viewApplying = true;
   try {
-    camera.position.set(Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0);
-    if (Array.isArray(view.up) && view.up.length >= 3) {
-      camera.up.set(Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1);
+    const requestedMode = String(view.cameraMode || '').trim().toLowerCase();
+    if ((requestedMode === 'perspective' || requestedMode === 'orthographic') && requestedMode !== cameraMode) {
+      if (!setCameraMode(requestedMode)) return false;
     }
-    if (Number.isFinite(view.zoom)) camera.zoom = view.zoom;
-    camera.updateProjectionMatrix();
+    camera.position.set(Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0);
+    if (Array.isArray(view.up)) {
+      const upX = Number(view.up[0]), upY = Number(view.up[1]), upZ = Number(view.up[2]);
+      camera.up.set(
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1
+      );
+    }
     if (controls && controls.target) {
       controls.target.set(Number(target[0]) || 0, Number(target[1]) || 0, Number(target[2]) || 0);
-      controls.update();
     } else {
       camera.lookAt(new THREE.Vector3(Number(target[0]) || 0, Number(target[1]) || 0, Number(target[2]) || 0));
     }
+    const savedVisibleHalfHeight = Number(view.orthographicVisibleHalfHeight);
+    if (camera.isOrthographicCamera && Number.isFinite(savedVisibleHalfHeight) && savedVisibleHalfHeight > 0) {
+      const rawAspect = Number(perspectiveCamera && perspectiveCamera.aspect);
+      const fullFrustumAspect = (Number.isFinite(rawAspect) && rawAspect > 0) ? rawAspect : 1;
+      _setOrthographicHalfHeight(savedVisibleHalfHeight, fullFrustumAspect);
+      camera.zoom = 1;
+    } else if (Number.isFinite(view.zoom)) {
+      camera.zoom = view.zoom;
+    }
+    camera.updateProjectionMatrix();
+    if (controls && controls.target) controls.update();
     return true;
   } catch (e) {
     return false;
@@ -91812,6 +94568,7 @@ function restoreDefaultView() {
   showNotification('恢复默认视图...');
   try {
     state._viewApplying = true;
+    setCameraMode('perspective');
     fitCameraToObject(meshGroup);
   } catch (e) {
     showNotification('恢复默认视图失败：' + e);
@@ -91957,13 +94714,229 @@ function setVideoOverlayText(text) {
   try { requestWebglRender(0); } catch (e) {}
 }
 
-function _webglAvailable(canvas) {
+const STANDARD_VIEWS = {
+  TOP:    { direction: [0, 0, 1], up: [0, 1, 0] },
+  BOTTOM: { direction: [0, 0, -1], up: [0, 1, 0] },
+  FRONT:  { direction: [0, -1, 0], up: [0, 0, 1] },
+  BACK:   { direction: [0, 1, 0], up: [0, 0, 1] },
+  LEFT:   { direction: [-1, 0, 0], up: [0, 0, 1] },
+  RIGHT:  { direction: [1, 0, 0], up: [0, 0, 1] },
+  ISO:    { direction: [1, -1, 0.8], up: [0, 0, 1] },
+};
+
+function _viewerCameraBounds(object3d) {
+  const fallback = {
+    center: new THREE.Vector3(0, 0, 0),
+    size: new THREE.Vector3(1, 1, 1),
+    radius: Math.sqrt(3) * 0.5,
+  };
+  if (typeof THREE === 'undefined' || !THREE.Box3 || !THREE.Vector3 || !object3d) return fallback;
   try {
-    const c = canvas || document.createElement('canvas');
-    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
-    return !!gl;
+    if (typeof object3d.traverseVisible !== 'function') return fallback;
+    try {
+      if (typeof object3d.updateWorldMatrix === 'function') object3d.updateWorldMatrix(true, true);
+      else if (typeof object3d.updateMatrixWorld === 'function') object3d.updateMatrixWorld(true);
+    } catch (e) {}
+    const box = new THREE.Box3();
+    if (typeof box.makeEmpty === 'function') box.makeEmpty();
+    let haveGeometry = false;
+    object3d.traverseVisible((node) => {
+      try {
+        const geometry = node && node.geometry;
+        if (!geometry) return;
+        if (!geometry.boundingBox && typeof geometry.computeBoundingBox === 'function') geometry.computeBoundingBox();
+        const localBox = geometry.boundingBox;
+        if (!localBox || (typeof localBox.isEmpty === 'function' && localBox.isEmpty())) return;
+        const worldBox = (typeof localBox.clone === 'function') ? localBox.clone() : null;
+        if (!worldBox) return;
+        if (node.matrixWorld && typeof worldBox.applyMatrix4 === 'function') worldBox.applyMatrix4(node.matrixWorld);
+        const values = [
+          worldBox.min && worldBox.min.x, worldBox.min && worldBox.min.y, worldBox.min && worldBox.min.z,
+          worldBox.max && worldBox.max.x, worldBox.max && worldBox.max.y, worldBox.max && worldBox.max.z,
+        ].map(Number);
+        if (!values.every(Number.isFinite)) return;
+        if (typeof box.union !== 'function') return;
+        box.union(worldBox);
+        haveGeometry = true;
+      } catch (e) {}
+    });
+    if (!haveGeometry || !box || box.isEmpty()) return fallback;
+    const center = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    box.getCenter(center);
+    box.getSize(size);
+    const sx = Math.max(0, Number(size.x) || 0);
+    const sy = Math.max(0, Number(size.y) || 0);
+    const sz = Math.max(0, Number(size.z) || 0);
+    if (![center.x, center.y, center.z, sx, sy, sz].every(Number.isFinite)) return fallback;
+    if (!(Math.hypot(sx, sy, sz) > 1e-9)) return fallback;
+    const radius = Math.max(Math.hypot(sx, sy, sz) * 0.5, 0.0005);
+    return { center, size: new THREE.Vector3(sx, sy, sz), radius };
   } catch (e) {
-    return false;
+    return fallback;
+  }
+}
+
+function viewerVisibleHalfHeight(viewCamera, target) {
+  if (!viewCamera) return 1;
+  const zoom = Math.max(1e-6, Number(viewCamera.zoom) || 1);
+  if (viewCamera.isOrthographicCamera) {
+    return Math.max(1e-6, Math.abs((Number(viewCamera.top) || 1) - (Number(viewCamera.bottom) || -1)) * 0.5 / zoom);
+  }
+  const focus = target || new THREE.Vector3(0, 0, 0);
+  const distance = Math.max(1e-6, viewCamera.position.distanceTo(focus));
+  const fov = Math.max(1, Math.min(179, Number(viewCamera.fov) || 50));
+  return Math.max(1e-6, distance * Math.tan((fov * Math.PI / 180) * 0.5) / zoom);
+}
+
+function _setOrthographicHalfHeight(halfHeight, aspect) {
+  if (!orthographicCamera) return;
+  const hh = Math.max(1e-6, Number(halfHeight) || 1);
+  const ratio = Math.max(1e-6, Number(aspect) || 1);
+  orthographicCamera.top = hh;
+  orthographicCamera.bottom = -hh;
+  orthographicCamera.left = -hh * ratio;
+  orthographicCamera.right = hh * ratio;
+  orthographicCamera.zoom = 1;
+}
+
+function _resizeViewerCameras(width, height) {
+  const w = Math.max(1, Number(width) || 1);
+  const h = Math.max(1, Number(height) || 1);
+  const aspect = w / h;
+  if (perspectiveCamera) {
+    perspectiveCamera.aspect = aspect;
+    perspectiveCamera.updateProjectionMatrix();
+  }
+  if (orthographicCamera) {
+    const halfHeight = Math.max(1e-6, Math.abs((Number(orthographicCamera.top) || 1) - (Number(orthographicCamera.bottom) || -1)) * 0.5);
+    orthographicCamera.left = -halfHeight * aspect;
+    orthographicCamera.right = halfHeight * aspect;
+    orthographicCamera.updateProjectionMatrix();
+  }
+}
+
+function _setCameraClipRange(viewCamera, distance, radius) {
+  if (!viewCamera) return;
+  const dist = Math.max(1e-5, Number(distance) || 1);
+  const r = Math.max(0.0005, Number(radius) || 0.5);
+  viewCamera.near = Math.max(0.0001, Math.min(dist * 0.01, dist - r * 1.5));
+  viewCamera.far = Math.max(viewCamera.near + 1, dist + r * 4, 10);
+  viewCamera.updateProjectionMatrix();
+}
+
+function setCameraMode(mode) {
+  if (state.viewerBackend !== 'webgl' || !perspectiveCamera || !orthographicCamera || !camera) return false;
+  const nextMode = String(mode || '').toLowerCase() === 'orthographic' ? 'orthographic' : 'perspective';
+  const next = nextMode === 'orthographic' ? orthographicCamera : perspectiveCamera;
+  const target = (controls && controls.target) ? controls.target.clone() : _viewerCameraBounds(meshGroup).center;
+  const visibleHalfHeight = viewerVisibleHalfHeight(camera, target);
+  const direction = camera.position.clone().sub(target);
+  if (!(direction.length() > 1e-8)) direction.set(1, -1, 0.8);
+  direction.normalize();
+  try { next.position.copy(camera.position); } catch (e) {}
+  try { next.quaternion.copy(camera.quaternion); } catch (e) {}
+  try { next.up.copy(camera.up); } catch (e) {}
+  if (nextMode === 'orthographic') {
+    const aspect = Math.max(1e-6, Number(perspectiveCamera.aspect) || 1);
+    _setOrthographicHalfHeight(visibleHalfHeight, aspect);
+  } else {
+    const zoom = Math.max(1e-6, Number(perspectiveCamera.zoom) || 1);
+    const fov = Math.max(1, Math.min(179, Number(perspectiveCamera.fov) || 50));
+    const distance = visibleHalfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+    next.position.copy(target).addScaledVector(direction, Math.max(distance, 1e-5));
+  }
+  camera = next;
+  cameraMode = nextMode;
+  const bounds = _viewerCameraBounds(meshGroup);
+  const distance = camera.position.distanceTo(target);
+  _setCameraClipRange(camera, distance, bounds.radius);
+  try { camera.lookAt(target); } catch (e) {}
+  if (controls) {
+    controls.object = camera;
+    if (controls.target) controls.target.copy(target);
+    controls.update();
+  }
+  const selector = $('viewer-camera-mode');
+  if (selector) selector.value = nextMode;
+  try { applySliceViewOffset3d(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
+  try { updateRuler3d(); } catch (e) {}
+  try { scheduleCaptureView3d(0); } catch (e) {}
+  try { requestWebglRender(0); } catch (e) {}
+  return true;
+}
+
+function applyStandardView(name) {
+  if (state.viewerBackend !== 'webgl' || !camera) return false;
+  const key = String(name || '').trim().toUpperCase();
+  const preset = STANDARD_VIEWS[key];
+  if (!preset) return false;
+  const bounds = _viewerCameraBounds(meshGroup);
+  const center = bounds.center;
+  const direction = new THREE.Vector3(preset.direction[0], preset.direction[1], preset.direction[2]);
+  if (!(direction.length() > 1e-8)) direction.set(1, -1, 0.8);
+  direction.normalize();
+  const aspect = Math.max(1e-6, Number((perspectiveCamera && perspectiveCamera.aspect) || 1));
+  const halfHeight = Math.max(bounds.radius * 1.18 / Math.min(1, aspect), 0.001);
+  let distance = Math.max(bounds.radius * 3, 0.01);
+  if (camera.isPerspectiveCamera) {
+    const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
+    const fov = Math.max(1, Math.min(179, Number(camera.fov) || 50));
+    distance = halfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+  } else {
+    _setOrthographicHalfHeight(halfHeight, aspect);
+  }
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.up.set(preset.up[0], preset.up[1], preset.up[2]);
+  _setCameraClipRange(camera, distance, bounds.radius);
+  try { camera.lookAt(center); } catch (e) {}
+  if (controls) {
+    controls.object = camera;
+    if (controls.target) controls.target.copy(center);
+    controls.update();
+  }
+  try { applySliceViewOffset3d(); } catch (e) {}
+  try { updateSlicePlane3d(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
+  try { updateRuler3d(); } catch (e) {}
+  try { scheduleCaptureView3d(0); } catch (e) {}
+  try { requestWebglRender(0); } catch (e) {}
+  return true;
+}
+
+function bindViewerCameraControls() {
+  const modeSelector = $('viewer-camera-mode');
+  if (modeSelector && !(modeSelector.dataset && modeSelector.dataset.viewerCameraBound === 'true')) {
+    modeSelector.addEventListener('change', () => { setCameraMode(modeSelector.value); });
+    if (modeSelector.dataset) modeSelector.dataset.viewerCameraBound = 'true';
+  }
+  const viewButtonIds = [
+    'viewer-view-iso', 'viewer-view-top', 'viewer-view-bottom', 'viewer-view-front',
+    'viewer-view-back', 'viewer-view-left', 'viewer-view-right'
+  ];
+  for (const id of viewButtonIds) {
+    const button = $(id);
+    if (!button || (button.dataset && button.dataset.viewerCameraBound === 'true')) continue;
+    button.addEventListener('click', () => {
+      const name = button.dataset ? button.dataset.standardView : '';
+      applyStandardView(name);
+    });
+    if (button.dataset) button.dataset.viewerCameraBound = 'true';
+  }
+}
+
+function webglCapability() {
+  try {
+    const probeCanvas = document.createElement('canvas');
+    const webgl2 = probeCanvas.getContext('webgl2');
+    if (webgl2) return { ok: true, version: 2, reason: '' };
+    const webgl1 = probeCanvas.getContext('webgl') || probeCanvas.getContext('experimental-webgl');
+    if (webgl1) return { ok: true, version: 1, reason: '' };
+    return { ok: false, version: 0, reason: 'WebGL 2/1 context unavailable' };
+  } catch (e) {
+    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
+    return { ok: false, version: 0, reason: `WebGL probe failed: ${detail || 'unknown error'}` };
   }
 }
 
@@ -91974,21 +94947,80 @@ function _autoFallbackEnabled() {
   return true;
 }
 
-function _shouldUseRemoteViewer() {
-  const forced = String(state.forceRender || '').toLowerCase();
-  if (forced === 'remote') return true;
-  if (forced === 'webgl') return false;
-  const canvas = $('viewer-canvas');
-  // Default policy: prefer client-side WebGL once the 3D model is loaded, so rotate/pan/color
-  // remain fully client-local with minimal host CPU usage.
-  // Host-assisted (G-buffer) rendering is only used when WebGL is unavailable or explicitly forced.
-  const ok = _webglAvailable(canvas);
-  if (ok) return false;
-  // If WebGL is unavailable:
-  // - Prefer Host Render when enabled by the server/GUI (clients without WebGL/GPU).
-  // - Otherwise only use Host Render when auto-fallback is enabled.
-  try { if (state && state.server && state.server.host_assisted_render) return true; } catch (e) {}
-  return _autoFallbackEnabled();
+function _normalizeViewerFallbackReason(reason) {
+  let text = '';
+  try { text = String(reason == null ? '' : reason); } catch (e) { text = ''; }
+  text = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) text = 'WebGL unavailable';
+  return text.slice(0, 180);
+}
+
+function _updateViewerBackendUI() {
+  const remote = (state.viewerBackend === 'remote');
+  const reason = remote ? _normalizeViewerFallbackReason(state.viewerFallbackReason) : '';
+  const webglVersion = Number(state.viewerWebglVersion);
+  const webglReady = (
+    state.viewerBackend === 'webgl'
+    && state.viewerReady === true
+    && (webglVersion === 1 || webglVersion === 2)
+  );
+  const statusKind = remote ? 'remote' : (webglReady ? 'webgl' : 'pending');
+  const statusLabel = remote
+    ? `Host Render · ${reason}`
+    : (webglReady ? `WebGL${webglVersion}` : '');
+  const status = $('viewer-backend-status');
+  if (status) {
+    status.textContent = statusLabel;
+    status.title = remote ? reason : (webglReady ? `${statusLabel} 渲染已启用` : '');
+    status.hidden = !(remote || webglReady);
+    try {
+      if (status.dataset) status.dataset.backend = statusKind;
+      else status.setAttribute('data-backend', statusKind);
+    } catch (e) {}
+    try {
+      const container = status.parentElement;
+      if (container && container.classList) {
+        container.classList.toggle('host-render-active', remote);
+        container.classList.toggle('webgl-active', webglReady);
+      }
+    } catch (e) {}
+  }
+  const hint = $('viewer-hint');
+  if (hint && state.viewerMode !== '2d') {
+    hint.textContent = remote
+      ? `Host Render · ${reason} · 拖拽旋转，滚轮缩放，右键/双指平移`
+      : '提示：鼠标拖拽旋转，滚轮缩放，右键平移';
+    if (remote) hint.style.display = '';
+  }
+  const cutaway = $('slice-cutaway-toggle');
+  const cutawayWrap = $('slice-cutaway-toggle-wrap');
+  const cutawayReason = remote
+    ? `Host Render 暂不支持三维裁剪：${reason}`
+    : '兼容开关：沿当前切片轴启用或关闭三维裁剪';
+  if (cutaway) {
+    cutaway.disabled = remote;
+    cutaway.title = cutawayReason;
+    if (remote) cutaway.checked = false;
+  }
+  if (cutawayWrap) {
+    cutawayWrap.title = cutawayReason;
+    try { cutawayWrap.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
+  }
+  const cameraControlIds = [
+    'viewer-camera-mode', 'viewer-view-iso', 'viewer-view-top', 'viewer-view-bottom',
+    'viewer-view-front', 'viewer-view-back', 'viewer-view-left', 'viewer-view-right'
+  ];
+  for (const id of cameraControlIds) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.dataset && !el.dataset.webglTitle) el.dataset.webglTitle = String(el.title || 'WebGL 标准视图');
+    el.disabled = remote;
+    el.title = remote
+      ? `Host Render 暂不支持相机模式与标准视图：${reason}`
+      : String((el.dataset && el.dataset.webglTitle) || 'WebGL 标准视图');
+    try { el.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
+  }
+  try { syncAxisClippingControlsUI(); } catch (e) {}
 }
 
 function _remoteCaptureView() {
@@ -92014,8 +95046,13 @@ function remoteApplyView(view) {
     remoteOrbit.theta = Math.atan2(vy, vx);
     remoteOrbit.phi = Math.asin(Math.max(-1, Math.min(1, vz / r)));
     remoteOrbit.target = [tx, ty, tz];
-    if (Array.isArray(view.up) && view.up.length >= 3) {
-      remoteOrbit.up = [Number(view.up[0]) || 0, Number(view.up[1]) || 0, Number(view.up[2]) || 1];
+    if (Array.isArray(view.up)) {
+      const upX = Number(view.up[0]), upY = Number(view.up[1]), upZ = Number(view.up[2]);
+      remoteOrbit.up = [
+        Number.isFinite(upX) ? upX : 0,
+        Number.isFinite(upY) ? upY : 0,
+        Number.isFinite(upZ) ? upZ : 1,
+      ];
     }
     _remoteCaptureView();
     scheduleRemoteRender(true, 30);
@@ -92053,8 +95090,18 @@ function remoteCameraPayload() {
   const py = (Number(t[1]) || 0) + r * cph * sth;
   const pz = (Number(t[2]) || 0) + r * sph;
   const up = remoteOrbit.up || [0, 0, 1];
+  const upX = Number(up[0]), upY = Number(up[1]), upZ = Number(up[2]);
   const fov = Math.max(15, Math.min(90, Number(remoteOrbit.fov) || 50));
-  return { pos: [px, py, pz], target: [Number(t[0]) || 0, Number(t[1]) || 0, Number(t[2]) || 0], up: [Number(up[0]) || 0, Number(up[1]) || 0, Number(up[2]) || 1], fov_deg: fov };
+  return {
+    pos: [px, py, pz],
+    target: [Number(t[0]) || 0, Number(t[1]) || 0, Number(t[2]) || 0],
+    up: [
+      Number.isFinite(upX) ? upX : 0,
+      Number.isFinite(upY) ? upY : 0,
+      Number.isFinite(upZ) ? upZ : 1,
+    ],
+    fov_deg: fov,
+  };
 }
 
 function _remoteDesiredGbufferSize(highRes) {
@@ -92259,40 +95306,69 @@ function _composeRemoteFrame(gbuf, mode) {
 }
 
 function _remoteCameraBasis(cam) {
-  const pos = cam && Array.isArray(cam.pos) ? cam.pos : [0, 0, 1];
-  const tar = cam && Array.isArray(cam.target) ? cam.target : [0, 0, 0];
+  const finiteCoord = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const rawPos = cam && Array.isArray(cam.pos) ? cam.pos : [0, 0, 1];
+  const rawTar = cam && Array.isArray(cam.target) ? cam.target : [0, 0, 0];
+  const pos = [finiteCoord(rawPos[0]), finiteCoord(rawPos[1]), finiteCoord(rawPos[2])];
+  const tar = [finiteCoord(rawTar[0]), finiteCoord(rawTar[1]), finiteCoord(rawTar[2])];
   const up0 = cam && Array.isArray(cam.up) ? cam.up : [0, 0, 1];
-  let fx = (Number(tar[0]) || 0) - (Number(pos[0]) || 0);
-  let fy = (Number(tar[1]) || 0) - (Number(pos[1]) || 0);
-  let fz = (Number(tar[2]) || 0) - (Number(pos[2]) || 0);
-  let fn = Math.hypot(fx, fy, fz) || 1.0;
+  let fx = tar[0] - pos[0];
+  let fy = tar[1] - pos[1];
+  let fz = tar[2] - pos[2];
+  let fn = Math.hypot(fx, fy, fz);
+  if (!(Number.isFinite(fn) && fn > 1e-12)) {
+    fx = 0; fy = 0; fz = -1; fn = 1;
+  }
   fx /= fn; fy /= fn; fz /= fn;
-  let ux = Number(up0[0]) || 0;
-  let uy = Number(up0[1]) || 0;
-  let uz = Number(up0[2]) || 1;
-  let un = Math.hypot(ux, uy, uz) || 1.0;
-  ux /= un; uy /= un; uz /= un;
+  const rawUx = Number(up0[0]), rawUy = Number(up0[1]), rawUz = Number(up0[2]);
+  let ux = Number.isFinite(rawUx) ? rawUx : 0;
+  let uy = Number.isFinite(rawUy) ? rawUy : 0;
+  let uz = Number.isFinite(rawUz) ? rawUz : 1;
+  let un = Math.hypot(ux, uy, uz);
+  if (Number.isFinite(un) && un > 1e-12) {
+    ux /= un; uy /= un; uz /= un;
+  } else {
+    ux = 0; uy = 0; uz = 0;
+  }
   // right = normalize(cross(fwd, up))
   let rx = fy * uz - fz * uy;
   let ry = fz * ux - fx * uz;
   let rz = fx * uy - fy * ux;
-  let rn = Math.hypot(rx, ry, rz) || 0.0;
-  if (rn < 1e-8) {
-    // Up is parallel to fwd; choose a fallback up.
-    ux = 0; uy = 1; uz = 0;
+  let rn = Math.hypot(rx, ry, rz);
+  if (!(Number.isFinite(rn) && rn >= 1e-8)) {
+    // Pick the world axis least parallel to fwd. A fixed Y-up fallback is still
+    // degenerate when looking along ±Y and collapses the Host Render projection.
+    const ax = Math.abs(fx), ay = Math.abs(fy), az = Math.abs(fz);
+    if (ax <= ay && ax <= az) { ux = 1; uy = 0; uz = 0; }
+    else if (ay <= az) { ux = 0; uy = 1; uz = 0; }
+    else { ux = 0; uy = 0; uz = 1; }
     rx = fy * uz - fz * uy;
     ry = fz * ux - fx * uz;
     rz = fx * uy - fy * ux;
-    rn = Math.hypot(rx, ry, rz) || 1.0;
+    rn = Math.hypot(rx, ry, rz);
+  }
+  if (!(Number.isFinite(rn) && rn >= 1e-8)) {
+    // Deterministic last resort for malformed forward vectors.
+    fx = 0; fy = 0; fz = -1;
+    ux = 0; uy = 1; uz = 0;
+    rx = 1; ry = 0; rz = 0; rn = 1;
   }
   rx /= rn; ry /= rn; rz /= rn;
   // upn = cross(right, fwd)
   let ux2 = ry * fz - rz * fy;
   let uy2 = rz * fx - rx * fz;
   let uz2 = rx * fy - ry * fx;
-  const u2n = Math.hypot(ux2, uy2, uz2) || 1.0;
+  let u2n = Math.hypot(ux2, uy2, uz2);
+  if (!(Number.isFinite(u2n) && u2n >= 1e-8)) {
+    fx = 0; fy = 0; fz = -1;
+    rx = 1; ry = 0; rz = 0;
+    ux2 = 0; uy2 = 1; uz2 = 0; u2n = 1;
+  }
   ux2 /= u2n; uy2 /= u2n; uz2 /= u2n;
-  return { pos: [Number(pos[0]) || 0, Number(pos[1]) || 0, Number(pos[2]) || 0], right: [rx, ry, rz], up: [ux2, uy2, uz2], fwd: [fx, fy, fz] };
+  return { pos, right: [rx, ry, rz], up: [ux2, uy2, uz2], fwd: [fx, fy, fz] };
 }
 
 function _remoteProjectToGbuf(p, basis, proj, gbuf) {
@@ -92966,17 +96042,31 @@ function scheduleRemoteRender(highRes = true, delayMs = 120) {
   }, Math.max(0, delayMs));
 }
 
-function initRemoteViewer() {
-  const canvas = $('viewer-canvas');
+function initRemoteViewer(reason) {
+  try { resetAxisClippingRuntime(); } catch (e) {}
+  let canvas = $('viewer-canvas');
   if (!canvas) return;
-  remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+  const fallbackReason = _normalizeViewerFallbackReason(reason);
+  try { remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false }); } catch (e) { remoteCtx = null; }
+  // A renderer may fail after claiming a WebGL context. Context types cannot be changed on the
+  // same element, so replace only that unusable canvas before starting the 2D Host Render path.
+  if (!remoteCtx) {
+    try {
+      const replacement = canvas.cloneNode(false);
+      canvas.replaceWith(replacement);
+      canvas = replacement;
+      remoteCtx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+    } catch (e) { remoteCtx = null; }
+  }
   if (!remoteCtx) {
     showNotification('浏览器不支持 Canvas 2D，无法启用 Host Render。', 4200);
     return;
   }
   state.viewerBackend = 'remote';
+  state.viewerWebglVersion = 0;
+  state.viewerFallbackReason = fallbackReason;
   state.viewerReady = true;
-  try { $('viewer-hint').textContent = 'Host Render：拖拽旋转，滚轮缩放，右键/双指平移'; } catch (e) {}
+  try { _updateViewerBackendUI(); } catch (e) {}
   // Seed visibility list.
   try {
     remoteVisibleMatIds = new Set();
@@ -93079,16 +96169,23 @@ function initRemoteViewer() {
 
 function initViewer() {
   if (state.viewerReady) return;
-  if (_shouldUseRemoteViewer()) {
-    initRemoteViewer();
+  try { resetAxisClippingRuntime(); } catch (e) {}
+  const forced = String(state.forceRender || '').trim().toLowerCase();
+  if (forced === 'remote') {
+    initRemoteViewer('Host Render requested');
+    return;
+  }
+  const capability = webglCapability();
+  if (!capability.ok) {
+    initRemoteViewer(capability.reason);
     return;
   }
   if (!window.THREE || !THREE.WebGLRenderer) {
-    showNotification('three.js 未就绪（请检查 /static/three.js）');
+    initRemoteViewer('three.js WebGLRenderer unavailable');
     return;
   }
   if (!THREE.STLLoader) {
-    showNotification('STLLoader 未就绪（请检查 /static/STLLoader.js）');
+    initRemoteViewer('three.js STLLoader unavailable');
     return;
   }
   const perf = getClientPerf();
@@ -93096,7 +96193,21 @@ function initViewer() {
   // Three.js defaults to Y-up, so switch default up to Z-up before creating camera/controls.
   try { THREE.Object3D.DEFAULT_UP.set(0, 0, 1); } catch (e) {}
   const canvas = $('viewer-canvas');
+  if (!canvas) {
+    initRemoteViewer('Viewer canvas unavailable');
+    return;
+  }
   const autoFallback = _autoFallbackEnabled();
+  renderer = null;
+  scene = null;
+  camera = null;
+  perspectiveCamera = null;
+  orthographicCamera = null;
+  cameraMode = 'perspective';
+  meshGroup = null;
+  loader = null;
+  controls = null;
+  let initResizeHandler = null;
   try {
     const powerPreference = (perf.onDemand || getRenderQuality() !== 'high') ? 'low-power' : 'high-performance';
     const opts = {
@@ -93114,15 +96225,6 @@ function initViewer() {
     // When enabled, reject software WebGL (SwiftShader) to avoid pegging client CPU; we can fall back to Host Render.
     if (autoFallback) opts.failIfMajorPerformanceCaveat = true;
     renderer = new THREE.WebGLRenderer(opts);
-  } catch (e) {
-    if (autoFallback) {
-      try { showNotification('WebGL 初始化失败，尝试 Host Render...', 2600); } catch (e2) {}
-      try { initRemoteViewer(); } catch (e2) {}
-      return;
-    }
-    try { showNotification('WebGL 初始化失败：' + e, 4200); } catch (e2) {}
-    return;
-  }
   try { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number(perf.dprCap) || 1)); } catch (e) {}
   try { renderer.setClearColor(0x0f172a, 1.0); } catch (e) {}
   try { renderer.physicallyCorrectLights = true; } catch (e) {}
@@ -93136,9 +96238,14 @@ function initViewer() {
   try { renderer.info.autoReset = false; } catch (e) {}  // Manual reset for better control
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f172a);
-  camera = new THREE.PerspectiveCamera(50, 1, 0.001, 1000);
-  try { camera.up.set(0, 0, 1); } catch (e) {}
-  camera.position.set(0.3, 0.3, 0.3);
+  perspectiveCamera = new THREE.PerspectiveCamera(50, 1, 0.001, 1000);
+  orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1000);
+  camera = perspectiveCamera;
+  cameraMode = 'perspective';
+  try { perspectiveCamera.up.set(0, 0, 1); } catch (e) {}
+  try { orthographicCamera.up.set(0, 0, 1); } catch (e) {}
+  perspectiveCamera.position.set(0.3, 0.3, 0.3);
+  orthographicCamera.position.set(0.3, 0.3, 0.3);
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
 
@@ -93172,17 +96279,62 @@ function initViewer() {
         const rect = canvas.getBoundingClientRect();
         try { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number(getClientPerf().dprCap) || 1)); } catch (e) {}
         renderer.setSize(rect.width, rect.height, false);
-        camera.aspect = rect.width / rect.height;
-        camera.updateProjectionMatrix();
+        _resizeViewerCameras(rect.width, rect.height);
         try { applySliceViewOffset3d(); } catch (e) {}
         requestWebglRender(0);
       };
-  window.addEventListener('resize', resize);
+  try {
+    if (_viewerResizeHandler) window.removeEventListener('resize', _viewerResizeHandler);
+  } catch (e) {}
+  _viewerResizeHandler = resize;
+  initResizeHandler = resize;
+  window.addEventListener('resize', _viewerResizeHandler);
   resize();
   requestWebglRender(0);
-  state.viewerReady = true;
   state.viewerBackend = 'webgl';
+  state.viewerWebglVersion = (renderer && renderer.capabilities && renderer.capabilities.isWebGL2 === true) ? 2 : 1;
+  state.viewerFallbackReason = '';
+  state.viewerReady = true;
+  try { _updateViewerBackendUI(); } catch (e) {}
+  try { updateAxisClippingPlanes(false); } catch (e) {}
   try { updateRuler3d(); } catch (e) {}
+  } catch (e) {
+    const detail = String((e && e.message) ? e.message : e || 'unknown error').trim();
+    const fallbackReason = _normalizeViewerFallbackReason(
+      `WebGL viewer initialization failed: ${detail || 'unknown error'}`
+    );
+    if (initResizeHandler) {
+      try { window.removeEventListener('resize', initResizeHandler); } catch (e2) {}
+      if (_viewerResizeHandler === initResizeHandler) _viewerResizeHandler = null;
+    }
+    try { _webglAnimActive = false; } catch (e2) {}
+    try { _webglNeedRender = false; } catch (e2) {}
+    try {
+      if (_webglRenderTimer) clearTimeout(_webglRenderTimer);
+      _webglRenderTimer = null;
+    } catch (e2) {}
+    try { if (controls && typeof controls.dispose === 'function') controls.dispose(); } catch (e2) {}
+    try { resetAxisClippingRuntime(); } catch (e2) {}
+    try { if (scene) disposeObject3DDeep(scene); } catch (e2) {}
+    try { if (renderer && typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (e2) {}
+    try { if (renderer && typeof renderer.dispose === 'function') renderer.dispose(); } catch (e2) {}
+    controls = null;
+    loader = null;
+    meshGroup = null;
+    camera = null;
+    perspectiveCamera = null;
+    orthographicCamera = null;
+    cameraMode = 'perspective';
+    scene = null;
+    renderer = null;
+    state.viewerReady = false;
+    state.viewerBackend = 'remote';
+    state.viewerWebglVersion = 0;
+    state.viewerFallbackReason = fallbackReason;
+    try { showNotification('WebGL 初始化失败，切换 Host Render...', 2600); } catch (e2) {}
+    initRemoteViewer(fallbackReason);
+    return;
+  }
 }
 
 function formatLenNm(nm) {
@@ -93245,15 +96397,30 @@ function disposeObject3D(obj) {
 
 function disposeObject3DDeep(obj) {
   if (!obj) return;
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
   try {
     obj.traverse((node) => {
-      try { if (node.geometry) node.geometry.dispose(); } catch (e) {}
+      try {
+        if (node.geometry && !geometries.has(node.geometry)) {
+          geometries.add(node.geometry);
+          node.geometry.dispose();
+        }
+      } catch (e) {}
       try {
         const mat = node.material;
         if (!mat) return;
         const mats = Array.isArray(mat) ? mat : [mat];
         mats.forEach((m) => {
-          try { if (m.map) m.map.dispose(); } catch (e) {}
+          if (!m || materials.has(m)) return;
+          materials.add(m);
+          try {
+            if (m.map && !textures.has(m.map)) {
+              textures.add(m.map);
+              m.map.dispose();
+            }
+          } catch (e) {}
           try { m.dispose(); } catch (e) {}
         });
       } catch (e) {}
@@ -93360,6 +96527,7 @@ function applyElementVisibility() {
       node.visible = v;
     });
   } catch (e) {}
+  try { applyCutawayNow(false); } catch (e) {}
 }
 
 function _applyElementOutlineMode(enable) {
@@ -94029,142 +97197,520 @@ function updateSlicePlane3d() {
   try { requestWebglRender(0); } catch (e) {}
 }
 
-// ---- 3D cutaway (slice-based clipping with caps) ----
-function _cutawayActive3d() {
-  return !!(state && state.viewerBackend === 'webgl' && state.viewerMode === '3d' && state.sliceOverlay && state.sliceCutaway);
+// ---- X/Y/Z independent WebGL clipping ----
+const CLIP_AXES = ['X', 'Y', 'Z'];
+let axisClippingCapSlice = null;
+let axisClippingCapSliceKey = '';
+let axisClippingCapRequestSeq = 0;
+let axisClippingCapRequestAbort = null;
+let axisClippingCapInFlightKey = '';
+let axisClippingCapTimer = null;
+const AXIS_CLIPPING_CAP_DEBOUNCE_MS = 160;
+
+function _defaultClipPlanes3d() {
+  return {
+    X: { enabled: false, position: 0.5, invert: false },
+    Y: { enabled: false, position: 0.5, invert: false },
+    Z: { enabled: false, position: 0.5, invert: false },
+  };
 }
 
-function _cutawayPlaneCountWanted() {
-  if (!_cutawayActive3d()) return 0;
-  return state.sliceOverlay2 ? 2 : 1;
+function _clip01(value, fallback = 0.5) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return Math.max(0, Math.min(1, Number(fallback) || 0));
+  return Math.max(0, Math.min(1, number));
 }
 
-function _ensureCutawayPlanes() {
-  if (!window.THREE) return false;
-  if (!cutawayPlane1) cutawayPlane1 = new THREE.Plane();
-  if (!cutawayPlane2) cutawayPlane2 = new THREE.Plane();
-  if (!cutawayPlane1Front) cutawayPlane1Front = new THREE.Plane();
-  if (!cutawayPlane2Front) cutawayPlane2Front = new THREE.Plane();
-  if (!cutawayPlanes1) cutawayPlanes1 = [cutawayPlane1];
-  if (!cutawayPlanes2) cutawayPlanes2 = [cutawayPlane1, cutawayPlane2];
-  if (!cutawayTmpPos1) cutawayTmpPos1 = new THREE.Vector3();
-  if (!cutawayTmpPos2) cutawayTmpPos2 = new THREE.Vector3();
-  if (!cutawayTmpN1) cutawayTmpN1 = new THREE.Vector3();
-  if (!cutawayTmpN2) cutawayTmpN2 = new THREE.Vector3();
-  return true;
+function _sanitizeClipPlanes3d(value) {
+  const source = (value && typeof value === 'object') ? value : {};
+  const clean = _defaultClipPlanes3d();
+  for (const axis of CLIP_AXES) {
+    const raw = (source[axis] && typeof source[axis] === 'object')
+      ? source[axis]
+      : ((source[axis.toLowerCase()] && typeof source[axis.toLowerCase()] === 'object') ? source[axis.toLowerCase()] : {});
+    clean[axis] = {
+      enabled: !!raw.enabled,
+      position: _clip01(raw.position, 0.5),
+      invert: !!raw.invert,
+    };
+  }
+  return clean;
 }
 
-function _slicePlaneWorldCenter(axis0, idx0, outVec3) {
+function _ensureClipPlanes3dState() {
+  state.clipPlanes3d = _sanitizeClipPlanes3d(state.clipPlanes3d);
+  return state.clipPlanes3d;
+}
+
+function _serializeClipPlanes3d() {
+  const clean = _ensureClipPlanes3dState();
+  const result = {};
+  for (const axis of CLIP_AXES) result[axis] = { ...clean[axis] };
+  return result;
+}
+
+function _activeAxisClippingAxes() {
+  const clean = _ensureClipPlanes3dState();
+  return CLIP_AXES.filter((axis) => !!clean[axis].enabled);
+}
+
+function _axisClippingCenterOffsetComponent(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  const component = { X: 'x', Y: 'y', Z: 'z' }[axis];
+  if (!component) return 0;
+  try {
+    if (meshCenterOffset && meshCenterOffset.isVector3 && Number.isFinite(Number(meshCenterOffset[component]))) {
+      return Number(meshCenterOffset[component]);
+    }
+  } catch (e) {}
+  try {
+    const fallback = _sliceCenterOffsetUmFallback();
+    const index = { X: 0, Y: 1, Z: 2 }[axis];
+    const value = fallback && Number(fallback[index]);
+    if (Number.isFinite(value)) return value;
+  } catch (e) {}
+  return 0;
+}
+
+function _axisClippingDomainCenterWorld() {
   if (!window.THREE) return null;
-  const axis = _sanitizeSliceAxis(axis0);
-  const idx = clampInt(idx0, 0, axisMax(axis));
-  const dimsNm = domainDimsNm();
-  const voxelNm = Number(dimsNm.voxel) || 5.0;
-  const voxelUm = voxelNm / 1000.0;
-  const posUm = (idx + 0.5) * voxelUm;
-  const xUm = (Number(dimsNm.x) || 0) / 1000.0;
-  const yUm = (Number(dimsNm.y) || 0) / 1000.0;
-  const zUm = (Number(dimsNm.z) || 0) / 1000.0;
-
-  let centerOff = null;
-  if (meshCenterOffset && meshCenterOffset.isVector3) centerOff = [meshCenterOffset.x, meshCenterOffset.y, meshCenterOffset.z];
-  else centerOff = _sliceCenterOffsetUmFallback();
-
-  let px = xUm * 0.5, py = yUm * 0.5, pz = zUm * 0.5;
-  if (axis === 'X') px = posUm;
-  else if (axis === 'Y') py = posUm;
-  else pz = posUm;
-
-  const out = outVec3 || new THREE.Vector3();
-  out.set(px - centerOff[0], py - centerOff[1], pz - centerOff[2]);
-  return out;
+  let dims = null;
+  try { dims = domainDimsNm(); } catch (e) { dims = null; }
+  const sizeUm = ['X', 'Y', 'Z'].map((axis) => {
+    const component = axis.toLowerCase();
+    return dims ? Number(dims[component]) / 1000.0 : NaN;
+  });
+  if (!sizeUm.every((value) => Number.isFinite(value) && value > 0)) return null;
+  const center = new THREE.Vector3(
+    sizeUm[0] * 0.5 - _axisClippingCenterOffsetComponent('X'),
+    sizeUm[1] * 0.5 - _axisClippingCenterOffsetComponent('Y'),
+    sizeUm[2] * 0.5 - _axisClippingCenterOffsetComponent('Z')
+  );
+  return [center.x, center.y, center.z].every(Number.isFinite) ? center : null;
 }
 
-function _cutawayAxisNormalKeepSide(axis0, planePos, camPos, outVec3) {
-  const axis = _sanitizeSliceAxis(axis0);
-  const n = outVec3 || (window.THREE ? new THREE.Vector3() : null);
-  if (!n) return null;
-  const cp = camPos || (camera ? camera.position : null);
-  if (!cp || !planePos) { n.set(0, 0, 1); return n; }
-  if (axis === 'X') {
-    const s = (cp.x < planePos.x) ? 1 : -1;
-    n.set(s, 0, 0);
-    return n;
-  }
-  if (axis === 'Y') {
-    const s = (cp.y < planePos.y) ? 1 : -1;
-    n.set(0, s, 0);
-    return n;
-  }
-  const s = (cp.z < planePos.z) ? 1 : -1;
-  n.set(0, 0, s);
-  return n;
+function _axisClippingSliceIndex(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis)) return null;
+  const meta = activeAxisClippingMeta && activeAxisClippingMeta[axis];
+  const worldPointUm = meta ? Number(meta.point) : NaN;
+  if (!Number.isFinite(worldPointUm)) return null;
+  let voxelNm = 5.0;
+  try {
+    const value = Number(state && state.model && state.model.voxel_size_nm);
+    if (Number.isFinite(value) && value > 0) voxelNm = value;
+  } catch (e) {}
+  const voxelUm = Math.max(1e-12, voxelNm / 1000.0);
+  const domainUm = worldPointUm + _axisClippingCenterOffsetComponent(axis);
+  // Slice planes are located at voxel centres: world = (index + 0.5) * voxel - centreOffset.
+  const rawIndex = Math.round(domainUm / voxelUm - 0.5);
+  return Math.max(0, Math.min(Math.max(0, axisMax(axis)), rawIndex));
 }
 
-function updateCutawayPlanesFromCamera() {
-  // Update plane orientation so we always clip the camera-facing side (camera lies on the negative side).
-  if (!_cutawayActive3d()) return false;
-  if (!renderer || !scene || !camera) return false;
-  if (!_ensureCutawayPlanes()) return false;
-  const camPos = camera.position;
+function _axisClippingCapNormal(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!window.THREE || !CLIP_AXES.includes(axis)) return null;
+  // Cap texture orientation is axis-defined. Invert changes only which side the clipping plane keeps;
+  // flipping this normal would mirror the slice texture in world space.
+  return new THREE.Vector3(axis === 'X' ? 1 : 0, axis === 'Y' ? 1 : 0, axis === 'Z' ? 1 : 0);
+}
 
-  const pos1 = _slicePlaneWorldCenter(state.sliceAxis, state.sliceIndex, cutawayTmpPos1);
-  if (!pos1) return false;
-  const n1 = _cutawayAxisNormalKeepSide(state.sliceAxis, pos1, camPos, cutawayTmpN1);
-  if (!n1) return false;
-  cutawayPlane1.setFromNormalAndCoplanarPoint(n1, pos1);
-  cutawayPlane1Front.copy(cutawayPlane1).negate();
+function _axisClippingModelRevision() {
+  try {
+    if (state.previewRev != null && String(state.previewRev) !== '') return String(state.previewRev);
+    if (state.model && state.model.revision != null) return String(state.model.revision);
+  } catch (e) {}
+  return 'none';
+}
 
-  if (state.sliceOverlay2) {
-    const pos2 = _slicePlaneWorldCenter(state.sliceAxis2, state.sliceIndex2, cutawayTmpPos2);
-    if (pos2) {
-      const n2 = _cutawayAxisNormalKeepSide(state.sliceAxis2, pos2, camPos, cutawayTmpN2);
-      if (n2) {
-        cutawayPlane2.setFromNormalAndCoplanarPoint(n2, pos2);
-        cutawayPlane2Front.copy(cutawayPlane2).negate();
-      }
-    }
+function _axisClippingCapDataKey(axis0, index0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  const index = Math.max(0, Number(index0) || 0);
+  return `axis=${axis}|index=${index}|rev=${_axisClippingModelRevision()}`;
+}
+
+function _cancelAxisClippingCapRequest(clearCache = false) {
+  axisClippingCapRequestSeq += 1;
+  try { if (axisClippingCapTimer != null) clearTimeout(axisClippingCapTimer); } catch (e) {}
+  axisClippingCapTimer = null;
+  try { if (axisClippingCapRequestAbort) axisClippingCapRequestAbort.abort(); } catch (e) {}
+  axisClippingCapRequestAbort = null;
+  axisClippingCapInFlightKey = '';
+  if (clearCache) {
+    axisClippingCapSlice = null;
+    axisClippingCapSliceKey = '';
   }
+}
+
+function _scheduleAxisClippingCap(axis0, delayMs = 0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis)) return false;
+  const index = _axisClippingSliceIndex(axis);
+  if (index == null) return false;
+  const key = _axisClippingCapDataKey(axis, index);
+  const delay = Math.max(0, Number(delayMs) || 0);
+  const cacheMatches = !!(axisClippingCapSlice && axisClippingCapSliceKey === key);
+  _cancelAxisClippingCapRequest(false);
+  if (delay <= 0 || cacheMatches) {
+    try { return !!_ensureSingleAxisClippingCap(axis); } catch (e) { return false; }
+  }
+  const timerSeq = axisClippingCapRequestSeq;
+  const timerId = setTimeout(() => {
+    if (axisClippingCapTimer === timerId) axisClippingCapTimer = null;
+    if (timerSeq !== axisClippingCapRequestSeq) return;
+    if (state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return;
+    const axes = _activeAxisClippingAxes();
+    if (axes.length !== 1 || axes[0] !== axis) return;
+    const currentIndex = _axisClippingSliceIndex(axis);
+    if (currentIndex == null || _axisClippingCapDataKey(axis, currentIndex) !== key) return;
+    try { _ensureSingleAxisClippingCap(axis); } catch (e) {}
+  }, delay);
+  axisClippingCapTimer = timerId;
   return true;
 }
 
-function _cutawayAssignMaterial(mat, planes, clipIntersection) {
-  if (!mat) return;
-  const p = (planes && planes.length) ? planes : null;
-  const prevLen = (mat.clippingPlanes && mat.clippingPlanes.length) ? mat.clippingPlanes.length : 0;
-  const newLen = p ? p.length : 0;
-  const prevInt = !!mat.clipIntersection;
-  const newInt = !!clipIntersection;
-  const needUpdate = (prevLen !== newLen) || (prevInt !== newInt);
-  try { mat.clippingPlanes = p; } catch (e) {}
-  try { mat.clipIntersection = newInt; } catch (e) {}
-  if (needUpdate) { try { mat.needsUpdate = true; } catch (e) {} }
+async function _requestAxisClippingCapSlice(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis) || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+  const activeAxes = _activeAxisClippingAxes();
+  if (activeAxes.length !== 1 || activeAxes[0] !== axis) return false;
+  const index = _axisClippingSliceIndex(axis);
+  if (index == null) return false;
+  const key = _axisClippingCapDataKey(axis, index);
+  if (axisClippingCapSlice && axisClippingCapSliceKey === key) {
+    try { return !!_axisClippingRenderCapSlice(axisClippingCapSlice); } catch (e) { return false; }
+  }
+  if (axisClippingCapInFlightKey === key) return false;
+
+  _cancelAxisClippingCapRequest(false);
+  axisClippingCapSlice = null;
+  axisClippingCapSliceKey = '';
+  // Never leave a cap from the previous physical plane visible while its replacement is loading.
+  // This also disposes the previous cap geometry/material/texture before a model revision is fetched.
+  try { _clearCutawayCaps(); } catch (e) {}
+  const seq = ++axisClippingCapRequestSeq;
+  axisClippingCapInFlightKey = key;
+  axisClippingCapRequestAbort = window.AbortController ? new window.AbortController() : null;
+  const signal = axisClippingCapRequestAbort ? axisClippingCapRequestAbort.signal : undefined;
+  const isCurrent = () => {
+    if (seq !== axisClippingCapRequestSeq || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+    const axes = _activeAxisClippingAxes();
+    return axes.length === 1 && axes[0] === axis && _axisClippingCapDataKey(axis, _axisClippingSliceIndex(axis)) === key;
+  };
+  try {
+    const response = await apiGet(
+      `/api/slice?axis=${encodeURIComponent(axis)}&index=${encodeURIComponent(index)}&kind=material`,
+      0,
+      signal ? { signal } : null
+    );
+    if (!isCurrent() || !response || !response.ok) return false;
+    const result = response.result || {};
+    const shape = Array.isArray(result.shape) ? result.shape : [0, 0];
+    const height = parseInt(shape[0], 10) || 0;
+    const width = parseInt(shape[1], 10) || 0;
+    const bytes = _b64ToBytes(result.data_b64 || '');
+    if (!(height > 0 && width > 0) || !bytes || bytes.byteLength < height * width * 2) return false;
+    const view = new Uint16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+    const slice = { axis, index, w: width, h: height, data: view.slice(0, height * width), rev: _axisClippingModelRevision() };
+    if (!isCurrent()) return false;
+    axisClippingCapSlice = slice;
+    axisClippingCapSliceKey = key;
+    return !!_axisClippingRenderCapSlice(slice);
+  } catch (e) {
+    return false;
+  } finally {
+    if (seq === axisClippingCapRequestSeq) {
+      axisClippingCapRequestAbort = null;
+      axisClippingCapInFlightKey = '';
+    }
+  }
 }
 
-function _applyCutawayToWebglMaterials(planes, clipIntersection) {
-  // Apply to all structure materials (solid + xray + edges) and element point materials.
+function _cutawayActive3d() {
+  return !!(state && state.viewerBackend === 'webgl' && state.viewerMode === '3d' && _activeAxisClippingAxes().length);
+}
+
+function _axisClippingBounds(object3d) {
+  if (!window.THREE || !THREE.Box3 || !object3d || typeof object3d.traverseVisible !== 'function') return null;
   try {
-    for (const [, group] of (state.meshes || new Map()).entries()) {
-      if (!group || !group.userData) continue;
-      const solid = group.userData._tcadSolidMesh;
-      const xray = group.userData._tcadXray;
-      if (solid && solid.material) _cutawayAssignMaterial(solid.material, planes, clipIntersection);
-      if (xray && xray.front && xray.front.material) _cutawayAssignMaterial(xray.front.material, planes, clipIntersection);
-      if (xray && xray.back && xray.back.material) _cutawayAssignMaterial(xray.back.material, planes, clipIntersection);
-      if (xray && xray.edges && xray.edges.material) _cutawayAssignMaterial(xray.edges.material, planes, clipIntersection);
+    if (typeof object3d.updateWorldMatrix === 'function') object3d.updateWorldMatrix(true, true);
+    else if (typeof object3d.updateMatrixWorld === 'function') object3d.updateMatrixWorld(true);
+  } catch (e) {}
+  const bounds = new THREE.Box3();
+  try { bounds.makeEmpty(); } catch (e) {}
+  let haveVisibleGeometry = false;
+  object3d.traverseVisible((node) => {
+    try {
+      const geometry = node && node.geometry;
+      if (!geometry) return;
+      if (!geometry.boundingBox && typeof geometry.computeBoundingBox === 'function') geometry.computeBoundingBox();
+      if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) return;
+      const worldBox = geometry.boundingBox.clone();
+      if (node.matrixWorld && typeof worldBox.applyMatrix4 === 'function') worldBox.applyMatrix4(node.matrixWorld);
+      const values = [worldBox.min.x, worldBox.min.y, worldBox.min.z, worldBox.max.x, worldBox.max.y, worldBox.max.z].map(Number);
+      if (!values.every(Number.isFinite)) return;
+      bounds.union(worldBox);
+      haveVisibleGeometry = true;
+    } catch (e) {}
+  });
+  if (!haveVisibleGeometry || bounds.isEmpty()) return null;
+  const size = new THREE.Vector3();
+  bounds.getSize(size);
+  if (![size.x, size.y, size.z].map(Number).every(Number.isFinite)) return null;
+  if (!(Math.hypot(size.x, size.y, size.z) > 1e-9)) return null;
+  return bounds;
+}
+
+function _axisClippingMaterials() {
+  const materials = [];
+  const seen = new Set();
+  const addMaterial = (material) => {
+    if (!material || seen.has(material)) return;
+    seen.add(material);
+    materials.push(material);
+  };
+  const visit = (node) => {
+    const material = node && node.material;
+    if (Array.isArray(material)) material.forEach(addMaterial);
+    else addMaterial(material);
+  };
+  try { if (meshGroup && typeof meshGroup.traverse === 'function') meshGroup.traverse(visit); } catch (e) {}
+  try {
+    if (elementPointsGroup && elementPointsGroup !== meshGroup && typeof elementPointsGroup.traverse === 'function') {
+      elementPointsGroup.traverse(visit);
     }
   } catch (e) {}
-  try {
-    if (elementPointsGroup) {
-      elementPointsGroup.traverse((node) => {
-        if (!node) return;
-        const mat = node.material;
-        if (!mat) return;
-        if (Array.isArray(mat)) mat.forEach((m) => _cutawayAssignMaterial(m, planes, clipIntersection));
-        else _cutawayAssignMaterial(mat, planes, clipIntersection);
-      });
+  return materials;
+}
+
+function _assignAxisClippingMaterial(material, planes) {
+  if (!material) return;
+  const next = (planes && planes.length) ? planes : null;
+  const previous = material.clippingPlanes || null;
+  const previousLength = previous ? previous.length : 0;
+  const nextLength = next ? next.length : 0;
+  // Three.js only needs a shader recompile when the plane count/intersection mode changes;
+  // moving an existing-count plane updates uniforms and must stay cheap during slider input.
+  const needsProgramUpdate = previousLength !== nextLength || !!material.clipIntersection;
+  try { material.clippingPlanes = next; } catch (e) {}
+  try { material.clipIntersection = false; } catch (e) {}
+  if (needsProgramUpdate) { try { material.needsUpdate = true; } catch (e) {} }
+}
+
+function _applyAxisClippingToMaterials(planes) {
+  for (const material of _axisClippingMaterials()) _assignAxisClippingMaterial(material, planes);
+}
+
+function _axisClippingCapSignature(activeAxes) {
+  if (activeAxes.length !== 1 || !activeAxisClippingBounds) return activeAxes.length ? `multi:${activeAxes.join('')}` : 'none';
+  const axis = activeAxes[0];
+  const cfg = state.clipPlanes3d[axis];
+  const meta = activeAxisClippingMeta[axis] || {};
+  return `${axis}:${Number(cfg.position).toFixed(6)}:${cfg.invert ? 1 : 0}:${Number(meta.point).toFixed(9)}`;
+}
+
+function _updateAxisClippingCapPolicy(activeAxes, capDelayMs = 0) {
+  const signature = _axisClippingCapSignature(activeAxes);
+  const changed = signature !== axisClippingCapKey;
+  if (!activeAxes.length) {
+    _cancelAxisClippingCapRequest(true);
+    if (changed || axisClippingCapMode !== 'none') { try { _clearCutawayCaps(); } catch (e) {} }
+    axisClippingCapMode = 'none';
+    axisClippingCapKey = signature;
+    return;
+  }
+  if (activeAxes.length > 1) {
+    _cancelAxisClippingCapRequest(true);
+    if (changed || axisClippingCapMode !== 'multi-disabled') { try { _clearCutawayCaps(); } catch (e) {} }
+    axisClippingCapMode = 'multi-disabled';
+    axisClippingCapKey = signature;
+    return;
+  }
+  if (changed || axisClippingCapMode !== 'single') { try { _clearCutawayCaps(); } catch (e) {} }
+  axisClippingCapMode = 'single';
+  axisClippingCapKey = signature;
+  try { _scheduleAxisClippingCap(activeAxes[0], capDelayMs); } catch (e) {}
+}
+
+function syncAxisClippingControlsUI() {
+  const clean = _ensureClipPlanes3dState();
+  const remote = state.viewerBackend === 'remote';
+  const reason = remote ? _normalizeViewerFallbackReason(state.viewerFallbackReason) : '';
+  const activeAxes = CLIP_AXES.filter((axis) => clean[axis].enabled);
+  for (const axis of CLIP_AXES) {
+    const key = axis.toLowerCase();
+    const config = clean[axis];
+    const enabled = $(`clip-${key}-enabled`);
+    const range = $(`clip-${key}-position`);
+    const number = $(`clip-${key}-value`);
+    const invert = $(`clip-${key}-invert`);
+    if (enabled) enabled.checked = !!config.enabled;
+    if (range) range.value = String(config.position);
+    if (number) number.value = String(config.position);
+    if (invert) invert.checked = !!config.invert;
+    for (const control of [enabled, range, number, invert]) {
+      if (!control) continue;
+      control.disabled = remote;
+      const normalTitle = (control.dataset && control.dataset.webglTitle) || control.title || `${axis} 轴裁剪`;
+      if (control.dataset && !control.dataset.webglTitle) control.dataset.webglTitle = normalTitle;
+      control.title = remote ? `Host Render 暂不支持三维裁剪：${reason}` : normalTitle;
+      try { control.setAttribute('aria-disabled', remote ? 'true' : 'false'); } catch (e) {}
     }
-  } catch (e) {}
+  }
+  const status = $('axis-clipping-status');
+  if (status) {
+    if (remote) status.textContent = `Host Render 不支持三维裁剪 · ${reason}`;
+    else if (!activeAxes.length) status.textContent = '未启用裁剪';
+    else if (activeAxes.length === 1) status.textContent = `${activeAxes[0]} 轴裁剪 · 单轴截面封口`;
+    else status.textContent = `${activeAxes.join('+')} 组合裁剪 · 多轴不封口`;
+    status.title = status.textContent;
+  }
+  const master = $('slice-cutaway-toggle');
+  if (master) {
+    master.disabled = remote;
+    master.checked = remote ? false : activeAxes.length > 0;
+  }
+  state.sliceCutaway = activeAxes.length > 0;
+}
+
+function _setAxisClippingState(axis0, patch, persistDelay = 0, capDelayMs = 0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis)) return false;
+  const clean = _ensureClipPlanes3dState();
+  const next = { ...clean[axis] };
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'enabled')) next.enabled = !!patch.enabled;
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'position')) next.position = _clip01(patch.position, next.position);
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'invert')) next.invert = !!patch.invert;
+  clean[axis] = next;
+  state.clipPlanes3d = clean;
+  state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+  try { updateAxisClippingPlanes(true, capDelayMs); } catch (e) {}
+  try { scheduleUiStatePersist(persistDelay); } catch (e) {}
+  return true;
+}
+
+function bindAxisClippingControls() {
+  for (const axis of CLIP_AXES) {
+    const key = axis.toLowerCase();
+    const enabled = $(`clip-${key}-enabled`);
+    const range = $(`clip-${key}-position`);
+    const number = $(`clip-${key}-value`);
+    const invert = $(`clip-${key}-invert`);
+    const bind = (element, kind, handler) => {
+      if (!element || (element.dataset && element.dataset.axisClippingBound === 'true')) return;
+      element.addEventListener(kind, handler);
+      if (element.dataset) element.dataset.axisClippingBound = 'true';
+    };
+    bind(enabled, 'change', () => _setAxisClippingState(axis, { enabled: !!enabled.checked }, 0));
+    bind(range, 'input', () => {
+      if (number) number.value = range.value;
+      _setAxisClippingState(axis, { position: range.value }, 420, AXIS_CLIPPING_CAP_DEBOUNCE_MS);
+    });
+    bind(number, 'change', () => {
+      const value = _clip01(number.value, state.clipPlanes3d[axis].position);
+      number.value = String(value);
+      if (range) range.value = String(value);
+      _setAxisClippingState(axis, { position: value }, 0);
+    });
+    bind(invert, 'change', () => _setAxisClippingState(axis, { invert: !!invert.checked }, 0));
+  }
+  const master = $('slice-cutaway-toggle');
+  if (master && !(master.dataset && master.dataset.axisClippingBound === 'true')) {
+    master.addEventListener('change', () => {
+      const clean = _ensureClipPlanes3dState();
+      if (!master.checked) {
+        for (const axis of CLIP_AXES) clean[axis].enabled = false;
+      } else if (!_activeAxisClippingAxes().length) {
+        const axis = _sanitizeSliceAxis(state.sliceAxis);
+        const max = Math.max(1, axisMax(axis));
+        clean[axis].enabled = true;
+        clean[axis].position = _clip01(Number(state.sliceIndex) / max, 0.5);
+      }
+      state.clipPlanes3d = clean;
+      state.sliceCutaway = _activeAxisClippingAxes().length > 0;
+      try { updateAxisClippingPlanes(true); } catch (e) {}
+      try { scheduleUiStatePersist(0); } catch (e) {}
+    });
+    if (master.dataset) master.dataset.axisClippingBound = 'true';
+  }
+  syncAxisClippingControlsUI();
+}
+
+function updateAxisClippingPlanes(requestRender = true, capDelayMs = 0) {
+  const activeAxes = _activeAxisClippingAxes();
+  if (state.viewerBackend !== 'webgl' || !renderer || !meshGroup || !window.THREE) {
+    resetAxisClippingRuntime();
+    syncAxisClippingControlsUI();
+    return false;
+  }
+  if (!activeAxes.length) {
+    _applyAxisClippingToMaterials(null);
+    activeClippingPlanes = [];
+    activeAxisClippingBounds = null;
+    activeAxisClippingMeta = {};
+    try { renderer.localClippingEnabled = false; } catch (e) {}
+    _updateAxisClippingCapPolicy(activeAxes, capDelayMs);
+    syncAxisClippingControlsUI();
+    if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
+    return true;
+  }
+  const bounds = _axisClippingBounds(meshGroup);
+  if (!bounds) {
+    _applyAxisClippingToMaterials(null);
+    activeClippingPlanes = [];
+    activeAxisClippingBounds = null;
+    activeAxisClippingMeta = {};
+    try { renderer.localClippingEnabled = false; } catch (e) {}
+    _updateAxisClippingCapPolicy([]);
+    syncAxisClippingControlsUI();
+    return false;
+  }
+  const clean = _ensureClipPlanes3dState();
+  const planes = [];
+  const meta = {};
+  const components = { X: 'x', Y: 'y', Z: 'z' };
+  for (const axis of activeAxes) {
+    const component = components[axis];
+    const config = clean[axis];
+    config.position = _clip01(config.position, 0.5);
+    const minimum = Number(bounds.min[component]);
+    const maximum = Number(bounds.max[component]);
+    const pointValue = minimum + config.position * (maximum - minimum);
+    const normal = new THREE.Vector3(axis === 'X' ? 1 : 0, axis === 'Y' ? 1 : 0, axis === 'Z' ? 1 : 0);
+    if (config.invert) normal.multiplyScalar(-1);
+    const point = new THREE.Vector3();
+    point[component] = pointValue;
+    const plane = new THREE.Plane(normal, -normal.dot(point));
+    planes.push(plane);
+    meta[axis] = { point: pointValue, position: config.position, invert: !!config.invert, plane };
+  }
+  activeClippingPlanes = planes;
+  activeAxisClippingBounds = bounds.clone();
+  activeAxisClippingMeta = meta;
+  _applyAxisClippingToMaterials(activeClippingPlanes);
+  try { renderer.localClippingEnabled = activeClippingPlanes.length > 0; } catch (e) {}
+  _updateAxisClippingCapPolicy(activeAxes, capDelayMs);
+  syncAxisClippingControlsUI();
+  if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
+  return true;
+}
+
+function applyAxisClippingAfterMeshRefresh(requestRender = true) {
+  return updateAxisClippingPlanes(requestRender);
+}
+
+function resetAxisClippingRuntime() {
+  try { _cancelAxisClippingCapRequest(true); } catch (e) {}
+  try { _applyAxisClippingToMaterials(null); } catch (e) {}
+  activeClippingPlanes = [];
+  activeAxisClippingBounds = null;
+  activeAxisClippingMeta = {};
+  axisClippingCapMode = 'none';
+  axisClippingCapKey = '';
+  try { if (renderer) renderer.localClippingEnabled = false; } catch (e) {}
+  try { _clearCutawayCaps(); } catch (e) {}
+  try { if (scene && cutawayCapsGroup) scene.remove(cutawayCapsGroup); } catch (e) {}
+  cutawayCapsGroup = null;
 }
 
 function _cutawayCapOpacity() {
@@ -94207,6 +97753,8 @@ function _clearCutawayCaps() {
   try { if (cutawayCapTex2 && cutawayCapTex2.dispose) cutawayCapTex2.dispose(); } catch (e) {}
   cutawayCapTex1 = null;
   cutawayCapTex2 = null;
+  cutawayCapTexKey1 = '';
+  cutawayCapTexKey2 = '';
   cutawayCapCanvas1 = null;
   cutawayCapCanvas2 = null;
   cutawayCapCtx1 = null;
@@ -94622,11 +98170,26 @@ function _ensureCutawayCapMesh(which, slice) {
   }
 
   // Position + orientation
-  const normal = (axis === 'X') ? new THREE.Vector3(1, 0, 0) : (axis === 'Y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
+  const normal = _axisClippingCapNormal(axis) || ((axis === 'X')
+    ? new THREE.Vector3(1, 0, 0)
+    : (axis === 'Y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1)));
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
   try { mesh.quaternion.copy(q); } catch (e) {}
-  const pos = _slicePlaneWorldCenter(axis, slice.index, is2 ? cutawayTmpPos2 : cutawayTmpPos1);
-  if (pos) { try { mesh.position.copy(pos); } catch (e) {} }
+  let pos = null;
+  try {
+    const meta = activeAxisClippingMeta && activeAxisClippingMeta[axis];
+    const domainCenter = _axisClippingDomainCenterWorld();
+    const point = meta ? Number(meta.point) : NaN;
+    if (domainCenter && Number.isFinite(point)) {
+      pos = domainCenter;
+      pos[String(axis).toLowerCase()] = point;
+    }
+  } catch (e) { pos = null; }
+  if (!pos) {
+    try { mesh.visible = false; } catch (e) {}
+    return null;
+  }
+  try { mesh.position.copy(pos); mesh.visible = true; } catch (e) {}
 
   // Texture + opacity (sync style changes)
   const tex = _buildCutawayCapTexture(which, slice);
@@ -94638,65 +98201,364 @@ function _ensureCutawayCapMesh(which, slice) {
   return mesh;
 }
 
-function applyCutawayNow(requestRender = true) {
-  // Public entry-point; called after slice refresh and UI toggles.
-  if (state.viewerBackend !== 'webgl') {
-    // Host Render: cutaway is not yet supported.
-    cutawayPlaneCount = 0;
-    try { if (cutawayCapsGroup) cutawayCapsGroup.visible = false; } catch (e) {}
-    return false;
-  }
-  if (!renderer || !scene || !camera || !window.THREE) return false;
-
-  const active = _cutawayActive3d();
-  const wantCount = _cutawayPlaneCountWanted();
-  if (!active || wantCount <= 0) {
-    if (cutawayPlaneCount) {
-      _applyCutawayToWebglMaterials(null, false);
-      cutawayPlaneCount = 0;
-    }
-    try { if (cutawayCapsGroup) cutawayCapsGroup.visible = false; } catch (e) {}
-    try { renderer.localClippingEnabled = false; } catch (e) {}
-    if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
-    return true;
-  }
-
-  // Ensure we have the slice arrays needed for cap textures (best effort; async).
+function _ensureSingleAxisClippingCap(axis0) {
+  const axis = String(axis0 || '').trim().toUpperCase();
+  if (!CLIP_AXES.includes(axis) || axisClippingCapMode !== 'single') return false;
   try {
-    if (!state.sliceLast) refreshSlice(true, 'primary').catch(() => {});
-    if (state.sliceOverlay2 && !state.sliceLast2) refreshSlice(true, 'secondary').catch(() => {});
+    const pending = _requestAxisClippingCapSlice(axis);
+    if (pending && typeof pending.catch === 'function') pending.catch(() => {});
   } catch (e) {}
+  return true;
+}
 
-  try { renderer.localClippingEnabled = true; } catch (e) {}
-  if (!_ensureCutawayPlanes()) return false;
-  updateCutawayPlanesFromCamera();
+function _axisClippingRenderCapSlice(slice) {
+  if (!slice || state.viewerBackend !== 'webgl' || axisClippingCapMode !== 'single') return false;
+  const activeAxes = _activeAxisClippingAxes();
+  if (activeAxes.length !== 1 || activeAxes[0] !== String(slice.axis || '').toUpperCase()) return false;
+  const currentIndex = _axisClippingSliceIndex(activeAxes[0]);
+  const key = _axisClippingCapDataKey(activeAxes[0], currentIndex);
+  if (currentIndex == null || key !== axisClippingCapSliceKey || Number(slice.index) !== currentIndex) return false;
+  if (!_ensureCutawayCapsGroup()) return false;
+  const mesh = _ensureCutawayCapMesh(1, slice);
+  try { cutawayCapsGroup.visible = !!mesh; } catch (e) {}
+  try { if (cutawayCapMesh1) cutawayCapMesh1.visible = !!mesh; } catch (e) {}
+  try { if (cutawayCapMesh2) cutawayCapMesh2.visible = false; } catch (e) {}
+  if (cutawayCapMat1) {
+    try { cutawayCapMat1.clippingPlanes = null; } catch (e) {}
+    try { cutawayCapMat1.clipIntersection = false; } catch (e) {}
+  }
+  try { requestWebglRender(0); } catch (e) {}
+  return !!mesh;
+}
 
-  const planes = (wantCount >= 2) ? cutawayPlanes2 : cutawayPlanes1;
-  const clipIntersection = (wantCount >= 2);
-  _applyCutawayToWebglMaterials(planes, clipIntersection);
-  cutawayPlaneCount = wantCount;
+function applyCutawayNow(requestRender = true) {
+  // Compatibility entry-point retained for existing mesh/slice/material refresh call sites.
+  // The sole state source is state.clipPlanes3d; no worker or geometry rebuild is performed.
+  return updateAxisClippingPlanes(requestRender);
+}
 
-  // Caps: slice-colored planes aligned to the cut surfaces.
-  if (_ensureCutawayCapsGroup()) {
-    try { cutawayCapsGroup.visible = true; } catch (e) {}
+function _materialVisualForMesh(mesh, canonicalFallback = null) {
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const matId = parseInt(item.mat_id != null ? item.mat_id : (item.visual && item.visual.material_id)) || 0;
+  let canonical = (canonicalFallback && typeof canonicalFallback === 'object') ? canonicalFallback : null;
+  // Existing groups hold the latest canonical manifest value.  Prefer it over a legacy-only
+  // item so local redraws cannot fall back to stale physical palette data.
+  if (!canonical) {
     try {
-      if (state.sliceLast) _ensureCutawayCapMesh(1, state.sliceLast);
-      if (state.sliceOverlay2 && state.sliceLast2) _ensureCutawayCapMesh(2, state.sliceLast2);
-      try { if (cutawayCapMesh1) cutawayCapMesh1.visible = !!state.sliceLast; } catch (e) {}
-      try { if (cutawayCapMesh2) cutawayCapMesh2.visible = !!(wantCount >= 2 && state.sliceOverlay2 && state.sliceLast2); } catch (e) {}
-      // Restrict caps to the actual removed region when dual-plane cutaway is enabled.
-      if (wantCount >= 2) {
-        if (cutawayCapMat1) { cutawayCapMat1.clippingPlanes = cutawayPlane2Front ? [cutawayPlane2Front] : null; cutawayCapMat1.clipIntersection = false; }
-        if (cutawayCapMat2) { cutawayCapMat2.clippingPlanes = cutawayPlane1Front ? [cutawayPlane1Front] : null; cutawayCapMat2.clipIntersection = false; }
-      } else {
-        if (cutawayCapMat1) { cutawayCapMat1.clippingPlanes = null; cutawayCapMat1.clipIntersection = false; }
-        if (cutawayCapMat2) { cutawayCapMat2.clippingPlanes = null; cutawayCapMat2.clipIntersection = false; }
-      }
+      const group = state.meshes && typeof state.meshes.get === 'function' ? state.meshes.get(matId) : null;
+      canonical = group && group.userData && group.userData._tcadVisual ? group.userData._tcadVisual : null;
+    } catch (e) { canonical = null; }
+  }
+  if (!canonical) canonical = _canonicalMaterialVisualForMesh(item);
+  const effective = _cloneMaterialVisual(canonical);
+  // A live browser color choice overlays canonical presentation state but is never written back
+  // into it.  Clearing the live map therefore restores the latest manifest color immediately.
+  try {
+    const localColor = _materialColorOverride01(matId);
+    if (Array.isArray(localColor) && localColor.length >= 3) {
+      effective.color = [
+        _materialVisualClamp(localColor[0], effective.color[0]),
+        _materialVisualClamp(localColor[1], effective.color[1]),
+        _materialVisualClamp(localColor[2], effective.color[2]),
+      ];
+    }
+  } catch (e) {}
+  return effective;
+}
+
+function _materialVisualClamp(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+}
+
+function _materialPhysicalVisualFallback(matId) {
+  const id = parseInt(matId) || 0;
+  try {
+    const mats = Array.isArray(state.materials) ? state.materials : [];
+    for (const material of mats) {
+      if (!material || (parseInt(material.id) || 0) !== id) continue;
+      return {
+        name: String(material.name != null ? material.name : '').trim(),
+        color: (Array.isArray(material._tcadPhysicalColor) && material._tcadPhysicalColor.length >= 3)
+          ? material._tcadPhysicalColor
+          : (Array.isArray(material.color) && material.color.length >= 3)
+            ? material.color
+          : [0.8, 0.8, 0.8],
+      };
+    }
+  } catch (e) {}
+  return { name: '', color: [0.8, 0.8, 0.8] };
+}
+
+function _canonicalMaterialVisualForMesh(mesh) {
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const raw = (item.visual && typeof item.visual === 'object') ? item.visual : {};
+  const fallbackId = parseInt(item.mat_id) || 0;
+  const materialId = parseInt(raw.material_id);
+  const physical = _materialPhysicalVisualFallback(fallbackId);
+  const legacyName = String(item.name != null ? item.name : physical.name).trim();
+  const displayName = String(raw.display_name != null ? raw.display_name : legacyName).trim()
+    || legacyName
+    || physical.name
+    || `Mat ${fallbackId}`;
+  const legacyColor = (Array.isArray(item.color) && item.color.length >= 3) ? item.color : physical.color;
+  const rawColor = (Array.isArray(raw.color) && raw.color.length >= 3) ? raw.color : legacyColor;
+  const color = [
+    _materialVisualClamp(rawColor[0], _materialVisualClamp(legacyColor[0], 0.8)),
+    _materialVisualClamp(rawColor[1], _materialVisualClamp(legacyColor[1], 0.8)),
+    _materialVisualClamp(rawColor[2], _materialVisualClamp(legacyColor[2], 0.8)),
+  ];
+  return {
+    material_id: Number.isFinite(materialId) ? materialId : fallbackId,
+    display_name: displayName,
+    color,
+    opacity: _materialVisualClamp(raw.opacity, 1.0),
+    metallic: _materialVisualClamp(raw.metallic, 0.0),
+    roughness: _materialVisualClamp(raw.roughness, 0.72),
+    visible: (typeof raw.visible === 'boolean') ? raw.visible : true,
+  };
+}
+
+function _cloneMaterialVisual(visual) {
+  const source = (visual && typeof visual === 'object') ? visual : {};
+  const color = (Array.isArray(source.color) && source.color.length >= 3) ? source.color : [0.8, 0.8, 0.8];
+  return {
+    material_id: parseInt(source.material_id) || 0,
+    display_name: String(source.display_name != null ? source.display_name : '').trim(),
+    color: [Number(color[0]), Number(color[1]), Number(color[2])],
+    opacity: Number(source.opacity),
+    metallic: Number(source.metallic),
+    roughness: Number(source.roughness),
+    visible: source.visible !== false,
+  };
+}
+
+function _createMaterialMeshGroup(mesh, geometry) {
+  if (!window.THREE || !geometry) return null;
+  const item = (mesh && typeof mesh === 'object') ? mesh : {};
+  const matId = parseInt(item.mat_id) || 0;
+  const canonical = _canonicalMaterialVisualForMesh(item);
+  const visual = _materialVisualForMesh(item, canonical);
+  const col = new THREE.Color(visual.color[0], visual.color[1], visual.color[2]);
+  try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
+  const group = new THREE.Group();
+  group.userData.mat_id = matId;
+  group.userData.name = visual.display_name;
+  group.userData._tcadVisual = _cloneMaterialVisual(canonical);
+  group.userData._tcadBaseVisible = !!canonical.visible;
+
+  const dispMode = getResolvedMaterialDisplay(matId);
+  const on = !!canonical.visible && dispMode !== 'off';
+  const wantSolid = dispMode === 'solid';
+  group.visible = on;
+
+  const inheritClipping = (material) => {
+    try {
+      const planes = (typeof activeClippingPlanes !== 'undefined' && Array.isArray(activeClippingPlanes))
+        ? activeClippingPlanes
+        : [];
+      _assignAxisClippingMaterial(material, planes);
     } catch (e) {}
+    return material;
+  };
+  const solidTransparent = canonical.opacity < 0.999;
+  const matSolid = inheritClipping(new THREE.MeshStandardMaterial({
+    color: col,
+    opacity: canonical.opacity,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
+    transparent: solidTransparent,
+    side: THREE.FrontSide,
+    flatShading: false,
+    depthWrite: !solidTransparent,
+    depthTest: true,
+  }));
+  const meshSolid = new THREE.Mesh(geometry, matSolid);
+  meshSolid.userData.mat_id = matId;
+  meshSolid.userData.name = visual.display_name;
+  meshSolid.visible = on && wantSolid;
+  group.add(meshSolid);
+
+  // X-ray keeps the canonical PBR response and derives only shell tint/alpha.  The factors are
+  // deliberately stable: back faces use 18% and front faces 38% of canonical opacity.
+  const frontColor = col.clone();
+  const backColor = col.clone().multiplyScalar(0.82);
+  const backOpacity = Number((canonical.opacity * 0.18).toFixed(6));
+  const frontOpacity = Number((canonical.opacity * 0.38).toFixed(6));
+  const matBack = inheritClipping(new THREE.MeshStandardMaterial({
+    color: backColor,
+    opacity: backOpacity,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
+    transparent: true,
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: true,
+  }));
+  const matFront = inheritClipping(new THREE.MeshStandardMaterial({
+    color: frontColor,
+    opacity: frontOpacity,
+    metalness: canonical.metallic,
+    roughness: canonical.roughness,
+    transparent: true,
+    side: THREE.FrontSide,
+    depthWrite: false,
+    depthTest: true,
+  }));
+  const meshBack = new THREE.Mesh(geometry, matBack);
+  const meshFront = new THREE.Mesh(geometry, matFront);
+  meshBack.renderOrder = 0;
+  meshFront.renderOrder = 1;
+  meshBack.visible = on && !wantSolid;
+  meshFront.visible = on && !wantSolid;
+  group.add(meshBack);
+  group.add(meshFront);
+
+  let edges = null;
+  try {
+    const index = geometry && geometry.getIndex ? geometry.getIndex() : null;
+    const faceCount = index && index.count ? Math.floor(index.count / 3) : 0;
+    if (faceCount > 0 && faceCount <= 90000) {
+      const edgeGeometry = new THREE.EdgesGeometry(geometry, 55);
+      const edgeMaterial = inheritClipping(new THREE.LineBasicMaterial({
+        color: frontColor.clone(),
+        transparent: true,
+        opacity: Number((canonical.opacity * 0.08).toFixed(6)),
+        depthWrite: false,
+      }));
+      edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+      edges.renderOrder = 2;
+      edges.visible = on && !wantSolid;
+      group.add(edges);
+    }
+  } catch (e) { edges = null; }
+
+  group.userData._tcadSolidMesh = meshSolid;
+  group.userData._tcadXray = { back: meshBack, front: meshFront, edges };
+  group.userData._tcadXrayOrig = {
+    back: backColor.clone(),
+    front: frontColor.clone(),
+    edge: frontColor.clone(),
+  };
+  return group;
+}
+
+function _materialColorChanged(material, color) {
+  if (!material || !material.color || !color) return false;
+  const before = [Number(material.color.r), Number(material.color.g), Number(material.color.b)];
+  try { material.color.copy(color); } catch (e) { return false; }
+  return Math.abs(before[0] - Number(material.color.r)) > 1e-9
+    || Math.abs(before[1] - Number(material.color.g)) > 1e-9
+    || Math.abs(before[2] - Number(material.color.b)) > 1e-9;
+}
+
+function _syncMeshStandardVisual(material, visual, options = null) {
+  if (!material || !visual) return false;
+  const opts = (options && typeof options === 'object') ? options : {};
+  const transparent = (opts.transparent != null) ? !!opts.transparent : visual.opacity < 0.999;
+  const depthWrite = (opts.depthWrite != null) ? !!opts.depthWrite : !transparent;
+  const opacity = (opts.opacity != null) ? Number(opts.opacity) : Number(visual.opacity);
+  let changed = false;
+  let programChanged = false;
+  const assign = (key, value) => {
+    if (material[key] !== value) {
+      material[key] = value;
+      changed = true;
+    }
+  };
+  if (!!material.transparent !== transparent) programChanged = true;
+  if (!!material.depthWrite !== depthWrite) programChanged = true;
+  assign('opacity', opacity);
+  assign('metalness', Number(visual.metallic));
+  assign('roughness', Number(visual.roughness));
+  assign('transparent', transparent);
+  assign('depthWrite', depthWrite);
+  if (programChanged) {
+    try { material.needsUpdate = true; } catch (e) {}
+  }
+  return changed;
+}
+
+function _materialVisibilitySignature(group) {
+  if (!group || !group.userData) return '';
+  const solid = group.userData._tcadSolidMesh;
+  const xray = group.userData._tcadXray || {};
+  return [group.visible, solid && solid.visible, xray.back && xray.back.visible, xray.front && xray.front.visible, xray.edges && xray.edges.visible]
+    .map((value) => value ? '1' : '0')
+    .join('');
+}
+
+function _syncMaterialVisualManifest(meshes) {
+  const items = Array.isArray(meshes) ? meshes : [];
+  const incomingIds = items.map((item) => parseInt(item && item.mat_id) || 0).filter((id) => id > 0);
+  const currentIds = Array.from((state.meshes || new Map()).keys()).map((id) => parseInt(id) || 0).filter((id) => id > 0);
+  const incomingUnique = Array.from(new Set(incomingIds)).sort((a, b) => a - b);
+  const currentUnique = Array.from(new Set(currentIds)).sort((a, b) => a - b);
+  if (incomingIds.length !== items.length
+      || incomingUnique.length !== items.length
+      || incomingUnique.length !== currentUnique.length
+      || incomingUnique.some((id, index) => id !== currentUnique[index])) {
+    return { ok: false, reason: 'material-set-changed', visualChanged: false, visibilityChanged: false };
   }
 
-  if (requestRender) { try { requestWebglRender(0); } catch (e) {} }
-  return true;
+  let visualChanged = false;
+  let visibilityChanged = false;
+  const wantElements = String(state.previewStyle || '').toLowerCase() === 'elements';
+  for (const item of items) {
+    const matId = parseInt(item.mat_id) || 0;
+    const group = state.meshes.get(matId);
+    if (!group || !group.userData) {
+      return { ok: false, reason: 'material-set-changed', visualChanged, visibilityChanged };
+    }
+    const beforeVisibility = _materialVisibilitySignature(group);
+    const beforeCanonical = group.userData._tcadVisual ? JSON.stringify(group.userData._tcadVisual) : '';
+    const canonical = _canonicalMaterialVisualForMesh(item);
+    const effective = _materialVisualForMesh(item, canonical);
+    group.userData._tcadVisual = _cloneMaterialVisual(canonical);
+    group.userData._tcadBaseVisible = !!canonical.visible;
+    group.userData.name = canonical.display_name;
+    if (beforeCanonical !== JSON.stringify(group.userData._tcadVisual)) visualChanged = true;
+
+    const color = new THREE.Color(effective.color[0], effective.color[1], effective.color[2]);
+    try { if (color && typeof color.convertSRGBToLinear === 'function') color.convertSRGBToLinear(); } catch (e) {}
+    const frontColor = color.clone();
+    const backColor = color.clone().multiplyScalar(0.82);
+    const edgeColor = frontColor.clone();
+    const solid = group.userData._tcadSolidMesh;
+    const xray = group.userData._tcadXray || {};
+    if (solid) {
+      try { solid.userData.name = canonical.display_name; } catch (e) {}
+      if (_materialColorChanged(solid.material, color)) visualChanged = true;
+      if (_syncMeshStandardVisual(solid.material, canonical)) visualChanged = true;
+    }
+    const backOpacity = Number((canonical.opacity * 0.18).toFixed(6));
+    const frontOpacity = Number((canonical.opacity * 0.38).toFixed(6));
+    if (xray.back) {
+      if (!wantElements && _materialColorChanged(xray.back.material, backColor)) visualChanged = true;
+      if (_syncMeshStandardVisual(xray.back.material, canonical, { transparent: true, depthWrite: false, opacity: backOpacity })) visualChanged = true;
+    }
+    if (xray.front) {
+      if (!wantElements && _materialColorChanged(xray.front.material, frontColor)) visualChanged = true;
+      if (_syncMeshStandardVisual(xray.front.material, canonical, { transparent: true, depthWrite: false, opacity: frontOpacity })) visualChanged = true;
+    }
+    if (xray.edges && xray.edges.material) {
+      if (!wantElements && _materialColorChanged(xray.edges.material, edgeColor)) visualChanged = true;
+      const edgeOpacity = Number((canonical.opacity * 0.08).toFixed(6));
+      if (xray.edges.material.opacity !== edgeOpacity) {
+        xray.edges.material.opacity = edgeOpacity;
+        visualChanged = true;
+      }
+      try { xray.edges.material.transparent = true; xray.edges.material.depthWrite = false; } catch (e) {}
+    }
+    group.userData._tcadXrayOrig = {
+      back: backColor.clone(),
+      front: frontColor.clone(),
+      edge: edgeColor.clone(),
+    };
+    _applyMaterialModeToGroup(group, getResolvedMaterialDisplay(matId));
+    if (beforeVisibility !== _materialVisibilitySignature(group)) visibilityChanged = true;
+  }
+  return { ok: true, reason: '', visualChanged, visibilityChanged };
 }
 
 function clearMeshes() {
@@ -94731,14 +98593,23 @@ function fitCameraToObject(object3d) {
       meshCenterOffset = center.clone();
     } catch (e) {}
     object3d.position.sub(center);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    // Default zoom: fit more tightly so the structure appears larger by default.
-    const dist = Math.max(maxDim * 1.35, 0.08);
-    camera.position.set(dist, dist * 0.85, dist);
-    camera.near = Math.max(dist / 2000, 0.0001);
-    camera.far = Math.max(dist * 2000, 10);
-    camera.updateProjectionMatrix();
+    const radius = Math.max(Math.hypot(size.x, size.y, size.z) * 0.5, 0.0005);
+    const aspect = Math.max(1e-6, Number((perspectiveCamera && perspectiveCamera.aspect) || 1));
+    const halfHeight = Math.max(radius * 1.18 / Math.min(1, aspect), 0.001);
+    let dist = Math.max(radius * 3, 0.08);
+    if (camera.isPerspectiveCamera) {
+      const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
+      const fov = Math.max(1, Math.min(179, Number(camera.fov) || 50));
+      dist = halfHeight * zoom / Math.tan((fov * Math.PI / 180) * 0.5);
+    } else if (camera.isOrthographicCamera) {
+      _setOrthographicHalfHeight(halfHeight, aspect);
+    }
+    const direction = new THREE.Vector3(1, 0.85, 1).normalize();
+    camera.position.copy(direction).multiplyScalar(Math.max(dist, 0.01));
+    _setCameraClipRange(camera, dist, radius);
+    try { camera.lookAt(new THREE.Vector3(0, 0, 0)); } catch (e) {}
     if (controls) {
+      controls.object = camera;
       controls.target.set(0, 0, 0);
       controls.update();
     }
@@ -94848,7 +98719,14 @@ function _legendMeshesFromIds(ids) {
     const name = mm ? String(mm.name || '') : (`Mat ${id}`);
     const color = (mm && Array.isArray(mm.color)) ? mm.color : [0.8, 0.8, 0.8];
     if (!name) continue;
-    meshes.push({ mat_id: id, name, color });
+    let visual = null;
+    try {
+      const group = state.meshes && typeof state.meshes.get === 'function' ? state.meshes.get(id) : null;
+      visual = group && group.userData && group.userData._tcadVisual
+        ? group.userData._tcadVisual
+        : null;
+    } catch (e) { visual = null; }
+    meshes.push({ mat_id: id, name, color, ...(visual ? { visual } : {}) });
   }
   return meshes;
 }
@@ -94910,7 +98788,8 @@ function _applyMaterialModeToGroup(group, mode) {
   if (!group) return false;
   const m = (mode === 'solid' || mode === 'fast' || mode === 'off') ? mode : 'solid';
   let changed = false;
-  const on = (m !== 'off');
+  const baseVisible = !(group.userData && group.userData._tcadBaseVisible === false);
+  const on = baseVisible && (m !== 'off');
   if (typeof group.visible === 'boolean' && group.visible !== on) { group.visible = on; changed = true; }
   if (!group.userData) return changed;
   const solidMesh = group.userData._tcadSolidMesh;
@@ -94970,7 +98849,9 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
     if (!group || !group.userData) return;
     const id = parseInt(mid) || 0;
     if (!(id > 0)) return;
-    const rgb = _materialColorOverride01(id) || byId.get(id);
+    const canonical = group.userData._tcadVisual;
+    const canonicalColor = canonical && Array.isArray(canonical.color) ? canonical.color : null;
+    const rgb = _materialColorOverride01(id) || canonicalColor || byId.get(id);
     if (!rgb) return;
     const col = new THREE.Color(rgb[0], rgb[1], rgb[2]);
     try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
@@ -94991,6 +98872,7 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
         if (!wantElements) {
           if (xray.front.material && xray.front.material.color) xray.front.material.color.copy(frontColor);
           if (xray.back.material && xray.back.material.color) xray.back.material.color.copy(backColor);
+          if (xray.edges && xray.edges.material && xray.edges.material.color) xray.edges.material.color.copy(frontColor);
           try { if (xray.front.material && xray.front.material.emissive) xray.front.material.emissive.copy(frontColor).multiplyScalar(0.04); } catch (e) {}
           try { if (xray.back.material && xray.back.material.emissive) xray.back.material.emissive.copy(backColor).multiplyScalar(0.05); } catch (e) {}
         }
@@ -94998,6 +98880,7 @@ function applyMaterialColorOverridesWebGL(onlyMatId = null) {
         if (group.userData._tcadXrayOrig) {
           group.userData._tcadXrayOrig.front = frontColor.clone();
           group.userData._tcadXrayOrig.back = backColor.clone();
+          group.userData._tcadXrayOrig.edge = frontColor.clone();
         }
       }
     } catch (e) {}
@@ -95143,6 +99026,7 @@ function renderLegend(meshes) {
   const legend = $('materials-legend');
   legend.innerHTML = '';
   for (const m of meshes) {
+    const visual = _materialVisualForMesh(m);
     const row = document.createElement('div');
     row.className = 'legend-item';
     const toggle = document.createElement('div');
@@ -95181,9 +99065,7 @@ function renderLegend(meshes) {
     color.tabIndex = 0;
     let hex = '#cccccc';
     try {
-      const ov = _materialColorOverride01(m.mat_id);
-      const src = ov || m.color || [0.8, 0.8, 0.8];
-      hex = _rgb01ToHex(src);
+      hex = _rgb01ToHex(visual.color);
     } catch (e) {}
     try { color.style.background = hex; } catch (e) {}
     color.title = '点击自定义材质颜色（自动保存为本用户默认）';
@@ -95194,7 +99076,7 @@ function renderLegend(meshes) {
       if (k === 'enter' || k === ' ' || k === 'spacebar') { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} open(); }
     });
     const name = document.createElement('div');
-    name.textContent = m.name;
+    name.textContent = visual.display_name;
     row.appendChild(toggle);
     row.appendChild(color);
     row.appendChild(name);
@@ -95532,7 +99414,6 @@ function _webglAnimate(ts) {
   }
 
   try {
-    try { updateCutawayPlanesFromCamera(); } catch (e) {}
     renderer.autoClear = true;
     renderer.render(scene, camera);
     if (overlayActive) {
@@ -95592,10 +99473,19 @@ async function refreshPreview() {
   const meshes = manifest.result.meshes || [];
   const key = `mesh:${meshMode}:rev${rev}:f${faceLimit}`;
   if (state.previewKey === key && meshes.length && state.meshes.size) {
-    try { renderLegend(meshes); } catch (e) {}
-    try { applyPreviewStyle(false); } catch (e) {}
-    showNotification('预览已是最新');
-    return;
+    const synced = _syncMaterialVisualManifest(meshes);
+    if (synced && synced.ok) {
+      try { applyPreviewStyle(false); } catch (e) {}
+      if (synced.visibilityChanged) {
+        try { applyAxisClippingAfterMeshRefresh(false); } catch (e) {}
+      }
+      try { renderLegend(meshes); } catch (e) {}
+      if (synced.visualChanged) {
+        try { requestWebglRender(0); } catch (e) {}
+      }
+      showNotification('预览已是最新');
+      return;
+    }
   }
   try { invalidateSliceCaches('preview updated'); } catch (e) {}
   clearMeshes();
@@ -95615,11 +99505,6 @@ async function refreshPreview() {
       const buf = await resp.arrayBuffer();
       geomRaw = loader.parse(buf);
     }
-    const srcRgb = _materialColorOverride01(m.mat_id) || m.color;
-    const col = new THREE.Color(srcRgb[0], srcRgb[1], srcRgb[2]);
-    // Material colors are authored in sRGB (same as GUI/Matplotlib). Three.js lighting runs in
-    // linear space; convert once so WebGL and host-assisted previews match visually.
-    try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
     // Ensure we have indexed geometry + normals for good shading; server-generated `.geom` already has both.
     let geom = geomRaw;
     const hasIndex = !!(geom && geom.getIndex && geom.getIndex());
@@ -95632,89 +99517,12 @@ async function refreshPreview() {
       geom = geomRaw;
     }
     if (!hasNormal) { try { geom.computeVertexNormals(); } catch (e) {} }
-    try { if (geom !== geomRaw && geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
-    const group = new THREE.Group();
-    group.userData.mat_id = m.mat_id;
-    group.userData.name = m.name;
-    // Build both styles once, then toggle visibility client-side (no host work after load).
-    const dispMode = getResolvedMaterialDisplay(m.mat_id);
-    const on = (dispMode !== 'off');
-    const wantSolid = (dispMode === 'solid');
-    group.visible = on;
-
-    // Use Lambert shading (diffuse) to keep Host Render (G-buffer) and WebGL previews visually consistent
-    // while reducing client GPU cost (no specular BRDF divergence vs CPU compositor).
-    // Share material parameters for memory efficiency
-    const materialParams = {
-      transparent: false,
-      opacity: 1.0,
-      side: THREE.FrontSide,
-      flatShading: false,  // Smooth shading for better visuals
-      depthWrite: true,
-      depthTest: true
-    };
-    const matSolid = new THREE.MeshLambertMaterial({
-      ...materialParams,
-      color: col,
-      emissive: col.clone().multiplyScalar(0.03)
-    });
-    const meshSolid = new THREE.Mesh(geom, matSolid);
-    meshSolid.userData.mat_id = m.mat_id;
-    meshSolid.userData.name = m.name;
-    meshSolid.visible = on && wantSolid;
-    group.add(meshSolid);
-
-    // Two-pass transparent shell: render backfaces first, then frontfaces.
-    // This improves depth perception and makes interior structures easier to observe.
-    const frontColor = col.clone();
-    const backColor = col.clone().multiplyScalar(0.82);
-
-    const matBack = new THREE.MeshLambertMaterial({
-      color: backColor,
-      emissive: backColor.clone().multiplyScalar(0.05),
-      transparent: true,
-      opacity: 0.18,
-      side: THREE.BackSide,
-      depthWrite: false,
-    });
-    const matFront = new THREE.MeshLambertMaterial({
-      color: frontColor,
-      emissive: frontColor.clone().multiplyScalar(0.04),
-      transparent: true,
-      opacity: 0.38,
-      side: THREE.FrontSide,
-      depthWrite: false,
-    });
-
-    const meshBack = new THREE.Mesh(geom, matBack);
-    const meshFront = new THREE.Mesh(geom, matFront);
-    meshBack.renderOrder = 0;
-    meshFront.renderOrder = 1;
-    meshBack.visible = on && !wantSolid;
-    meshFront.visible = on && !wantSolid;
-    group.add(meshBack);
-    group.add(meshFront);
-
-    let edges = null;
-    try {
-      const idx = geom && geom.getIndex ? geom.getIndex() : null;
-      const faceCount = idx && idx.count ? Math.floor(idx.count / 3) : 0;
-      if (faceCount > 0 && faceCount <= 90000) {
-        const egeom = new THREE.EdgesGeometry(geom, 55);
-        const lmat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 });
-        try { lmat.depthWrite = false; } catch (e) {}
-        edges = new THREE.LineSegments(egeom, lmat);
-        edges.renderOrder = 2;
-        edges.visible = on && !wantSolid;
-        group.add(edges);
-      }
-    } catch (e) { edges = null; }
-
-    try {
-      group.userData._tcadSolidMesh = meshSolid;
-      group.userData._tcadXray = { back: meshBack, front: meshFront, edges: edges };
-    } catch (e) {}
-
+    try { if (geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
+    const group = _createMaterialMeshGroup(m, geom);
+    if (!group) {
+      try { geom.dispose(); } catch (e) {}
+      continue;
+    }
     meshGroup.add(group);
     state.meshes.set(m.mat_id, group);
   }
@@ -95773,6 +99581,7 @@ let _sliceReqAbort = null;
 function invalidateSliceCaches(reason = '') {
   // Invalidate cached 2D slices and 3D cutaway cap textures. This prevents stale textures after
   // model/preview updates and keeps "刷新切片" reliable.
+  try { _cancelAxisClippingCapRequest(true); } catch (e) {}
   try { _sliceReqSeq += 1; } catch (e) {}
   try { if (_sliceReqAbort) _sliceReqAbort.abort(); } catch (e) {}
   _sliceReqAbort = null;
@@ -95881,18 +99690,18 @@ function applySliceOverlayUI(triggerRefresh = false) {
           const secBox = $('slice-secondary-3d');
           if (secBox && secBox.classList) secBox.classList.toggle('slot-hidden', !on2);
               const cutWrap = $('slice-cutaway-toggle-wrap');
-              if (cutWrap && cutWrap.classList) cutWrap.classList.toggle('slot-hidden', !active);
               const cutCb = $('slice-cutaway-toggle');
               const canCut = (state.viewerBackend === 'webgl');
               if (cutWrap) {
                 cutWrap.title = canCut
-              ? '切开结构：按切片平面切除面向相机的一侧（双切片时切除两平面夹角内的前侧小块）'
-              : 'Host Render 暂不支持“切开”。请切换为 WebGL 预览后使用。';
+              ? '兼容开关：沿当前切片轴启用或关闭三维裁剪'
+              : `Host Render 暂不支持三维裁剪：${_normalizeViewerFallbackReason(state.viewerFallbackReason)}`;
           }
           if (cutCb) {
-            cutCb.checked = !!state.sliceCutaway;
+            cutCb.checked = canCut && _activeAxisClippingAxes().length > 0;
             try { cutCb.disabled = !canCut; } catch (e) {}
           }
+          try { syncAxisClippingControlsUI(); } catch (e) {}
 
       const canvas = $('slice-canvas');
       if (canvas) {
@@ -95939,8 +99748,9 @@ function applySliceOverlayUI(triggerRefresh = false) {
       } catch (e) {}
       try {
         const hint = $('viewer-hint');
-        if (hint) hint.style.display = active ? 'none' : '';
+        if (hint) hint.style.display = (active && state.viewerBackend === 'webgl') ? 'none' : '';
       } catch (e) {}
+      try { _updateViewerBackendUI(); } catch (e) {}
       try { applySliceViewOffset3d(); } catch (e) {}
 
       if (triggerRefresh && active) {
@@ -95995,8 +99805,7 @@ function setViewerMode(mode, refreshNow = true) {
         const rect = c3d.getBoundingClientRect();
             if (!rect || rect.width <= 0 || rect.height <= 0) return;
             renderer.setSize(rect.width, rect.height, false);
-            camera.aspect = rect.width / rect.height;
-            camera.updateProjectionMatrix();
+            _resizeViewerCameras(rect.width, rect.height);
             try { applySliceViewOffset3d(); } catch (e) {}
           } catch (e) {}
         });
@@ -96090,25 +99899,22 @@ function applySliceViewOffset3d() {
   const h = Math.max(2, Math.round(rect.height || 0));
   const enabled = (state.viewerMode === '3d' && !!state.sliceOverlay);
   if (!enabled) {
+    _resizeViewerCameras(w, h);
     try { if (camera.clearViewOffset) camera.clearViewOffset(); } catch (e) {}
-    try { camera.aspect = w / h; } catch (e) {}
-    try { camera.updateProjectionMatrix(); } catch (e) {}
     return;
   }
   const reserve = sliceInsetReservedCssPx();
   if (!(reserve > 1)) {
+    _resizeViewerCameras(w, h);
     try { if (camera.clearViewOffset) camera.clearViewOffset(); } catch (e) {}
-    try { camera.aspect = w / h; } catch (e) {}
-    try { camera.updateProjectionMatrix(); } catch (e) {}
     return;
   }
       const fullW = Math.max(w + 2, Math.round(w + reserve));
       const fullH = h;
-      try { camera.aspect = fullW / fullH; } catch (e) {}
+      _resizeViewerCameras(fullW, fullH);
       // Render the right tile of a wider frustum so the scene shifts LEFT (making room for the right-side slice inset).
       const offX = Math.max(0, Math.round(fullW - w));
       try { if (camera.setViewOffset) camera.setViewOffset(fullW, fullH, offX, 0, w, h); } catch (e) {}
-      try { camera.updateProjectionMatrix(); } catch (e) {}
     }
 
     function syncSliceControls(triggerRefresh = false, source = null) {
@@ -96938,6 +100744,15 @@ async function undo() {
   await refreshAll(true);
 }
 
+async function redo() {
+  showNotification('重做中...');
+  const res = await apiPost('/api/redo', {});
+  if (res && res.ok && res.result && res.result.redone === false) {
+    showNotification('没有可重做的操作');
+  }
+  await refreshAll(true);
+}
+
 async function saveParams() {
   const step = state.recipe[state.selectedIndex];
   if (!step) return;
@@ -96945,6 +100760,23 @@ async function saveParams() {
   showNotification('保存参数中...');
   await applyParamsNow();
   await refreshAll(false);
+}
+
+async function handleStructuredRunFailure(response) {
+  const failure = (response && typeof response === 'object') ? response : { error: 'unknown' };
+  const stepIndex = Number.isInteger(failure.step_index) ? failure.step_index : -1;
+  // Pull authoritative runtime statuses and the server-persisted structured error first.
+  // This keeps the card badge and parameter detail visible immediately and after reload.
+  try { await refreshAll(false); } catch (e) {}
+  if (stepIndex >= 0 && stepIndex < (state.recipe || []).length) {
+    state.stepErrors = state.stepErrors || {};
+    state.stepErrors[stepIndex] = failure;
+    try { state.recipe[stepIndex].runtime_status = 'error'; } catch (e) {}
+    state.selectedIndex = stepIndex;
+    renderRecipe();
+    renderParams();
+  }
+  showNotification('运行失败：' + (failure.error || 'unknown'), 6500, 'error');
 }
 
 async function runSelected() {
@@ -96971,7 +100803,10 @@ async function runSelected() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   await refreshAll(true);
   try {
@@ -97008,7 +100843,10 @@ async function runToSelected() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   if (res.result && res.result.model) { state.model = res.result.model; setHeaderStats(state.model); }
   await refreshAll(true);
@@ -97040,7 +100878,10 @@ async function runAll() {
     stopLiveLogPolling();
     try { _runUiStop(); } catch (e) {}
   }
-  if (!res.ok) { showNotification('运行失败：' + (res.error || 'unknown'), 6500, 'error'); return; }
+  if (!res.ok) {
+    await handleStructuredRunFailure(res);
+    return;
+  }
   if (res.result && res.result.log) setLog(res.result.log);
   if (res.result && res.result.model) { state.model = res.result.model; setHeaderStats(state.model); }
   await refreshAll(true);
@@ -97189,6 +101030,164 @@ async function moveStep(direction) {
   }
 }
 
+let _timelineData = null;
+
+async function refreshTimeline() {
+  const posEl = $('timeline-position');
+  const rangeEl = $('timeline-range');
+  const labelEl = $('timeline-label');
+  const prevBtn = $('timeline-prev');
+  const nextBtn = $('timeline-next');
+  if (!posEl || !rangeEl || !labelEl) return;
+  let data = null;
+  try {
+    const resp = await apiPost('/api/timeline/get', {});
+    if (resp.ok && resp.result) data = resp.result;
+  } catch (e) { data = null; }
+  _timelineData = data;
+  const items = (data && Array.isArray(data.items)) ? data.items : [];
+  const current = (data && Number.isInteger(data.current)) ? data.current : -1;
+  const total = items.length;
+  const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+  const validBelow = valid.filter(i => i < current);
+  const validAbove = valid.filter(i => i > current);
+  const name = (i) => {
+    const st = (state.recipe || [])[i];
+    return st ? String(st.instance_name || st.name || '') : '';
+  };
+  if (current >= 0 && total > 0) {
+    posEl.textContent = `Step ${current + 1} / ${total}`;
+    labelEl.textContent = `快照 ${current + 1}/${total} · ${name(current)}`;
+  } else {
+    posEl.textContent = `Step - / ${total || '-'}`;
+    labelEl.textContent = total ? '无有效快照（先运行步骤）' : '空配方';
+  }
+  rangeEl.min = 0;
+  rangeEl.max = Math.max(0, total - 1);
+  rangeEl.value = (current >= 0 && current < total) ? current : 0;
+  rangeEl.disabled = !valid.length;
+  if (prevBtn) prevBtn.disabled = !validBelow.length;
+  if (nextBtn) nextBtn.disabled = !validAbove.length;
+}
+
+async function restoreTimelineStep(index) {
+  if (!Number.isInteger(index) || index < 0) return;
+  showNotification(`回看步骤 ${index + 1} 快照...`);
+  const resp = await apiPost('/api/timeline/restore', { index });
+  if (!resp.ok) {
+    showNotification('回看失败：' + (resp.error || 'unknown'), 4200, 'error');
+    await refreshTimeline();
+    return;
+  }
+  const result = resp.result || {};
+  if (result.recipe) state.recipe = result.recipe;
+  if (result.model) { state.model = result.model; try { setHeaderStats(state.model); } catch (e) {} }
+  if (result.log) setLog(result.log);
+  state.selectedIndex = Math.max(0, Math.min(index, (state.recipe || []).length - 1));
+  renderRecipe();
+  renderParams();
+  try { await refreshPreview(); } catch (e) {}
+  const tl = result.timeline;
+  if (tl && Array.isArray(tl.items)) {
+    _timelineData = tl;
+    const total = tl.items.length;
+    $('timeline-position').textContent = `Step ${index + 1} / ${total}`;
+    const st = (state.recipe || [])[index];
+    $('timeline-label').textContent = `快照 ${index + 1}/${total} · ${st ? String(st.instance_name || st.name || '') : ''}`;
+    const rangeEl = $('timeline-range');
+    if (rangeEl) { rangeEl.value = index; rangeEl.disabled = !tl.items.some(it => it && it.snapshot_valid); }
+  }
+  try {
+    const prevBtn = $('timeline-prev');
+    const nextBtn = $('timeline-next');
+    const items = (tl && tl.items) || [];
+    const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+    if (prevBtn) prevBtn.disabled = !valid.some(i => i < index);
+    if (nextBtn) nextBtn.disabled = !valid.some(i => i > index);
+  } catch (e) {}
+}
+
+function _timelineNearestValid(direction) {
+  const items = (_timelineData && Array.isArray(_timelineData.items)) ? _timelineData.items : [];
+  const current = (_timelineData && Number.isInteger(_timelineData.current)) ? _timelineData.current : -1;
+  const valid = items.filter(it => it && it.snapshot_valid).map(it => it.index);
+  if (!valid.length) return -1;
+  if (direction < 0) {
+    const below = valid.filter(i => i < current);
+    return below.length ? Math.max(...below) : -1;
+  }
+  const above = valid.filter(i => i > current);
+  return above.length ? Math.min(...above) : -1;
+}
+
+async function moveRecipeStep(from, to) {
+  const lastIdx = Math.max(0, (state.recipe || []).length - 1);
+  const f = clampInt(from, 0, lastIdx);
+  const t = clampInt(to, 0, lastIdx);
+  if (f === t) return;
+  const res = await apiPost('/api/recipe/move', { index: f, to: t });
+  if (!res.ok) {
+    showNotification('移动失败：' + (res.error || 'unknown'));
+    await refreshAll(false);
+    return;
+  }
+  if (Array.isArray(res.result)) {
+    state.recipe = res.result;
+    try { _sliceOverridesMoveBoth(f, t); } catch (e) {}
+    state.selectedIndex = Math.max(0, Math.min(t, state.recipe.length - 1));
+    renderRecipe();
+    renderParams();
+    try { syncSliceControls(false); } catch (e) {}
+    try { scheduleUiStatePersist(0); } catch (e) {}
+    try { applyEffectiveSliceForSelectedStep(true); } catch (e) {}
+  } else {
+    await refreshAll(false);
+  }
+}
+
+function renameStep(index) {
+  const list = $('step-list');
+  if (!list) return;
+  const step = (state.recipe || [])[index];
+  if (!step) return;
+  const item = list.querySelectorAll('.step-item')[index];
+  const nameEl = item ? item.querySelector('.name') : null;
+  if (!nameEl) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'step-rename-input';
+  input.maxLength = 80;
+  input.value = String(step.instance_name || step.name || '');
+  nameEl.replaceWith(input);
+  input.focus();
+  try { input.select(); } catch (e) {}
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const next = String(input.value || '').trim();
+    const prev = String(step.instance_name || step.name || '');
+    if (!next || next === prev) { renderRecipe(); return; }
+    const res = await apiPost('/api/recipe/rename-step', { index, instance_name: next });
+    if (!res.ok) {
+      showNotification('重命名失败：' + (res.error || 'unknown'));
+      renderRecipe();
+      return;
+    }
+    step.instance_name = String((res.result && res.result.instance_name) || next);
+    renderRecipe();
+    renderParams();
+  };
+  const cancel = () => { if (!done) { done = true; renderRecipe(); } };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', () => commit());
+  input.addEventListener('click', (ev) => ev.stopPropagation());
+  input.addEventListener('dblclick', (ev) => ev.stopPropagation());
+}
+
 async function newRecipe() {
   const name = prompt('新建 Recipe 名称：', '') || '';
   const clean = String(name).trim();
@@ -97234,28 +101233,32 @@ async function importRecipeFromFile(file) {
   }
 }
 
+function renderDemoRecipes() {
+  const select = $('demo-recipe-select');
+  if (!select) return;
+  const selected = String(select.value || '');
+  select.textContent = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '-- Select --';
+  select.appendChild(placeholder);
+  const demos = (state.demoRecipes && typeof state.demoRecipes === 'object') ? state.demoRecipes : {};
+  for (const [key, recipe] of Object.entries(demos)) {
+    const option = document.createElement('option');
+    option.value = String(key);
+    const description = (recipe && typeof recipe === 'object') ? String(recipe.description || '').trim() : '';
+    option.textContent = description ? `${key} — ${description}` : String(key);
+    select.appendChild(option);
+  }
+  if (Object.prototype.hasOwnProperty.call(demos, selected)) select.value = selected;
+}
+
 function _buildDemoRecipe(key) {
   const k = String(key || '').trim();
-  if (!k) return null;
-  const domain = { grid_shape: [192, 192, 240], voxel_size_nm: 5.0, threads: 4 };
-  const base = [
-    { name: 'Initialize Wafer', enabled: true, params: { wafer_type: 'Bulk', material: 'Silicon', thickness_nm: 700.0, orientation: '100', initial_temperature: 25.0 } },
-    { name: 'Spin Resist', enabled: true, params: { material: 'Photoresist', thickness_nm: 220.0, resist_type: 'positive', softbake_temp: 110.0, softbake_time: 60.0 } },
-    { name: 'Mask Exposure', enabled: true, params: { mask_mode: 'Procedural', pattern: 'Vias', critical_dimension: 120.0, pitch: 260.0, orientation: 0.0, wavelength: 193.0, na: 0.70, sigma: 0.30, focus: 0.0, dose: 32.0 } },
-    { name: 'Post-Exposure Bake', enabled: true, params: { temperature: 110.0, time: 60.0 } },
-    { name: 'Resist Develop', enabled: true, params: { time: 60.0, rate: 250.0, contrast: 2.5, threshold: 20.0 } },
-    // Deep trench/hole etch: use override_rate for a clear geometry difference within reasonable runtime.
-    { name: 'Etch', enabled: true, params: { material: 'Silicon', chemistry: 'Dry', rate_model: 'Advanced', time: 90.0, bias: 0.0, rate_override: 2500.0, selectivity: 6.0, sidewall: 88.0 } },
-  ];
-  const lpcvd = { name: 'Deposition', enabled: true, params: { variant_id: 'lpcvd', material: 'Silicon Dioxide', thickness: 160.0, method: 'CVD', coverage: 'Full wafer', temperature: 700.0, directionality: 0.30, gap_fill_bias: 0.0 } };
-  const ald = { name: 'Deposition', enabled: true, params: { variant_id: 'ald', material: 'Silicon Dioxide', thickness: 160.0, method: 'ALD', coverage: 'Full wafer', temperature: 250.0, directionality: 0.0, gap_fill_bias: 0.0 } };
-  if (k === 'demo_trench_lpcvd') {
-    return { name: 'Demo_Trench_Deposition_LPCVD', domain, steps: base.concat([lpcvd]) };
-  }
-  if (k === 'demo_trench_ald') {
-    return { name: 'Demo_Trench_Deposition_ALD', domain, steps: base.concat([ald]) };
-  }
-  return null;
+  const demos = (state.demoRecipes && typeof state.demoRecipes === 'object') ? state.demoRecipes : {};
+  const recipe = k ? demos[k] : null;
+  if (!recipe || typeof recipe !== 'object') return null;
+  try { return JSON.parse(JSON.stringify(recipe)); } catch (e) { return null; }
 }
 
 async function loadDemoRecipeFromSelect() {
@@ -97821,55 +101824,17 @@ async function loadPreviewFromManifest(manifest) {
       const buf = await fetch(url, apiFetchInit({})).then(r => r.arrayBuffer());
       geomRaw = loader.parse(buf);
     }
-    const srcRgb = _materialColorOverride01(m.mat_id) || m.color;
-    const col = new THREE.Color(srcRgb[0], srcRgb[1], srcRgb[2]);
-    try { if (col && typeof col.convertSRGBToLinear === 'function') col.convertSRGBToLinear(); } catch (e) {}
     let geom = geomRaw;
     const hasIndex = !!(geom && geom.getIndex && geom.getIndex());
     const hasNormal = !!(geom && geom.getAttribute && geom.getAttribute('normal'));
     if (!hasIndex) geom = weldGeometryPositions(geomRaw, previewWeldToleranceUm());
     if (!hasNormal) { try { geom.computeVertexNormals(); } catch (e) {} }
     try { if (geom !== geomRaw) geomRaw.dispose(); } catch (e) {}
-    const group = new THREE.Group();
-    group.userData.mat_id = m.mat_id;
-    group.userData.name = m.name;
-    const dispMode = getResolvedMaterialDisplay(m.mat_id);
-    const on = (dispMode !== 'off');
-    const wantSolid = (dispMode === 'solid');
-    group.visible = on;
-
-    const matSolid = new THREE.MeshLambertMaterial({ color: col, emissive: col.clone().multiplyScalar(0.03), transparent: false, opacity: 1.0, side: THREE.FrontSide });
-    const meshSolid = new THREE.Mesh(geom, matSolid);
-    meshSolid.visible = on && wantSolid;
-    group.add(meshSolid);
-
-    const frontColor = col.clone();
-    const backColor = col.clone().multiplyScalar(0.82);
-    const matBack = new THREE.MeshLambertMaterial({ color: backColor, emissive: backColor.clone().multiplyScalar(0.05), transparent: true, opacity: 0.18, side: THREE.BackSide, depthWrite: false });
-    const matFront = new THREE.MeshLambertMaterial({ color: frontColor, emissive: frontColor.clone().multiplyScalar(0.04), transparent: true, opacity: 0.38, side: THREE.FrontSide, depthWrite: false });
-    const meshBack = new THREE.Mesh(geom, matBack);
-    const meshFront = new THREE.Mesh(geom, matFront);
-    meshBack.renderOrder = 0;
-    meshFront.renderOrder = 1;
-    meshBack.visible = on && !wantSolid;
-    meshFront.visible = on && !wantSolid;
-    group.add(meshBack);
-    group.add(meshFront);
-    let edges = null;
-    try {
-      const idx = geom && geom.getIndex ? geom.getIndex() : null;
-      const faceCount = idx && idx.count ? Math.floor(idx.count / 3) : 0;
-      if (faceCount > 0 && faceCount <= 90000) {
-        const egeom = new THREE.EdgesGeometry(geom, 55);
-        const lmat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 });
-        try { lmat.depthWrite = false; } catch (e) {}
-        edges = new THREE.LineSegments(egeom, lmat);
-        edges.renderOrder = 2;
-        edges.visible = on && !wantSolid;
-        group.add(edges);
-      }
-    } catch (e) { edges = null; }
-    try { group.userData._tcadSolidMesh = meshSolid; group.userData._tcadXray = { back: meshBack, front: meshFront, edges: edges }; } catch (e) {}
+    const group = _createMaterialMeshGroup(m, geom);
+    if (!group) {
+      try { geom.dispose(); } catch (e) {}
+      continue;
+    }
     meshGroup.add(group);
     state.meshes.set(m.mat_id, group);
   }
@@ -98849,11 +102814,44 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
           $('reset-btn').addEventListener('click', resetModel);
           $('undo-btn').addEventListener('click', undo);
+          const redoBtnEl = $('redo-btn');
+          if (redoBtnEl) redoBtnEl.addEventListener('click', redo);
           const saveParamsBtn = $('save-params-btn');
           if (saveParamsBtn) saveParamsBtn.addEventListener('click', saveParams);
   $('run-step-btn').addEventListener('click', runSelected);
   $('run-to-btn').addEventListener('click', runToSelected);
   $('run-all-btn').addEventListener('click', runAll);
+  // Process timeline: Previous/Next jump between valid snapshots; the range
+  // updates only its label while dragging and restores on change.
+  const tlPrev = $('timeline-prev');
+  if (tlPrev) tlPrev.addEventListener('click', async () => {
+    const idx = _timelineNearestValid(-1);
+    if (idx >= 0) await restoreTimelineStep(idx);
+  });
+  const tlNext = $('timeline-next');
+  if (tlNext) tlNext.addEventListener('click', async () => {
+    const idx = _timelineNearestValid(1);
+    if (idx >= 0) await restoreTimelineStep(idx);
+  });
+  const tlRange = $('timeline-range');
+  if (tlRange) {
+    tlRange.addEventListener('input', () => {
+      try {
+        const v = parseInt(tlRange.value, 10);
+        const st = (state.recipe || [])[v];
+        $('timeline-label').textContent = `步骤 ${v + 1} · ${st ? String(st.instance_name || st.name || '') : ''}`;
+      } catch (e) {}
+    });
+    tlRange.addEventListener('change', async () => {
+      try {
+        const v = parseInt(tlRange.value, 10);
+        const items = (_timelineData && Array.isArray(_timelineData.items)) ? _timelineData.items : [];
+        const item = items[v];
+        if (item && item.snapshot_valid) await restoreTimelineStep(v);
+        else showNotification('该步骤没有有效快照，不能回看');
+      } catch (e) {}
+    });
+  }
   $('add-step-select').addEventListener('change', addStepFromSelect);
   const demoLoadBtn = $('demo-recipe-load-btn');
   if (demoLoadBtn) demoLoadBtn.addEventListener('click', loadDemoRecipeFromSelect);
@@ -99042,6 +103040,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (pSolid) pSolid.addEventListener('change', () => { if (pSolid.checked) updatePreviewStyleFromUI(true); });
   if (pFast) pFast.addEventListener('change', () => { if (pFast.checked) updatePreviewStyleFromUI(true); });
   if (pElem) pElem.addEventListener('change', () => { if (pElem.checked) updatePreviewStyleFromUI(true); });
+  bindViewerCameraControls();
+  bindAxisClippingControls();
   $('refresh-preview-btn').addEventListener('click', restoreDefaultView);
   const rulerBtn = $('toggle-ruler3d-btn');
   if (rulerBtn) rulerBtn.addEventListener('click', () => {
@@ -99165,17 +103165,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.sliceOverlay = !!sliceToggle.checked;
     scheduleUiStatePersist(0);
     try { applySliceOverlayUI(true); } catch (e) {}
-    try { applyCutawayNow(true); } catch (e) {}
-  });
-  const cutToggle = $('slice-cutaway-toggle');
-  if (cutToggle) cutToggle.addEventListener('change', async () => {
-    state.sliceCutaway = !!cutToggle.checked;
-    scheduleUiStatePersist(0);
-    // Cutaway changes how we want to visualize the slice plane (mask fill to void regions).
-    try { updateSlicePlane3d(); } catch (e) {}
-    if (state.viewerMode === '3d' && state.sliceOverlay && state.sliceCutaway && !state.sliceLast) {
-      try { await refreshSlice(true, 'auto'); } catch (e) {}
-    }
     try { applyCutawayNow(true); } catch (e) {}
   });
   const axis3d = $('slice-axis-3d');
@@ -100451,8 +104440,63 @@ def _run_saqp_selftest() -> int:
     return 0
 
 
+def _recipe_io_current_export_steps(current_reports: Any, flow_tag: str) -> List[Dict[str, Any]]:
+    """Return the current-build A_current step blobs for a Recipe IO selftest flow."""
+    try:
+        report = current_reports[flow_tag]
+        current_export = report["exports"]["A_current"]
+        steps = current_export.get("steps_full") or current_export.get("steps") or []
+    except Exception as exc:
+        raise RuntimeError(f"missing current Recipe IO report for {flow_tag}: {exc}") from exc
+    if not isinstance(steps, list):
+        raise RuntimeError(f"invalid current Recipe IO steps for {flow_tag}")
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def _assert_recipe_io_develop_migration(current_reports: Any) -> None:
+    """Ensure the synthetic v1 develop time was migrated from 500 s to about 50 s."""
+    try:
+        develop_step = next(
+            step
+            for step in _recipe_io_current_export_steps(current_reports, "synthetic")
+            if str(step.get("name") or "") == "Resist Develop"
+        )
+        params_raw = develop_step.get("params_raw")
+        params = params_raw if isinstance(params_raw, dict) else develop_step.get("params")
+        if not isinstance(params, dict):
+            raise ValueError("missing Resist Develop params")
+        migrated_time = float(params["time"])
+        if not math.isfinite(migrated_time) or abs(migrated_time - 50.0) > 1e-6:
+            raise ValueError(f"expected about 50 s after importing v1 value 500 s, got {migrated_time}")
+    except Exception as exc:
+        raise RuntimeError(f"Develop-time migration check failed: {exc}") from exc
+
+
+def _assert_recipe_io_minimal_fixture_roundtrip(current_reports: Any) -> None:
+    """Ensure the repository's minimal legacy fixture retained its process semantics."""
+    try:
+        steps = _recipe_io_current_export_steps(current_reports, "saqp")
+        by_name = {str(step.get("name") or ""): step for step in steps}
+        wafer_params = by_name["Initialize Wafer"].get("params")
+        deposition_params = by_name["Deposition"].get("params")
+        if not isinstance(wafer_params, dict) or not isinstance(deposition_params, dict):
+            raise ValueError("missing exported step params")
+        if str(wafer_params.get("material") or "") != "Silicon":
+            raise ValueError("Initialize Wafer material changed")
+        if float(wafer_params.get("thickness_nm")) != 200.0:
+            raise ValueError("Initialize Wafer thickness changed")
+        if str(deposition_params.get("material") or "") != "Silicon Dioxide":
+            raise ValueError("Deposition material changed")
+        if float(deposition_params.get("thickness")) != 20.0:
+            raise ValueError("Deposition thickness changed")
+        if str(deposition_params.get("method") or "") != "ALD":
+            raise ValueError("Deposition method changed")
+    except Exception as exc:
+        raise RuntimeError(f"Recipe IO minimal fixture roundtrip check failed: {exc}") from exc
+
+
 def _run_recipe_io_selftest() -> int:
-    """Headless regression selftest for recipe IO parity vs tcad_simulator_2.19.py.
+    """Headless regression selftest for recipe IO and optional reference parity.
 
     Covers:
     - File import/export: recipe_import + recipe_export roundtrip across sessions.
@@ -100469,8 +104513,16 @@ def _run_recipe_io_selftest() -> int:
 
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--recipe-io-selftest", action="store_true", help="Run recipe IO regression selftest and exit.")
-    parser.add_argument("--flow", default="SAQP_Thinking_Flow.json", help="Primary flow JSON to test (default: SAQP_Thinking_Flow.json).")
-    parser.add_argument("--ref", default="tcad_simulator_2.19.py", help="Reference simulator python file to compare against.")
+    parser.add_argument(
+        "--flow",
+        default=None,
+        help="Primary flow JSON to test (default: repository legacy_recipe_minimal.json fixture).",
+    )
+    parser.add_argument(
+        "--ref",
+        default=None,
+        help="Optional reference simulator python file to compare against.",
+    )
     args, _rest = parser.parse_known_args()
     if not bool(getattr(args, "recipe_io_selftest", False)):
         return 2
@@ -100838,8 +104890,15 @@ def _run_recipe_io_selftest() -> int:
         return rep
 
     # Prepare inputs.
-    flow_path = _resolve_path(str(getattr(args, "flow", "") or "SAQP_Thinking_Flow.json"))
-    ref_path = _resolve_path(str(getattr(args, "ref", "") or "tcad_simulator_2.19.py"))
+    flow_arg = str(getattr(args, "flow", "") or "").strip()
+    if flow_arg:
+        flow_path = _resolve_path(flow_arg)
+    else:
+        flow_path = str(
+            (Path(__file__).resolve().parent / "tests" / "fixtures" / "legacy_recipe_minimal.json").resolve()
+        )
+    ref_arg = str(getattr(args, "ref", "") or "").strip()
+    ref_path = _resolve_path(ref_arg) if ref_arg else ""
     flow_blob = _read_json(Path(flow_path))
     # Make the input flow self-contained: legacy SAQP exports may reference mask_file paths that
     # no longer exist on the local machine (e.g., old TCAD_Web_Data uploads). For recipe-IO parity
@@ -101006,6 +105065,14 @@ def _run_recipe_io_selftest() -> int:
     cur_reports["saqp"] = _run_ops_for_flow(flow_blob, storage_root=storage_cur, tag="saqp")
     cur_reports["synthetic"] = _run_ops_for_flow(synth_blob, storage_root=storage_cur, tag="synthetic")
     (out_root / "current_reports.json").write_text(json.dumps(cur_reports, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _assert_recipe_io_develop_migration(cur_reports)
+    if not flow_arg:
+        _assert_recipe_io_minimal_fixture_roundtrip(cur_reports)
+
+    if not ref_path:
+        print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference comparison skipped)")
+        return 0
 
     # Run reference build probes in a subprocess (avoid multiprocessing spawn issues with dynamic module import).
     ref_out_path = (out_root / "ref_reports.json").resolve()
@@ -101353,21 +105420,7 @@ if __name__ == '__main__':
     _cmp(cur_norm_saqp, ref_norm_saqp, ctx="saqp:A_current")
     _cmp(cur_norm_syn, ref_norm_syn, ctx="synthetic:A_current")
 
-    # Develop-time conversion sanity (separate check): synthetic should migrate in current build.
-    try:
-        cur_steps = (cur_reports.get("synthetic", {}).get("exports", {}).get("A_current") or {}).get("steps_full") or []
-        t_cur = None
-        for sb in cur_steps:
-            if isinstance(sb, dict) and str(sb.get("name") or "") == "Resist Develop":
-                p = sb.get("params_raw") if isinstance(sb.get("params_raw"), dict) else sb.get("params", {})
-                if isinstance(p, dict):
-                    t_cur = p.get("time")
-                    break
-        if t_cur is None or float(t_cur) > 200.0:
-            raise RuntimeError("Develop time migration did not apply (expected ~50s after import).")
-    except Exception as exc:
-        raise RuntimeError(f"Develop-time migration check failed: {exc}")
-
+    print(f"Recipe IO selftest PASS (fixture={Path(flow_path).name}; reference={Path(ref_path).name})")
     return 0
 
 
