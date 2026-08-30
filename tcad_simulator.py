@@ -32403,6 +32403,10 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
     trench_mask[12:20, :] = 1
     core_clear_mask = np.ones((mask_size, mask_size), dtype=np.uint8)
     core_clear_mask[12:20, :] = 0
+    contact_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    for x0 in (7, 21):
+        for y0 in (7, 21):
+            contact_mask[x0 : x0 + 4, y0 : y0 + 4] = 1
 
     basic_steps = [
         _step("Initialize Wafer", "300 nm silicon wafer", {"thickness_nm": 300.0}),
@@ -32572,6 +32576,84 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
         ),
     ]
 
+    w_plug_steps = [
+        _step("Initialize Wafer", "300 nm contact silicon", {"thickness_nm": 300.0}),
+        _step(
+            "Deposition",
+            "Deposit contact dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "thickness": 100.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+                "directionality": 1.0,
+            },
+        ),
+        _step("Spin Resist", "Contact photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose four contacts",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Four contacts",
+                "dose": 80.0,
+            },
+            custom_mask=contact_mask.tolist(),
+            mask_name="Four contacts",
+        ),
+        _step(
+            "Resist Develop",
+            "Open contact resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Etch contact dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 1200.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip contact resist", {"materials": "Photoresist"}),
+        _step(
+            "Fill",
+            "Fill tungsten contacts",
+            {
+                "material": "Tungsten",
+                "max_depth_nm": 100.0,
+                "direction": "top",
+                "include_sealed": False,
+            },
+        ),
+        _step(
+            "Deposition",
+            "Deposit tungsten overburden",
+            {
+                "material": "Tungsten",
+                "thickness": 30.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+            },
+        ),
+        _step(
+            "CMP",
+            "Polish tungsten to oxide stop",
+            {
+                "target": 400.0,
+                "pressure": 4.0,
+                "time": 60.0,
+                "preston": 0.5,
+                "selectivity_mode": "Manual",
+                "selectivity_pairs": [{"material": "Tungsten", "ratio": 1.0}],
+            },
+        ),
+    ]
+
     domain = {"grid_shape": [64, 64, 96], "voxel_size_nm": 10.0, "threads": 1}
     return {
         "Basic Trench": {
@@ -32591,6 +32673,12 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
             "description": "Flip a device wafer, oxide-bond a silicon handle, and thin only the device wafer.",
             "domain": copy.deepcopy(domain),
             "steps": bonding_steps,
+        },
+        "W Plug + CMP": {
+            "name": "W Plug + CMP",
+            "description": "Open contact holes, fill tungsten plugs, and polish the overburden to an oxide stop.",
+            "domain": copy.deepcopy(domain),
+            "steps": w_plug_steps,
         },
     }
 

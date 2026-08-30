@@ -9,7 +9,12 @@ import numpy as np
 import tcad_simulator as tcad
 
 
-DEMO_NAMES = ("Basic Trench", "Spacer Formation", "Bonding + Thinning")
+DEMO_NAMES = (
+    "Basic Trench",
+    "Spacer Formation",
+    "Bonding + Thinning",
+    "W Plug + CMP",
+)
 
 
 def geometry_checkpoint(database, model):
@@ -21,6 +26,9 @@ def geometry_checkpoint(database, model):
         "Photoresist",
         "Polysilicon",
         "Silicon Nitride",
+        "Tungsten",
+        "Copper",
+        "Tantalum",
     ):
         material_id = database.id_for(material_name)
         counts[material_name] = int(np.count_nonzero(model.grid == material_id))
@@ -76,7 +84,7 @@ def execute_demo(name):
 
 
 class DemoRecipeRegistryTests(unittest.TestCase):
-    def test_registry_returns_three_canonical_portable_recipes(self):
+    def test_registry_returns_canonical_portable_recipes(self):
         database = tcad.MaterialDatabase()
 
         demos = tcad._webui_demo_recipes(database)
@@ -149,6 +157,21 @@ class DemoRecipeRegistryTests(unittest.TestCase):
         self.assertEqual(
             [step["name"] for step in demos["Bonding + Thinning"]["steps"]][-3:],
             ["Wafer Flip", "Bonding", "Thinning"],
+        )
+        self.assertEqual(
+            [step["name"] for step in demos["W Plug + CMP"]["steps"]],
+            [
+                "Initialize Wafer",
+                "Deposition",
+                "Spin Resist",
+                "Mask Exposure",
+                "Resist Develop",
+                "Etch",
+                "Strip",
+                "Fill",
+                "Deposition",
+                "CMP",
+            ],
         )
 
     def test_worker_init_exposes_the_canonical_demo_recipes(self):
@@ -307,6 +330,52 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         self.assertGreater(handle.size, device.size)
         self.assertEqual(device.size, 8)
         self.assertTrue(np.all(oxide_planes[handle[-1] + 1 : device[0]]))
+
+    def test_w_plug_cmp_removes_overburden_and_keeps_contact_plugs(self):
+        database, model, _elapsed, trace = self.runs["W Plug + CMP"]
+        tungsten = database.id_for("Tungsten")
+        silicon = database.id_for("Silicon")
+        resist = database.id_for("Photoresist")
+        fill = next(
+            item for item in trace if item["instance_name"] == "Fill tungsten contacts"
+        )
+        overburden = next(
+            item
+            for item in trace
+            if item["instance_name"] == "Deposit tungsten overburden"
+        )
+        polish = next(
+            item
+            for item in trace
+            if item["instance_name"] == "Polish tungsten to oxide stop"
+        )
+
+        self.assertGreater(
+            fill["after"]["counts"]["Tungsten"],
+            fill["before"]["counts"]["Tungsten"],
+        )
+        self.assertTrue(overburden["after"]["full_planes"]["Tungsten"])
+        self.assertLess(
+            polish["after"]["counts"]["Tungsten"],
+            polish["before"]["counts"]["Tungsten"],
+        )
+        self.assertFalse(polish["after"]["full_planes"]["Tungsten"])
+        self.assertFalse(np.any(model.grid == resist))
+        self.assertFalse(np.any(np.all(model.grid == tungsten, axis=(0, 1))))
+        self.assertLessEqual(
+            int(model.height_map.max()) - int(model.height_map.min()),
+            1,
+        )
+
+        coords = np.argwhere(model.grid == tungsten)
+        lowest = coords[coords[:, 2] == coords[:, 2].min()]
+        self.assertTrue(
+            any(
+                int(model.grid[x, y, z - 1]) == silicon
+                for x, y, z in lowest
+                if z > 0
+            )
+        )
 
     def test_all_demos_execute_without_scipy_ndimage(self):
         fallback_runs = []
