@@ -18,6 +18,33 @@ DEMO_NAMES = (
 )
 
 
+def xy_component_count(mask):
+    mask = np.asarray(mask, dtype=bool)
+    seen = np.zeros_like(mask, dtype=bool)
+    count = 0
+    nx, ny = mask.shape
+    for x, y in np.argwhere(mask):
+        if seen[x, y]:
+            continue
+        count += 1
+        seen[x, y] = True
+        stack = [(int(x), int(y))]
+        while stack:
+            current_x, current_y = stack.pop()
+            for next_x, next_y in (
+                (current_x - 1, current_y),
+                (current_x + 1, current_y),
+                (current_x, current_y - 1),
+                (current_x, current_y + 1),
+            ):
+                if not (0 <= next_x < nx and 0 <= next_y < ny):
+                    continue
+                if mask[next_x, next_y] and not seen[next_x, next_y]:
+                    seen[next_x, next_y] = True
+                    stack.append((next_x, next_y))
+    return count
+
+
 def geometry_checkpoint(database, model):
     counts = {}
     full_planes = {}
@@ -379,6 +406,7 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         self.assertFalse(polish["after"]["full_planes"]["Tungsten"])
         self.assertFalse(np.any(model.grid == resist))
         self.assertFalse(np.any(np.all(model.grid == tungsten, axis=(0, 1))))
+        self.assertEqual(xy_component_count(np.any(model.grid == tungsten, axis=2)), 4)
         self.assertLessEqual(
             int(model.height_map.max()) - int(model.height_map.min()),
             1,
@@ -442,16 +470,7 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
         )
 
         copper_xy = np.any(model.grid == copper, axis=2)
-        occupied_x = np.flatnonzero(np.any(copper_xy, axis=1))
-        runs = [
-            run
-            for run in np.split(
-                occupied_x,
-                np.where(np.diff(occupied_x) != 1)[0] + 1,
-            )
-            if run.size
-        ]
-        self.assertEqual(len(runs), 2)
+        self.assertEqual(xy_component_count(copper_xy), 2)
 
     def test_all_demos_execute_without_scipy_ndimage(self):
         fallback_runs = []

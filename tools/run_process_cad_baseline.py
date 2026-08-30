@@ -81,6 +81,49 @@ def _void_material_id(database: tcad.MaterialDatabase) -> int:
         return 0
 
 
+def _xy_component_count(mask: np.ndarray) -> int:
+    mask = np.asarray(mask, dtype=bool)
+    seen = np.zeros_like(mask, dtype=bool)
+    count = 0
+    nx, ny = mask.shape
+    for x, y in np.argwhere(mask):
+        if seen[x, y]:
+            continue
+        count += 1
+        seen[x, y] = True
+        stack = [(int(x), int(y))]
+        while stack:
+            current_x, current_y = stack.pop()
+            for next_x, next_y in (
+                (current_x - 1, current_y),
+                (current_x + 1, current_y),
+                (current_x, current_y - 1),
+                (current_x, current_y + 1),
+            ):
+                if not (0 <= next_x < nx and 0 <= next_y < ny):
+                    continue
+                if mask[next_x, next_y] and not seen[next_x, next_y]:
+                    seen[next_x, next_y] = True
+                    stack.append((next_x, next_y))
+    return count
+
+
+def _materials_are_face_adjacent(grid: np.ndarray, first: int, second: int) -> bool:
+    for axis in range(3):
+        lower = [slice(None)] * 3
+        upper = [slice(None)] * 3
+        lower[axis] = slice(None, -1)
+        upper[axis] = slice(1, None)
+        lower_values = grid[tuple(lower)]
+        upper_values = grid[tuple(upper)]
+        if np.any(
+            ((lower_values == first) & (upper_values == second))
+            | ((lower_values == second) & (upper_values == first))
+        ):
+            return True
+    return False
+
+
 def _semantic_checks(
     name: str,
     database: tcad.MaterialDatabase,
@@ -120,6 +163,7 @@ def _semantic_checks(
         )
     elif name == "W Plug + CMP":
         tungsten = database.id_for("Tungsten")
+        silicon = database.id_for("Silicon")
         checks.update(
             {
                 "silicon_present": "Silicon" in material_names,
@@ -129,6 +173,15 @@ def _semantic_checks(
                 "no_tungsten_blanket": not bool(
                     np.any(np.all(model.grid == tungsten, axis=(0, 1)))
                 ),
+                "contacts_touch_silicon": _materials_are_face_adjacent(
+                    model.grid,
+                    tungsten,
+                    silicon,
+                ),
+                "four_contact_plugs": _xy_component_count(
+                    np.any(model.grid == tungsten, axis=2)
+                )
+                == 4,
                 "planar_surface": int(model.height_map.max())
                 - int(model.height_map.min())
                 <= 1,
@@ -137,6 +190,7 @@ def _semantic_checks(
     elif name == "Basic BEOL":
         copper = database.id_for("Copper")
         tantalum = database.id_for("Tantalum")
+        silicon = database.id_for("Silicon")
         checks.update(
             {
                 "silicon_present": "Silicon" in material_names,
@@ -149,6 +203,15 @@ def _semantic_checks(
                 ),
                 "no_tantalum_blanket": not bool(
                     np.any(np.all(model.grid == tantalum, axis=(0, 1)))
+                ),
+                "two_copper_lines": _xy_component_count(
+                    np.any(model.grid == copper, axis=2)
+                )
+                == 2,
+                "copper_isolated_from_silicon": not _materials_are_face_adjacent(
+                    model.grid,
+                    copper,
+                    silicon,
                 ),
                 "planar_surface": int(model.height_map.max())
                 - int(model.height_map.min())

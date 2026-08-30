@@ -70,13 +70,13 @@ load_demo_flows(MaterialDatabase)
 该流程演示接触介质开孔、钨塞填充、钨过镀和以氧化物为停止层的 CMP：
 
 1. Initialize Wafer：生成 `300 nm` Silicon。
-2. Deposition：全片 CVD 沉积 `100 nm` Silicon Dioxide 作为接触介质层。
+2. Deposition：以 conformal `directionality=0.0` 全片 CVD 沉积 `100 nm` Silicon Dioxide 作为接触介质层，避免离散低洼在 CMP 后形成场区金属岛。
 3. Spin Resist：涂覆正胶。
 4. Mask Exposure：使用 4 个分离方形开口的 contact mask。
 5. Resist Develop：打开接触孔图形。
 6. Etch：各向异性刻蚀 `100 nm` Silicon Dioxide，孔底到达 Silicon。
 7. Strip：去除 Photoresist。
-8. Fill：从 top 方向以 Tungsten 填充外部连通接触孔，深度上限 `100 nm`。
+8. Fill：从 top 方向以 Tungsten 填充外部连通接触孔，深度上限 `120 nm`；额外 `20 nm` 是跨 voxel 分辨率覆盖孔底的离散裕量，不改变 `100 nm` 介质目标厚度。
 9. Deposition：全片 CVD 增加约 `30 nm` Tungsten 过镀层，为 CMP 提供真实可移除材料。
 10. CMP：目标高度 `400 nm`，选择性列表只允许 Tungsten 去除，Silicon Dioxide 作为停止层。
 
@@ -93,7 +93,7 @@ Golden 语义：
 该流程采用简化的单层镶嵌互连，演示线槽、Ta 阻挡层、Cu 填充和 CMP：
 
 1. Initialize Wafer：生成 `300 nm` Silicon。
-2. Deposition：全片 CVD 沉积 `100 nm` Silicon Dioxide 作为层间介质。
+2. Deposition：以 conformal `directionality=0.0` 全片 CVD 沉积 `100 nm` Silicon Dioxide 作为层间介质，保证后续金属只保留在线槽中。
 3. Spin Resist：涂覆正胶。
 4. Mask Exposure：使用两条分离的贯穿线条掩模。
 5. Resist Develop：打开线槽图形。

@@ -207,7 +207,8 @@ w_plug_steps = [
     _step("Initialize Wafer", "300 nm contact silicon", {"thickness_nm": 300.0}),
     _step(
         "Deposition", "Deposit contact dielectric",
-        {"material": "Silicon Dioxide", "thickness": 100.0, "method": "CVD", "coverage": "Full wafer"},
+        {"material": "Silicon Dioxide", "thickness": 100.0, "method": "CVD",
+         "coverage": "Full wafer", "directionality": 0.0},
     ),
     _step("Spin Resist", "Contact photoresist", {"thickness_nm": 40.0}),
     _step(
@@ -227,7 +228,7 @@ w_plug_steps = [
     _step("Strip", "Strip contact resist", {"materials": "Photoresist"}),
     _step(
         "Fill", "Fill tungsten contacts",
-        {"material": "Tungsten", "max_depth_nm": 100.0, "direction": "top", "include_sealed": False},
+        {"material": "Tungsten", "max_depth_nm": 120.0, "direction": "top", "include_sealed": False},
     ),
     _step(
         "Deposition", "Deposit tungsten overburden",
@@ -350,7 +351,8 @@ beol_steps = [
     _step("Initialize Wafer", "300 nm BEOL silicon", {"thickness_nm": 300.0}),
     _step(
         "Deposition", "Deposit interlayer dielectric",
-        {"material": "Silicon Dioxide", "thickness": 100.0, "method": "CVD", "coverage": "Full wafer"},
+        {"material": "Silicon Dioxide", "thickness": 100.0, "method": "CVD",
+         "coverage": "Full wafer", "directionality": 0.0},
     ),
     _step("Spin Resist", "Metal line photoresist", {"thickness_nm": 40.0}),
     _step(

@@ -395,6 +395,18 @@ class BaselineRunnerTests(unittest.TestCase):
                 self.assertGreater(demo["triangle_count"], 0)
                 self.assertTrue(required_materials[name].issubset(set(demo["materials"])))
                 self.assertTrue(all(demo["checks"].values()), f"{name}: {demo['checks']}")
+            self.assertTrue(
+                payload["demos"]["W Plug + CMP"]["checks"]["contacts_touch_silicon"]
+            )
+            self.assertTrue(
+                payload["demos"]["W Plug + CMP"]["checks"]["four_contact_plugs"]
+            )
+            self.assertTrue(
+                payload["demos"]["Basic BEOL"]["checks"]["two_copper_lines"]
+            )
+            self.assertTrue(
+                payload["demos"]["Basic BEOL"]["checks"]["copper_isolated_from_silicon"]
+            )
 
 
 class CadShellInteractionContractTests(unittest.TestCase):
