@@ -32407,6 +32407,9 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
     for x0 in (7, 21):
         for y0 in (7, 21):
             contact_mask[x0 : x0 + 4, y0 : y0 + 4] = 1
+    beol_line_mask = np.zeros((mask_size, mask_size), dtype=np.uint8)
+    beol_line_mask[7:11, :] = 1
+    beol_line_mask[21:25, :] = 1
 
     basic_steps = [
         _step("Initialize Wafer", "300 nm silicon wafer", {"thickness_nm": 300.0}),
@@ -32654,6 +32657,97 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
         ),
     ]
 
+    beol_steps = [
+        _step("Initialize Wafer", "300 nm BEOL silicon", {"thickness_nm": 300.0}),
+        _step(
+            "Deposition",
+            "Deposit interlayer dielectric",
+            {
+                "material": "Silicon Dioxide",
+                "thickness": 100.0,
+                "method": "CVD",
+                "coverage": "Full wafer",
+            },
+        ),
+        _step("Spin Resist", "Metal line photoresist", {"thickness_nm": 40.0}),
+        _step(
+            "Mask Exposure",
+            "Expose two metal lines",
+            {
+                "advanced_enable": 1,
+                "mask_mode": "Custom",
+                "mask_name": "Two metal lines",
+                "dose": 80.0,
+            },
+            custom_mask=beol_line_mask.tolist(),
+            mask_name="Two metal lines",
+        ),
+        _step(
+            "Resist Develop",
+            "Open metal line resist",
+            {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0},
+        ),
+        _step(
+            "Etch",
+            "Etch oxide line trenches",
+            {
+                "material": "Silicon Dioxide",
+                "chemistry": "Dry",
+                "time": 60.0,
+                "rate_override": 600.0,
+                "selectivity": 20.0,
+                "sidewall": 90.0,
+            },
+        ),
+        _step("Strip", "Strip metal line resist", {"materials": "Photoresist"}),
+        _step(
+            "Deposition",
+            "Deposit tantalum barrier",
+            {
+                "material": "Tantalum",
+                "thickness": 10.0,
+                "method": "PVD",
+                "coverage": "Full wafer",
+                "directionality": 0.8,
+            },
+        ),
+        _step(
+            "Fill",
+            "Fill copper lines",
+            {
+                "material": "Copper",
+                "max_depth_nm": 70.0,
+                "direction": "top",
+                "include_sealed": False,
+            },
+        ),
+        _step(
+            "Deposition",
+            "Electroplate copper overburden",
+            {
+                "material": "Copper",
+                "thickness": 30.0,
+                "method": "Electroplate",
+                "coverage": "Full wafer",
+            },
+        ),
+        _step(
+            "CMP",
+            "Polish copper to oxide stop",
+            {
+                "target": 400.0,
+                "pressure": 4.0,
+                "time": 90.0,
+                "preston": 0.5,
+                "selectivity_mode": "Manual",
+                "selectivity_pairs": [
+                    {"material": "Copper", "ratio": 1.0},
+                    {"material": "Tantalum", "ratio": 1.0},
+                ],
+            },
+        ),
+    ]
+
     domain = {"grid_shape": [64, 64, 96], "voxel_size_nm": 10.0, "threads": 1}
     return {
         "Basic Trench": {
@@ -32679,6 +32773,12 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
             "description": "Open contact holes, fill tungsten plugs, and polish the overburden to an oxide stop.",
             "domain": copy.deepcopy(domain),
             "steps": w_plug_steps,
+        },
+        "Basic BEOL": {
+            "name": "Basic BEOL",
+            "description": "Etch two damascene lines, add a tantalum barrier, fill copper, and polish to oxide.",
+            "domain": copy.deepcopy(domain),
+            "steps": beol_steps,
         },
     }
 

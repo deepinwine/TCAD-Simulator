@@ -14,6 +14,7 @@ DEMO_NAMES = (
     "Spacer Formation",
     "Bonding + Thinning",
     "W Plug + CMP",
+    "Basic BEOL",
 )
 
 
@@ -168,6 +169,22 @@ class DemoRecipeRegistryTests(unittest.TestCase):
                 "Resist Develop",
                 "Etch",
                 "Strip",
+                "Fill",
+                "Deposition",
+                "CMP",
+            ],
+        )
+        self.assertEqual(
+            [step["name"] for step in demos["Basic BEOL"]["steps"]],
+            [
+                "Initialize Wafer",
+                "Deposition",
+                "Spin Resist",
+                "Mask Exposure",
+                "Resist Develop",
+                "Etch",
+                "Strip",
+                "Deposition",
                 "Fill",
                 "Deposition",
                 "CMP",
@@ -376,6 +393,65 @@ class DemoHeadlessAcceptanceTests(unittest.TestCase):
                 if z > 0
             )
         )
+
+    def test_basic_beol_leaves_two_planar_copper_lines_with_tantalum_liner(self):
+        database, model, _elapsed, trace = self.runs["Basic BEOL"]
+        copper = database.id_for("Copper")
+        tantalum = database.id_for("Tantalum")
+        resist = database.id_for("Photoresist")
+        liner = next(
+            item for item in trace if item["instance_name"] == "Deposit tantalum barrier"
+        )
+        fill = next(
+            item for item in trace if item["instance_name"] == "Fill copper lines"
+        )
+        overburden = next(
+            item
+            for item in trace
+            if item["instance_name"] == "Electroplate copper overburden"
+        )
+        polish = next(
+            item
+            for item in trace
+            if item["instance_name"] == "Polish copper to oxide stop"
+        )
+
+        self.assertGreater(
+            liner["after"]["counts"]["Tantalum"],
+            liner["before"]["counts"]["Tantalum"],
+        )
+        self.assertGreater(
+            fill["after"]["counts"]["Copper"],
+            fill["before"]["counts"]["Copper"],
+        )
+        self.assertGreater(
+            overburden["after"]["counts"]["Copper"],
+            overburden["before"]["counts"]["Copper"],
+        )
+        self.assertLess(
+            polish["after"]["counts"]["Copper"],
+            polish["before"]["counts"]["Copper"],
+        )
+        self.assertGreater(np.count_nonzero(model.grid == tantalum), 0)
+        self.assertFalse(np.any(model.grid == resist))
+        self.assertFalse(np.any(np.all(model.grid == copper, axis=(0, 1))))
+        self.assertFalse(np.any(np.all(model.grid == tantalum, axis=(0, 1))))
+        self.assertLessEqual(
+            int(model.height_map.max()) - int(model.height_map.min()),
+            1,
+        )
+
+        copper_xy = np.any(model.grid == copper, axis=2)
+        occupied_x = np.flatnonzero(np.any(copper_xy, axis=1))
+        runs = [
+            run
+            for run in np.split(
+                occupied_x,
+                np.where(np.diff(occupied_x) != 1)[0] + 1,
+            )
+            if run.size
+        ]
+        self.assertEqual(len(runs), 2)
 
     def test_all_demos_execute_without_scipy_ndimage(self):
         fallback_runs = []
