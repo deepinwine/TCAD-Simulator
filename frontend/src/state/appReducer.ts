@@ -26,6 +26,11 @@ export interface ParameterDraft {
   validation: ParameterValidation;
 }
 
+export interface ParameterError {
+  sequence: number;
+  error: TcadApiError;
+}
+
 export interface AppState {
   phase: AppPhase;
   recipe: StepView[];
@@ -35,6 +40,7 @@ export interface AppState {
   lastRunResult: unknown;
   timeline: TimelineView | null;
   drafts: Record<string, ParameterDraft>;
+  parameterErrors: Record<string, ParameterError>;
   stepErrors: Record<number, TcadApiError>;
   activeMutation: ActiveMutation;
   globalError: TcadApiError | null;
@@ -90,6 +96,7 @@ export const initialAppState: AppState = {
   lastRunResult: undefined,
   timeline: null,
   drafts: {},
+  parameterErrors: {},
   stepErrors: {},
   activeMutation: null,
   globalError: null,
@@ -103,6 +110,10 @@ export function parameterDraftKey(index: number, key: string): string {
   return `${index}:${key}`;
 }
 
+export function hasUnsavedDrafts(state: Pick<AppState, 'drafts'>): boolean {
+  return Object.keys(state.drafts).length > 0;
+}
+
 function withoutKey<T>(source: Record<string, T>, key: string): Record<string, T> {
   const result = {...source};
   delete result[key];
@@ -110,18 +121,11 @@ function withoutKey<T>(source: Record<string, T>, key: string): Record<string, T
 }
 
 function withoutMatchingParameterError(
-  source: Record<number, TcadApiError>,
-  index: number,
+  source: Record<string, ParameterError>,
   key: string,
-): Record<number, TcadApiError> {
-  const error = source[index];
-  const parameterPath = error?.parameterPath;
-  if (typeof parameterPath !== 'string') return source;
-  const pathSegments = parameterPath.match(/[^.[\]]+/g) ?? [];
-  if (pathSegments.at(-1) !== key) return source;
-  const result = {...source};
-  delete result[index];
-  return result;
+  sequence: number,
+): Record<string, ParameterError> {
+  return source[key]?.sequence === sequence ? withoutKey(source, key) : source;
 }
 
 function applyStatuses(
@@ -173,6 +177,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         previewGeneration: state.previewGeneration + 1,
         timeline: null,
         drafts: {},
+        parameterErrors: {},
         stepErrors: {},
         activeMutation: null,
         globalError: null,
@@ -198,6 +203,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             validation: action.validation,
           },
         },
+        parameterErrors: withoutKey(state.parameterErrors, draftKey),
       };
     }
     case 'parameter/saveSucceeded': {
@@ -207,7 +213,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         drafts: withoutKey(state.drafts, draftKey),
-        stepErrors: withoutMatchingParameterError(state.stepErrors, action.index, action.key),
+        parameterErrors: withoutMatchingParameterError(
+          state.parameterErrors,
+          draftKey,
+          action.sequence,
+        ),
       };
     }
     case 'parameter/saveFailed': {
@@ -215,7 +225,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (state.drafts[draftKey]?.sequence !== action.sequence) return state;
       return {
         ...state,
-        stepErrors: {...state.stepErrors, [action.index]: action.error},
+        parameterErrors: {
+          ...state.parameterErrors,
+          [draftKey]: {sequence: action.sequence, error: action.error},
+        },
       };
     }
     case 'run/started':
@@ -272,6 +285,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectedStepIndex,
         previewGeneration: state.previewGeneration + 1,
         drafts: {},
+        parameterErrors: {},
         stepErrors: {},
         globalError: null,
       };

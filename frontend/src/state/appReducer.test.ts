@@ -8,7 +8,7 @@ import type {
   TimelineRestoreView,
   TimelineView,
 } from '../api/types';
-import {appReducer, initialAppState} from './appReducer';
+import {appReducer, hasUnsavedDrafts, initialAppState} from './appReducer';
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
@@ -83,9 +83,56 @@ describe('appReducer bootstrap 与本地编辑', () => {
     expect(state.selectedStepIndex).toBe(1);
     expect(state.recipe).toEqual(initView.recipe);
   });
+
+  it('bootstrap 成功清除旧 draft 与 parameter error', () => {
+    const error = new TcadApiError('旧参数错误', {status: 400});
+    const stale = {
+      ...readyState(),
+      drafts: {
+        '1:dose': {value: 120, sequence: 1, validation: {status: 'valid' as const}},
+      },
+      parameterErrors: {'1:dose': {sequence: 1, error}},
+    };
+
+    const state = appReducer(stale, {type: 'bootstrap/succeeded', payload: initView});
+
+    expect(state.drafts).toEqual({});
+    expect(state.parameterErrors).toEqual({});
+  });
 });
 
 describe('appReducer 参数序号', () => {
+  it('draft gate 不区分 valid、invalid 或保存失败状态', () => {
+    const valid = appReducer(readyState(), {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 120,
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+    const invalid = appReducer(readyState(), {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: -1,
+      sequence: 1,
+      validation: {status: 'invalid', message: '无效'},
+    });
+    const failed = appReducer(valid, {
+      type: 'parameter/saveFailed',
+      index: 1,
+      key: 'dose',
+      sequence: 1,
+      error: new TcadApiError('失败', {status: 400}),
+    });
+
+    expect(hasUnsavedDrafts(readyState())).toBe(false);
+    expect(hasUnsavedDrafts(valid)).toBe(true);
+    expect(hasUnsavedDrafts(invalid)).toBe(true);
+    expect(hasUnsavedDrafts(failed)).toBe(true);
+  });
+
   it('按字段保存 raw display 与 typed draft', () => {
     const editing = appReducer(readyState(), {
       type: 'parameter/draftChanged',
@@ -145,7 +192,7 @@ describe('appReducer 参数序号', () => {
     expect(accepted.recipe[1].params.dose).toBe(120);
   });
 
-  it('最新保存失败保留 draft、validation 和 rolledBack step error', () => {
+  it('最新保存失败按字段和 sequence 保留 parameter error', () => {
     const error = new TcadApiError('剂量无效', {
       status: 400,
       parameterPath: 'params.dose',
@@ -173,8 +220,9 @@ describe('appReducer 参数序号', () => {
       sequence: 3,
       validation: {status: 'invalid', message: '必须为正数'},
     });
-    expect(failed.stepErrors[1]).toBe(error);
-    expect(failed.stepErrors[1].rolledBack).toBe(true);
+    expect(failed.parameterErrors['1:dose']).toEqual({sequence: 3, error});
+    expect(failed.parameterErrors['1:dose'].error.rolledBack).toBe(true);
+    expect(failed.stepErrors[1]).toBeUndefined();
   });
 
   it('旧保存失败不能给更新后的 draft 写入错误', () => {
@@ -196,7 +244,70 @@ describe('appReducer 参数序号', () => {
     });
 
     expect(stale).toBe(editing);
-    expect(stale.stepErrors[1]).toBeUndefined();
+    expect(stale.parameterErrors['1:dose']).toBeUndefined();
+  });
+
+  it('新 draft sequence 立即清除同字段旧 parameter error', () => {
+    const error = new TcadApiError('旧错误', {status: 400});
+    let state = appReducer(readyState(), {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 110,
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+    state = appReducer(state, {
+      type: 'parameter/saveFailed',
+      index: 1,
+      key: 'dose',
+      sequence: 1,
+      error,
+    });
+    expect(state.parameterErrors['1:dose']?.error).toBe(error);
+
+    state = appReducer(state, {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 120,
+      sequence: 2,
+      validation: {status: 'valid'},
+    });
+    expect(state.parameterErrors['1:dose']).toBeUndefined();
+  });
+
+  it('无 parameterPath 的失败也按 draft key 关联并在成功后精确清除', () => {
+    const error = new TcadApiError('服务端拒绝', {status: 400});
+    let state = appReducer(readyState(), {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 120,
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+    state = appReducer(state, {
+      type: 'parameter/saveFailed',
+      index: 1,
+      key: 'dose',
+      sequence: 1,
+      error,
+    });
+    expect(state.parameterErrors['1:dose']).toEqual({sequence: 1, error});
+
+    state = appReducer(state, {
+      type: 'parameter/saveSucceeded',
+      index: 1,
+      key: 'dose',
+      sequence: 1,
+      payload: {
+        step: step(1, {params: {dose: 120}}),
+        statuses: ['ready', 'dirty'],
+        warnings: [],
+      },
+    });
+    expect(state.parameterErrors['1:dose']).toBeUndefined();
   });
 
   it('字段保存成功只清除同字段错误，不吞掉其他字段的结构化错误', () => {
@@ -240,7 +351,8 @@ describe('appReducer 参数序号', () => {
         warnings: [],
       },
     });
-    expect(state.stepErrors[1]).toBe(fieldBError);
+    expect(state.parameterErrors['1:temperature']?.error).toBe(fieldBError);
+    expect(state.parameterErrors['1:dose']).toBeUndefined();
 
     state = appReducer(state, {
       type: 'parameter/saveSucceeded',
@@ -253,7 +365,7 @@ describe('appReducer 参数序号', () => {
         warnings: [],
       },
     });
-    expect(state.stepErrors[1]).toBeUndefined();
+    expect(state.parameterErrors['1:temperature']).toBeUndefined();
   });
 });
 
@@ -316,7 +428,15 @@ describe('appReducer 执行与 Timeline', () => {
       recipe: [step(0, {runtimeStatus: 'done'}), step(1)],
       log: ['restored'],
     };
-    const restored = appReducer({...loaded, lastModelRevision: 19}, {
+    const parameterError = new TcadApiError('旧参数错误', {status: 400});
+    const restored = appReducer({
+      ...loaded,
+      lastModelRevision: 19,
+      drafts: {
+        '1:dose': {value: 120, sequence: 1, validation: {status: 'valid'}},
+      },
+      parameterErrors: {'1:dose': {sequence: 1, error: parameterError}},
+    }, {
       type: 'timeline/restoreSucceeded',
       payload: restoredPayload,
     });
@@ -325,6 +445,8 @@ describe('appReducer 执行与 Timeline', () => {
     expect(restored.recipe).toEqual(restoredPayload.recipe);
     expect(restored.lastModelRevision).toBe(19);
     expect(restored.previewGeneration).toBe(2);
+    expect(restored.drafts).toEqual({});
+    expect(restored.parameterErrors).toEqual({});
   });
 
   it('Timeline 按 item.index 同步权威 runtimeStatus，重复项首个生效并忽略越界项', () => {

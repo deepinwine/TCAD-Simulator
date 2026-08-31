@@ -184,7 +184,7 @@ describe('ParameterPanel', () => {
     const initial = init();
     const error = new TcadApiError('剂量不符合服务端约束', {
       status: 400,
-      parameterPath: 'params.dose',
+      parameterPath: 'params["dose"]',
       suggestion: '请输入经校准的剂量',
     });
     const api = apiStub(initial, {setStep: vi.fn(async () => { throw error; })});
@@ -202,7 +202,7 @@ describe('ParameterPanel', () => {
     expect(input).toHaveAttribute('aria-invalid', 'true');
     expect(input.getAttribute('aria-describedby')).toContain('parameter-server-error-0-dose');
     expect(screen.getByText('剂量不符合服务端约束')).toBeInTheDocument();
-    expect(screen.getByText('参数路径：params.dose')).toBeInTheDocument();
+    expect(screen.getByText('参数路径：params["dose"]')).toBeInTheDocument();
     expect(screen.getByText('建议：请输入经校准的剂量')).toBeInTheDocument();
     unmount();
   });
@@ -224,6 +224,24 @@ describe('ParameterPanel', () => {
 
     expect(screen.getByLabelText('Dose')).toHaveValue('125.');
     expect(screen.getByText('剂量不符合服务端约束')).toBeInTheDocument();
+    unmount();
+  });
+
+  it('保存失败后再次编辑会立即清除该字段旧服务端错误', async () => {
+    vi.useFakeTimers();
+    const initial = init();
+    const error = new TcadApiError('旧剂量错误', {status: 400});
+    const api = apiStub(initial, {setStep: vi.fn(async () => { throw error; })});
+    const {unmount} = await mount(initial, api);
+    const input = screen.getByLabelText('Dose');
+
+    fireEvent.change(input, {target: {value: '125'}});
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(screen.getByText('旧剂量错误')).toBeInTheDocument();
+
+    fireEvent.change(input, {target: {value: '126'}});
+    expect(screen.queryByText('旧剂量错误')).not.toBeInTheDocument();
+    expect(input).toHaveAttribute('aria-invalid', 'false');
     unmount();
   });
 
@@ -366,6 +384,31 @@ describe('ParameterPanel', () => {
     expect(api.setStep).not.toHaveBeenCalled();
 
     await act(async () => resolveRun());
+    unmount();
+  });
+
+  it.each([
+    [true, true],
+    [1, true],
+    ['1', true],
+    ['true', true],
+    ['yes', true],
+    ['on', true],
+    [false, false],
+    [0, false],
+    ['0', false],
+    ['false', false],
+    ['no', false],
+    ['off', false],
+  ])('bool legacy 初始值 %j 显示为 checked=%j', async (raw, checked) => {
+    const booleanStep = step(0, {
+      params: {enabledFlag: raw},
+      parameterSpecs: [{key: 'enabledFlag', label: 'Enabled', type: 'bool'}],
+    });
+    const initial = init([booleanStep]);
+    const {unmount} = await mount(initial);
+
+    expect(screen.getByLabelText('Enabled')).toHaveProperty('checked', checked);
     unmount();
   });
 

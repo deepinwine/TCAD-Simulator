@@ -18,6 +18,9 @@ function validateNumber(
   const value = Number(text);
   if (!Number.isFinite(value)) return {ok: false, message: '请输入有限数值'};
   if (integer && !Number.isInteger(value)) return {ok: false, message: '请输入整数'};
+  if (integer && !Number.isSafeInteger(value)) {
+    return {ok: false, message: '请输入安全整数'};
+  }
   if (spec.minimum !== undefined && value < spec.minimum) {
     return {ok: false, message: `必须大于或等于 ${spec.minimum}`};
   }

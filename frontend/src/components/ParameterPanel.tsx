@@ -1,4 +1,5 @@
-import {type KeyboardEvent, useEffect, useMemo, useRef, useState} from 'react';
+import {type KeyboardEvent, useEffect, useRef, useState} from 'react';
+import type {TcadApiError} from '../api/client';
 import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/types';
 import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
@@ -15,7 +16,7 @@ interface ParameterFieldProps {
   spec: ParameterSpecView;
   serverValue: unknown;
   disabled: boolean;
-  serverErrorId?: string;
+  serverError?: TcadApiError;
 }
 
 type DisplayValue = string | boolean;
@@ -63,7 +64,13 @@ function choiceIndex(
 
 function initialDisplayValue(spec: ParameterSpecView, value: unknown): DisplayValue {
   if (isChoice(spec)) return choiceIndex(spec.choices, value);
-  if (isBoolean(spec)) return value === true || value === 'true' || value === '1';
+  if (isBoolean(spec)) {
+    if (value === true || value === 1) return true;
+    if (typeof value === 'string') {
+      return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+    }
+    return false;
+  }
   return safeText(value);
 }
 
@@ -174,7 +181,7 @@ function ParameterField({
   spec,
   serverValue,
   disabled,
-  serverErrorId,
+  serverError,
 }: ParameterFieldProps) {
   const {state, actions} = useAppState();
   const key = parameterDraftKey(stepIndex, spec.key);
@@ -183,6 +190,9 @@ function ParameterField({
   const unitsId = spec.units ? `${inputId}-units` : undefined;
   const descriptionId = `${inputId}-description`;
   const validationId = `${inputId}-validation`;
+  const serverErrorId = serverError === undefined
+    ? undefined
+    : `parameter-server-error-${stepIndex}-${spec.key}`;
   const initialValue = serverValue === undefined ? spec.defaultValue : serverValue;
   const [displayValue, setDisplayValue] = useState<DisplayValue>(
     () => draft?.rawValue ?? initialDisplayValue(spec, initialValue),
@@ -282,29 +292,21 @@ function ParameterField({
       />
       {description && <p id={descriptionId} className="parameter-help">{description}</p>}
       {clientError && <p id={validationId} className="parameter-error">{clientError}</p>}
+      {serverError !== undefined && (
+        <div id={serverErrorId} className="parameter-server-error" role="alert">
+          <strong>{serverError.message}</strong>
+          {serverError.parameterPath && <span>参数路径：{serverError.parameterPath}</span>}
+          {serverError.suggestion && <span>建议：{serverError.suggestion}</span>}
+        </div>
+      )}
     </div>
   );
-}
-
-function pathMatchesKey(path: string | undefined, key: string): boolean {
-  if (path === undefined) return false;
-  const segments = path.match(/[^.[\]]+/g) ?? [];
-  return segments.at(-1) === key;
 }
 
 export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
   const {state} = useAppState();
   const disabled = state.phase === 'running' || state.activeMutation !== null;
-  const serverError = step === null ? undefined : state.stepErrors[step.index];
-  const matchedErrorKey = useMemo(
-    () => step?.parameterSpecs.find(spec => pathMatchesKey(serverError?.parameterPath, spec.key))?.key,
-    [serverError?.parameterPath, step],
-  );
-  const serverErrorId = step === null || serverError === undefined
-    ? undefined
-    : matchedErrorKey === undefined
-      ? `parameter-server-error-${step.index}`
-      : `parameter-server-error-${step.index}-${matchedErrorKey}`;
+  const runError = step === null ? undefined : state.stepErrors[step.index];
 
   return (
     <section
@@ -331,11 +333,11 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
-          {serverError !== undefined && (
-            <div id={serverErrorId} className="parameter-server-error" role="alert">
-              <strong>{serverError.message}</strong>
-              {serverError.parameterPath && <span>参数路径：{serverError.parameterPath}</span>}
-              {serverError.suggestion && <span>建议：{serverError.suggestion}</span>}
+          {runError !== undefined && (
+            <div className="parameter-server-error" role="alert">
+              <strong>{runError.message}</strong>
+              {runError.parameterPath && <span>参数路径：{runError.parameterPath}</span>}
+              {runError.suggestion && <span>建议：{runError.suggestion}</span>}
             </div>
           )}
           {step.parameterSpecs.length === 0 ? (
@@ -353,7 +355,9 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
                     spec={spec}
                     serverValue={serverValue}
                     disabled={disabled}
-                    serverErrorId={matchedErrorKey === spec.key ? serverErrorId : undefined}
+                    serverError={state.parameterErrors[
+                      parameterDraftKey(step.index, spec.key)
+                    ]?.error}
                   />
                 );
               })}

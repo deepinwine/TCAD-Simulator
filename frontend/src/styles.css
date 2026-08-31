@@ -478,6 +478,7 @@ button:focus-visible,
 .parameter-help,
 .parameter-error {
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: 9px;
   line-height: 1.45;
 }
@@ -499,6 +500,7 @@ button:focus-visible,
   border-radius: 5px;
   color: #d7aeb4;
   background: #25141a;
+  overflow-wrap: anywhere;
   font-size: 9px;
 }
 

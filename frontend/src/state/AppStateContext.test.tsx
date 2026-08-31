@@ -151,6 +151,44 @@ describe('AppStateProvider bootstrap', () => {
 });
 
 describe('AppStateProvider mutation gate 与顺序', () => {
+  it('任意未清除 draft 会阻止 run 与 restore，保存成功清除后才允许运行', async () => {
+    const api = apiStub();
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+
+    act(() => {
+      captured!.actions.updateDraft(0, 'dose', 150, {status: 'valid'}, '150');
+    });
+    await act(async () => {
+      await Promise.all([
+        captured!.actions.runStep(0),
+        captured!.actions.runTo(0),
+        captured!.actions.runAll(),
+        captured!.actions.restoreTimeline(0),
+      ]);
+    });
+
+    expect(api.runStep).not.toHaveBeenCalled();
+    expect(api.runTo).not.toHaveBeenCalled();
+    expect(api.runAll).not.toHaveBeenCalled();
+    expect(api.restoreTimeline).not.toHaveBeenCalled();
+
+    act(() => {
+      captured!.actions.updateDraft(0, 'dose', -1, {status: 'invalid'}, '-1');
+    });
+    await act(async () => captured!.actions.runAll());
+    expect(api.runAll).not.toHaveBeenCalled();
+
+    act(() => {
+      captured!.actions.updateDraft(0, 'dose', 150, {status: 'valid'}, '150');
+    });
+    await act(async () => captured!.actions.saveParameter(0, 'dose'));
+    expect(captured?.state.drafts).toEqual({});
+    await act(async () => captured!.actions.runStep(0));
+    expect(api.runStep).toHaveBeenCalledTimes(1);
+  });
+
   it('同一 render 内双击也只发送一个运行请求，并阻止运行期间保存', async () => {
     const run = deferred<RunView>();
     const api = apiStub({runAll: vi.fn(() => run.promise)});

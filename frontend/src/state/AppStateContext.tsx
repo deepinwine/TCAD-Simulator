@@ -16,6 +16,7 @@ import {
   type AppAction,
   type AppState,
   appReducer,
+  hasUnsavedDrafts,
   initialAppState,
   parameterDraftKey,
   type ParameterValidation,
@@ -237,6 +238,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       !mountedRef.current
       || mutationGateRef.current !== null
       || pendingSaveCountRef.current > 0
+      || hasUnsavedDrafts(stateRef.current)
     ) {
       return false;
     }

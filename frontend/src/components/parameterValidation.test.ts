@@ -35,6 +35,13 @@ describe('validateParameter', () => {
     });
   });
 
+  it('整数拒绝超过 JavaScript 安全范围的值', () => {
+    expect(validateParameter(spec({type: 'int'}), '9007199254740992')).toEqual({
+      ok: false,
+      message: '请输入安全整数',
+    });
+  });
+
   it('minimum 和 maximum 为包含边界', () => {
     const bounded = spec({type: 'float', minimum: 0, maximum: 500});
     expect(validateParameter(bounded, '0')).toEqual({ok: true, value: 0});
