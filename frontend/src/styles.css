@@ -797,3 +797,10 @@ button:focus-visible,
     transition: border-color 120ms ease, background-color 120ms ease;
   }
 }
+
+.toolbar-run-status {
+  min-width: 96px;
+  color: #8fc7ee;
+  font-size: 10px;
+  white-space: nowrap;
+}

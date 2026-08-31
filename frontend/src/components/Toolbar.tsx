@@ -1,4 +1,4 @@
-import {hasUnsavedDrafts} from '../state/appReducer';
+import {type ActiveMutation, hasUnsavedDrafts} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
 
 interface ToolbarProps {
@@ -8,10 +8,27 @@ interface ToolbarProps {
 
 const draftGuidanceId = 'mutation-draft-guidance';
 
+const operationLabels: Record<Exclude<ActiveMutation, null>, string> = {
+  step: '运行选中步骤',
+  to: '运行至选中步骤',
+  all: '运行全部',
+  timeline: '回看历史快照',
+};
+
 export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {
   const {state, actions} = useAppState();
-  const connected = state.phase === 'ready' || state.phase === 'running';
   const mutationActive = state.phase === 'running' || state.activeMutation !== null;
+  const activeOperation = state.activeMutation;
+  const online = state.phase === 'ready' || state.phase === 'running';
+  const connectionLabel = mutationActive
+    ? '运行中 Running'
+    : online
+      ? '已连接 Connected'
+      : '处理中 Working';
+  const connectionTone = mutationActive || !online ? 'is-busy' : 'is-connected';
+  const runAnnouncement = mutationActive && activeOperation !== null
+    ? `正在运行：${operationLabels[activeOperation]}…`
+    : '';
   const draftBlocked = hasUnsavedDrafts(state);
   const selectedMissing = state.selectedStepIndex === null;
   const allRunsDisabled = mutationActive || draftBlocked;
@@ -61,11 +78,19 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
       </div>
       <div className="toolbar-actions">
         <span
-          className={`connection-state ${connected ? 'is-connected' : 'is-busy'}`}
-          aria-label={`连接状态：${connected ? '已连接 Connected' : '处理中 Working'}`}
+          className="toolbar-run-status"
+          role="status"
+          aria-live="polite"
+          aria-label={runAnnouncement || undefined}
+        >
+          {runAnnouncement}
+        </span>
+        <span
+          className={`connection-state ${connectionTone}`}
+          aria-label={`连接状态：${connectionLabel}`}
         >
           <span className="connection-dot" aria-hidden="true" />
-          {connected ? '已连接 Connected' : '处理中 Working'}
+          {connectionLabel}
         </span>
         <button
           type="button"

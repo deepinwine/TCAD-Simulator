@@ -232,4 +232,25 @@ describe('Toolbar 执行操作', () => {
     expect(alert).toHaveTextContent('检查 Worker 日志');
     expect(alert).toHaveTextContent('模型未回滚，状态可能已改变');
   });
+
+  it('运行中通过 live region 播报当前操作，连接指示切换为 Running，结束后恢复', async () => {
+    const pending = deferred<RunView>();
+    const api = apiStub({runAll: vi.fn(() => pending.promise)});
+    render(<App api={api} />);
+
+    const runAll = await screen.findByRole('button', {name: '运行全部'});
+    expect(screen.getByText('已连接 Connected')).toBeInTheDocument();
+    fireEvent.click(runAll);
+
+    const announcement = await screen.findByText('正在运行：运行全部…');
+    const liveRegion = announcement.closest('[role="status"]');
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion).toHaveAttribute('aria-live', 'polite');
+    expect(screen.getByText('运行中 Running')).toBeInTheDocument();
+
+    pending.resolve({});
+    await waitFor(() => expect(screen.queryByText('正在运行：运行全部…')).toBeNull());
+    expect(screen.getByText('已连接 Connected')).toBeInTheDocument();
+    expect(runAll).toBeEnabled();
+  });
 });
