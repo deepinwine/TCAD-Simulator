@@ -105,18 +105,18 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-31, M2 implementation complete)
+## Current Branch State (2026-08-31, M2 merged to backup/main)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
 | `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1/M2 实现 |
-| 本地 `main` | `d15722d` | 线性领先 `origin/main` 一个提交（M1 设计文档）；不含实现 |
-| `backup/main`（deepinwine） | `063838a` | **M1 已通过 PR #1 合并**（五流程 Golden 基线 + 契约测试） |
-| `codex/m2-react-shell` | `c47acdf`（实现尖端，其后再叠加 Task 9 文档收口提交） | 线性领先 `backup/main` 28 个提交（含 M2 全部 27 个实现/测试提交 + 本文档提交），可快进合并 |
+| `backup/main`（deepinwine） | `d293d34` | **M2 已由所有者授权快进合并**（M1 `063838a` + M2 28 提交，2026-08-31） |
+| 本地 `main` | `d293d34` | 与 `backup/main` 一致 |
+| `codex/m2-react-shell` | `d293d34` | M2 交付分支，已全部包含于 `main`（保留作历史） |
 
-祖先关系：`main ⊂ 063838a ⊂ …M2 提交… ⊂ c47acdf ⊂ docs 收口提交`。`origin` 上不存在
-任何 M1/M2 功能分支。**是否将 M2 合并进 `backup/main`、何时同步 `origin/main` 由仓库
-所有者决定；Agent 不得自行合并 feature 分支或推送 `origin`（ADR-010/017）。**
+祖先关系：`41a2fcd ⊂ 063838a ⊂ …M2 28 提交… ⊂ d293d34`。`origin` 上不存在任何 M1/M2
+功能分支；`origin/main` 同步需要 FonaTech 仓库写权限或 fork PR（所有者操作）。**合并
+与推送决定权始终在仓库所有者（ADR-010/017）。**
 
-- Next: 独立 architecture/code review 通过后由所有者合并 M2 → 开始 M3 Three.js Viewer
-  完善（正交相机、X/Y/Z 裁剪、材料显示控制、选择与测量）。
+- Next: 开始 M3 Three.js Viewer 完善（正交相机、X/Y/Z 裁剪、材料显示控制、选择与测量）；
+  修复 run/all 长 POST 静默期连接中断的用户体验（进度流式或失败后状态对账）。
