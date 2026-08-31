@@ -90,6 +90,8 @@ const stubViewerRuntime = () => ({
   setProjection: () => {},
   setClipping: () => {},
   setMaterialDisplay: () => {},
+  pickAt: () => null,
+  setMeasureMarkers: () => {},
   fit: () => {},
   loadMeshes: async () => ({warnings: [], materials: []}),
   dispose: () => {},
@@ -106,6 +108,8 @@ function recordingViewerRuntime() {
       setProjection: () => {},
       setClipping: () => {},
       setMaterialDisplay: () => {},
+      pickAt: () => null,
+      setMeasureMarkers: () => {},
       fit: () => {},
       loadMeshes: async (token: number) => {
         loadedTokens.push(token);

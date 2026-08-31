@@ -1,8 +1,10 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
+import type {PointerEvent as ReactPointerEvent} from 'react';
 import type {TcadApi} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
 import {clipStateAllOff, type ClipAxis, type ClipState} from './clipping';
 import {MaterialPanel, type MaterialDisplayState} from './MaterialPanel';
+import {measureDistance, type PickHit} from './picking';
 import {createThreeViewerRuntime} from './viewerRuntime';
 import type {MaterialSummary, StandardView, ViewerRuntime} from './viewerRuntime';
 
@@ -41,6 +43,11 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   const [clip, setClip] = useState<ClipState>(clipStateAllOff);
   const [materials, setMaterials] = useState<MaterialSummary[]>([]);
   const [display, setDisplay] = useState<Record<number, MaterialDisplayState>>({});
+  const [selection, setSelection] = useState<PickHit | null>(null);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measurePoints, setMeasurePoints] = useState<PickHit['point'][]>([]);
+  const [distance, setDistance] = useState<number | null>(null);
+  const pointerDownRef = useRef<{id: number; x: number; y: number} | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -125,6 +132,48 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     runtimeRef.current?.setMaterialDisplay(matId, next);
   };
 
+  const toggleMeasureMode = () => {
+    const next = !measureMode;
+    setMeasureMode(next);
+    setMeasurePoints([]);
+    setDistance(null);
+    runtimeRef.current?.setMeasureMarkers(null);
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    pointerDownRef.current = {id: event.pointerId, x: event.clientX, y: event.clientY};
+  };
+
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (event.button !== 0 || down === null || down.id !== event.pointerId) return;
+    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+    if (moved > 4) return;
+    const runtime = runtimeRef.current;
+    if (runtime === null) return;
+    const stage = event.currentTarget;
+    const rect = stage.getBoundingClientRect();
+    const ndcX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+    const ndcY = -(((event.clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1);
+    const hit = runtime.pickAt(ndcX, ndcY);
+    if (hit === null) {
+      if (!measureMode) setSelection(null);
+      return;
+    }
+    setSelection(hit);
+    if (measureMode) {
+      const nextPoints = measurePoints.length >= 2 ? [hit.point] : [...measurePoints, hit.point];
+      setMeasurePoints(nextPoints);
+      runtime.setMeasureMarkers(nextPoints.map(point => {
+        const [x, y, z] = point.toArray();
+        return [x, y, z] as const;
+      }));
+      setDistance(nextPoints.length === 2 ? measureDistance(nextPoints[0], nextPoints[1]) : null);
+    }
+  };
+
   return (
     <section className="workspace-pane viewer-pane" aria-label="3D Viewer">
       <header className="pane-header viewer-header">
@@ -163,6 +212,15 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
         >
           正交视图
         </button>
+        <button
+          type="button"
+          className="viewer-view-button"
+          aria-pressed={measureMode}
+          disabled={initError !== null}
+          onClick={toggleMeasureMode}
+        >
+          测量模式
+        </button>
       </div>
       <div className="viewer-clip-group" role="group" aria-label="裁剪平面">
         {CLIP_AXES.map(({axis, label}) => (
@@ -190,13 +248,28 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           </div>
         ))}
       </div>
-      <div className="viewer-stage" ref={containerRef}>
+      <div
+        className="viewer-stage"
+        ref={containerRef}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+      >
         <MaterialPanel
           materials={materials}
           display={display}
           onChange={changeMaterialDisplay}
           disabled={initError !== null}
         />
+        {selection !== null && (
+          <div className="viewer-selection-bar" role="status">
+            {selection.name} · 命中点 ({selection.point.toArray().map(v => v.toFixed(3)).join(', ')})
+          </div>
+        )}
+        {distance !== null && (
+          <div className="viewer-measure-readout" role="status" aria-live="polite">
+            距离 {distance.toFixed(4)} µm（再点击重新测量）
+          </div>
+        )}
         {initError !== null && (
           <ErrorNotice
             title="无法初始化 3D Viewer"

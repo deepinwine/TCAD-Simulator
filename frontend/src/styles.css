@@ -982,3 +982,33 @@ button:focus-visible,
   width: 70px;
   accent-color: #4f9cf9;
 }
+
+.viewer-selection-bar {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 4px 12px;
+  border: 1px solid #1e3a5c;
+  border-radius: 4px;
+  background: rgba(13, 20, 30, 0.9);
+  color: #aebfd2;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.viewer-measure-readout {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 4px 12px;
+  border: 1px solid #2a4d1e;
+  border-radius: 4px;
+  background: rgba(20, 30, 16, 0.9);
+  color: #b8d8a0;
+  font-size: 11px;
+  white-space: nowrap;
+}

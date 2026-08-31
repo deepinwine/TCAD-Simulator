@@ -5,6 +5,7 @@ import type {TcadApi} from '../api/types';
 import {clipStateAllOff, deriveClipPlanes, type ClipState} from './clipping';
 import {calculateOrthographicFit, calculatePerspectiveFit} from './fitCamera';
 import {createMeshLoader, type LoadedMesh} from './meshLoader';
+import {pickAtNormalizedCoords, type PickCandidate, type PickHit} from './picking';
 
 export type StandardView = 'iso' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right';
 export type ProjectionMode = 'perspective' | 'orthographic';
@@ -21,6 +22,8 @@ export interface MaterialDisplay {
   opacity?: number;
 }
 
+export type MeasureMarkerPoints = ReadonlyArray<readonly [number, number, number]>;
+
 export interface ViewerRuntime {
   readonly backend: string;
   mount(container: HTMLElement): void;
@@ -28,6 +31,8 @@ export interface ViewerRuntime {
   setProjection(mode: ProjectionMode): void;
   setClipping(state: ClipState): void;
   setMaterialDisplay(matId: number, display: MaterialDisplay): void;
+  pickAt(ndcX: number, ndcY: number): PickHit | null;
+  setMeasureMarkers(points: MeasureMarkerPoints | null): void;
   fit(): void;
   loadMeshes(token: number): Promise<{warnings: string[]; materials: MaterialSummary[]}>;
   dispose(): void;
@@ -66,6 +71,8 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let backendLabel = 'WebGL2';
   let clipState: ClipState = clipStateAllOff();
   const meshesByMatId = new Map<number, THREE.Mesh>();
+  let selectedMesh: THREE.Mesh | null = null;
+  let markerGroup: THREE.Group | null = null;
 
   const stlLoader = new STLLoader();
   const meshLoader = createMeshLoader({
@@ -300,6 +307,59 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       }
       scheduleRender();
     },
+    pickAt(ndcX: number, ndcY: number): PickHit | null {
+      const view = activeCamera();
+      if (view === null) return null;
+      const candidates: PickCandidate[] = [];
+      for (const [matId, mesh] of meshesByMatId) {
+        if (!mesh.visible) continue;
+        candidates.push({mesh, matId, name: mesh.name});
+      }
+      const hit = pickAtNormalizedCoords(candidates, view, ndcX, ndcY);
+      const previous = selectedMesh;
+      selectedMesh = hit !== null ? meshesByMatId.get(hit.matId) ?? null : null;
+      if (previous !== null && previous !== selectedMesh) {
+        (previous.material as THREE.MeshStandardMaterial).emissive.setHex(0x000000);
+      }
+      if (selectedMesh !== null) {
+        (selectedMesh.material as THREE.MeshStandardMaterial).emissive.setHex(0x1a3a5c);
+      }
+      scheduleRender();
+      return hit;
+    },
+    setMeasureMarkers(points: MeasureMarkerPoints | null) {
+      if (scene === null) return;
+      if (markerGroup === null) {
+        markerGroup = new THREE.Group();
+        scene.add(markerGroup);
+      }
+      for (const child of markerGroup.children.slice()) {
+        markerGroup.remove(child);
+        const mesh = child as THREE.Mesh;
+        if (mesh.material !== undefined) (mesh.material as THREE.Material).dispose();
+        mesh.geometry?.dispose();
+      }
+      if (points !== null && points.length > 0) {
+        const markerMaterial = new THREE.MeshBasicMaterial({color: 0x4f9cf9});
+        const radius = contentBounds().getBoundingSphere(new THREE.Sphere()).radius * 0.01;
+        const geometry = new THREE.SphereGeometry(Math.max(radius, 1e-4), 12, 8);
+        for (const [x, y, z] of points) {
+          const marker = new THREE.Mesh(geometry, markerMaterial);
+          marker.position.set(x, y, z);
+          markerGroup.add(marker);
+        }
+        if (points.length === 2) {
+          const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(...points[0]),
+            new THREE.Vector3(...points[1]),
+          ]);
+          markerGroup.add(
+            new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({color: 0x4f9cf9})),
+          );
+        }
+      }
+      scheduleRender();
+    },
     fit() {
       const view = activeCamera();
       if (view === null) return;
@@ -315,6 +375,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       const previous = group.children.slice();
       group.clear();
       meshesByMatId.clear();
+      selectedMesh = null;
       for (const child of previous) {
         const mesh = child as THREE.Mesh;
         (mesh.material as THREE.Material).dispose();
@@ -359,6 +420,17 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       }
       meshLoader.dispose();
       meshesByMatId.clear();
+      selectedMesh = null;
+      if (markerGroup !== null) {
+        for (const child of markerGroup.children.slice()) {
+          markerGroup.remove(child);
+          const mesh = child as THREE.Mesh;
+          if (mesh.material !== undefined) (mesh.material as THREE.Material).dispose();
+          mesh.geometry?.dispose();
+        }
+        scene?.remove(markerGroup);
+        markerGroup = null;
+      }
       if (group !== null) {
         for (const child of group.children.slice()) {
           const mesh = child as THREE.Mesh;

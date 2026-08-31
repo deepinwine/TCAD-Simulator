@@ -1,7 +1,9 @@
 import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {Vector3} from 'three';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {TcadApi} from '../api/types';
 import {ThreeViewer, type ViewerRuntime, type StandardView} from './ThreeViewer';
+import type {PickHit} from './picking';
 
 function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
   const calls = {
@@ -26,6 +28,8 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
     setMaterialDisplay: vi.fn((matId: number, display: {visible?: boolean; opacity?: number}) => {
       calls.materialDisplay.push([matId, display]);
     }),
+    pickAt: vi.fn((): PickHit | null => null),
+    setMeasureMarkers: vi.fn(),
     fit: vi.fn(() => {
       calls.fits += 1;
     }),
@@ -183,6 +187,46 @@ describe('ThreeViewer', () => {
     expect(
       shared.calls.materialDisplay[shared.calls.materialDisplay.length - 1],
     ).toEqual([2, {visible: true, opacity: 0.3}]);
+    expect(shared.calls.apiCalls).toBe(callsBefore);
+  });
+
+  it('点击命中显示选择信息，拖拽不触发，测量模式两点出距离', async () => {
+    const hitA: PickHit = {matId: 1, name: 'Silicon', point: new Vector3(0, 0, 0)};
+    const hitB: PickHit = {matId: 2, name: 'SiO2', point: new Vector3(0.3, 0.4, 0)};
+    const pickAt = vi.fn(() => hitA);
+    const shared = fakeViewerRuntime({pickAt});
+    render(
+      <ThreeViewer
+        api={apiStub}
+        refreshToken={6}
+        runtimeFactory={() => shared.runtime}
+      />,
+    );
+    await screen.findByText('WebGL2');
+    const stage = document.querySelector('.viewer-stage')!;
+    const callsBefore = shared.calls.apiCalls;
+
+    // 拖拽（位移大）不触发选择
+    fireEvent.pointerDown(stage, {pointerId: 1, button: 0, clientX: 400, clientY: 300});
+    fireEvent.pointerUp(stage, {pointerId: 1, button: 0, clientX: 460, clientY: 340});
+    expect(shared.runtime.pickAt).not.toHaveBeenCalled();
+
+    // 单击命中 → 显示材料名
+    fireEvent.pointerDown(stage, {pointerId: 2, button: 0, clientX: 400, clientY: 300});
+    fireEvent.pointerUp(stage, {pointerId: 2, button: 0, clientX: 402, clientY: 302});
+    expect(shared.runtime.pickAt).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Silicon/)).toBeVisible();
+
+    // 测量模式：两次单击出距离并落标记
+    fireEvent.click(screen.getByRole('button', {name: '测量模式'}));
+    expect(screen.getByRole('button', {name: '测量模式'})).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.pointerDown(stage, {pointerId: 3, button: 0, clientX: 400, clientY: 300});
+    fireEvent.pointerUp(stage, {pointerId: 3, button: 0, clientX: 400, clientY: 300});
+    pickAt.mockReturnValue(hitB);
+    fireEvent.pointerDown(stage, {pointerId: 4, button: 0, clientX: 500, clientY: 300});
+    fireEvent.pointerUp(stage, {pointerId: 4, button: 0, clientX: 500, clientY: 300});
+    expect(screen.getByText(/距离 0\.5000/)).toBeVisible();
+    expect(shared.runtime.setMeasureMarkers).toHaveBeenCalled();
     expect(shared.calls.apiCalls).toBe(callsBefore);
   });
 
