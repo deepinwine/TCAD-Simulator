@@ -261,7 +261,7 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     expect(captured?.state.activeMutation).toBeNull();
   });
 
-  it('每个字段 sequence 可并发，旧响应不能覆盖新 draft', async () => {
+  it('同字段新版保存排在旧版之后，网络请求严格串行且最终采用新版', async () => {
     const oldSave = deferred<SetStepView>();
     const newSave = deferred<SetStepView>();
     const setStep = vi.fn()
@@ -275,23 +275,26 @@ describe('AppStateProvider mutation gate 与顺序', () => {
       captured!.actions.updateDraft(1, 'dose', 110, {status: 'valid'});
     });
     const first = captured!.actions.saveParameter(1, 'dose');
+    await waitFor(() => expect(setStep).toHaveBeenCalledTimes(1));
     act(() => {
       captured!.actions.updateDraft(1, 'dose', 120, {status: 'valid'});
     });
     const second = captured!.actions.saveParameter(1, 'dose');
 
-    await act(async () => newSave.resolve({
-      step: step(1, {params: {dose: 120}, runtimeStatus: 'dirty'}),
-      statuses: ['ready', 'dirty'],
-      warnings: [],
-    }));
-    await second;
+    expect(setStep).toHaveBeenCalledTimes(1);
     await act(async () => oldSave.resolve({
       step: step(1, {params: {dose: 110}, runtimeStatus: 'dirty'}),
       statuses: ['ready', 'dirty'],
       warnings: [],
     }));
     await first;
+    await waitFor(() => expect(setStep).toHaveBeenCalledTimes(2));
+    await act(async () => newSave.resolve({
+      step: step(1, {params: {dose: 120}, runtimeStatus: 'dirty'}),
+      statuses: ['ready', 'dirty'],
+      warnings: [],
+    }));
+    await second;
 
     expect(setStep).toHaveBeenNthCalledWith(
       1,
@@ -300,6 +303,84 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     );
     expect(captured?.state.recipe[1].params.dose).toBe(120);
     expect(captured?.state.drafts['1:dose']).toBeUndefined();
+  });
+
+  it('跨字段保存同样串行，后端完整 step 响应不会反序覆盖', async () => {
+    const firstSave = deferred<SetStepView>();
+    const secondSave = deferred<SetStepView>();
+    const setStep = vi.fn()
+      .mockReturnValueOnce(firstSave.promise)
+      .mockReturnValueOnce(secondSave.promise);
+    const api = apiStub({setStep});
+    mount(api);
+    await waitUntilReady();
+
+    act(() => captured!.actions.updateDraft(1, 'dose', 120, {status: 'valid'}));
+    const doseSave = captured!.actions.saveParameter(1, 'dose');
+    await waitFor(() => expect(setStep).toHaveBeenCalledTimes(1));
+    act(() => captured!.actions.updateDraft(1, 'temperature', 350, {status: 'valid'}));
+    const temperatureSave = captured!.actions.saveParameter(1, 'temperature');
+
+    expect(setStep).toHaveBeenCalledTimes(1);
+    await act(async () => captured!.actions.runAll());
+    expect(api.runAll).not.toHaveBeenCalled();
+    await act(async () => firstSave.resolve({
+      step: step(1, {params: {dose: 120, temperature: 300}, runtimeStatus: 'dirty'}),
+      statuses: ['ready', 'dirty'],
+      warnings: [],
+    }));
+    await doseSave;
+    await waitFor(() => expect(setStep).toHaveBeenCalledTimes(2));
+    await act(async () => secondSave.resolve({
+      step: step(1, {params: {dose: 120, temperature: 350}, runtimeStatus: 'dirty'}),
+      statuses: ['ready', 'dirty'],
+      warnings: [],
+    }));
+    await temperatureSave;
+
+    expect(captured?.state.recipe[1].params).toEqual({dose: 120, temperature: 350});
+  });
+
+  it('存在执行中或排队保存时 run 与 restore 均不发起请求', async () => {
+    const pendingSave = deferred<SetStepView>();
+    const api = apiStub({setStep: vi.fn(() => pendingSave.promise)});
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+
+    act(() => captured!.actions.updateDraft(0, 'dose', 130, {status: 'valid'}));
+    const save = captured!.actions.saveParameter(0, 'dose');
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await captured!.actions.runAll();
+      await captured!.actions.restoreTimeline(0);
+    });
+    expect(api.runAll).not.toHaveBeenCalled();
+    expect(api.restoreTimeline).not.toHaveBeenCalled();
+
+    await act(async () => pendingSave.resolve({
+      step: step(0, {params: {dose: 130}}),
+      statuses: ['dirty', 'ready'],
+      warnings: [],
+    }));
+    await save;
+  });
+
+  it('mutation 期间 standalone loadTimeline 直接返回', async () => {
+    const pendingRun = deferred<RunView>();
+    const api = apiStub({runAll: vi.fn(() => pendingRun.promise)});
+    mount(api);
+    await waitUntilReady();
+
+    const operation = captured!.actions.runAll();
+    await waitFor(() => expect(api.runAll).toHaveBeenCalledTimes(1));
+    await act(async () => captured!.actions.loadTimeline());
+    expect(api.getTimeline).not.toHaveBeenCalled();
+
+    await act(async () => pendingRun.resolve({modelRevision: 22}));
+    await operation;
+    expect(api.getTimeline).toHaveBeenCalledTimes(1);
   });
 
   it('runStep 与 runTo 默认使用当前选中步骤', async () => {
@@ -372,14 +453,168 @@ describe('AppStateProvider Timeline 与生命周期', () => {
     expect(captured?.state.globalError).toBeNull();
   });
 
+  it('新 Timeline load 取消旧请求，旧响应即使晚到也不能覆盖', async () => {
+    const oldLoad = deferred<TimelineView>();
+    const newLoad = deferred<TimelineView>();
+    const signals: AbortSignal[] = [];
+    const api = apiStub({
+      getTimeline: vi.fn((_signal?: AbortSignal) => {
+        if (_signal) signals.push(_signal);
+        return signals.length === 1 ? oldLoad.promise : newLoad.promise;
+      }),
+    });
+    mount(api);
+    await waitUntilReady();
+
+    const first = captured!.actions.loadTimeline();
+    await waitFor(() => expect(api.getTimeline).toHaveBeenCalledTimes(1));
+    const second = captured!.actions.loadTimeline();
+    await waitFor(() => expect(api.getTimeline).toHaveBeenCalledTimes(2));
+    expect(signals[0].aborted).toBe(true);
+
+    const newest = {...timeline, current: 0};
+    await act(async () => newLoad.resolve(newest));
+    await second;
+    await act(async () => oldLoad.resolve({...timeline, current: 1}));
+    await first;
+    expect(captured?.state.timeline?.current).toBe(0);
+  });
+
+  it('standalone Timeline 旧响应不能覆盖随后 restore 的结果', async () => {
+    const staleLoad = deferred<TimelineView>();
+    const staleSignals: AbortSignal[] = [];
+    const getTimeline = vi.fn()
+      .mockResolvedValueOnce(timeline)
+      .mockImplementationOnce((signal?: AbortSignal) => {
+        if (signal) staleSignals.push(signal);
+        return staleLoad.promise;
+      });
+    const api = apiStub({getTimeline});
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+
+    const stale = captured!.actions.loadTimeline();
+    await waitFor(() => expect(getTimeline).toHaveBeenCalledTimes(2));
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(staleSignals[0].aborted).toBe(true);
+    expect(captured?.state.timeline?.current).toBe(0);
+
+    await act(async () => staleLoad.resolve({...timeline, current: 1}));
+    await stale;
+    expect(captured?.state.timeline?.current).toBe(0);
+  });
+
+  it('Timeline 失败后 retry 成功会清除对应 globalError', async () => {
+    const getTimeline = vi.fn()
+      .mockRejectedValueOnce(new TcadApiError('时间线暂不可用', {status: 503}))
+      .mockResolvedValueOnce({...timeline, current: 0});
+    const api = apiStub({getTimeline});
+    mount(api);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.loadTimeline());
+    expect(captured?.state.globalError?.message).toBe('时间线暂不可用');
+    await act(async () => captured!.actions.loadTimeline());
+    expect(captured?.state.timeline?.current).toBe(0);
+    expect(captured?.state.globalError).toBeNull();
+  });
+
+  it('unmount 会 abort bootstrap 请求且不发布失败态', async () => {
+    const pending = deferred<InitView>();
+    let signal: AbortSignal | undefined;
+    const api = apiStub({
+      init: vi.fn((requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      }),
+    });
+    const mounted = mount(api);
+    await waitFor(() => expect(signal).toBeDefined());
+
+    mounted.unmount();
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    await act(async () => pending.reject(new DOMException('aborted', 'AbortError')));
+  });
+
+  it('unmount 会 abort save 请求且不写入响应', async () => {
+    const pending = deferred<SetStepView>();
+    let signal: AbortSignal | undefined;
+    const api = apiStub({
+      setStep: vi.fn((_request, requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      }),
+    });
+    const mounted = mount(api);
+    await waitUntilReady();
+    act(() => captured!.actions.updateDraft(0, 'dose', 140, {status: 'valid'}));
+    const operation = captured!.actions.saveParameter(0, 'dose');
+    await waitFor(() => expect(signal).toBeDefined());
+
+    mounted.unmount();
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    await act(async () => pending.reject(new DOMException('aborted', 'AbortError')));
+    await operation;
+  });
+
+  it('unmount 会 abort standalone Timeline 请求', async () => {
+    const pending = deferred<TimelineView>();
+    let signal: AbortSignal | undefined;
+    const api = apiStub({
+      getTimeline: vi.fn((requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      }),
+    });
+    const mounted = mount(api);
+    await waitUntilReady();
+    const operation = captured!.actions.loadTimeline();
+    await waitFor(() => expect(signal).toBeDefined());
+
+    mounted.unmount();
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    await act(async () => pending.reject(new DOMException('aborted', 'AbortError')));
+    await operation;
+  });
+
+  it('unmount 会 abort restore 请求', async () => {
+    const pending = deferred<TimelineRestoreView>();
+    let signal: AbortSignal | undefined;
+    const api = apiStub({
+      restoreTimeline: vi.fn((_index, requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      }),
+    });
+    const mounted = mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+    const operation = captured!.actions.restoreTimeline(0);
+    await waitFor(() => expect(signal).toBeDefined());
+
+    mounted.unmount();
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    await act(async () => pending.reject(new DOMException('aborted', 'AbortError')));
+    await operation;
+  });
+
   it('unmount 后异步完成不会 dispatch 或产生 React 警告', async () => {
     const pending = deferred<RunView>();
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const api = apiStub({runAll: vi.fn(() => pending.promise)});
+    let signal: AbortSignal | undefined;
+    const api = apiStub({
+      runAll: vi.fn((requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      }),
+    });
     const mounted = mount(api);
     await waitUntilReady();
     const operation = captured!.actions.runAll();
+    await waitFor(() => expect(signal).toBeDefined());
     mounted.unmount();
+    await waitFor(() => expect(signal?.aborted).toBe(true));
 
     await act(async () => pending.resolve({modelRevision: 99}));
     await operation;

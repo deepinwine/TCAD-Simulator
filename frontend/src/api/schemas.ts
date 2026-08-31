@@ -144,6 +144,7 @@ function requireColor(value: unknown, path: string): RgbColor {
 }
 
 function parseRuntimeStatus(value: unknown): RuntimeStatus {
+  // M2 compatibility 边界约定：未知的增量状态安全回退为 ready。
   return typeof value === 'string' && runtimeStatuses.has(value as RuntimeStatus)
     ? value as RuntimeStatus
     : 'ready';

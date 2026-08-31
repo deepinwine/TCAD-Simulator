@@ -73,7 +73,7 @@ export type AppAction =
   | {type: 'run/started'; operation: Exclude<ActiveMutation, null>}
   | {type: 'run/succeeded'; payload: RunView; index?: number}
   | {type: 'run/failed'; index?: number; error: TcadApiError}
-  | {type: 'timeline/loaded'; payload: TimelineView}
+  | {type: 'timeline/loaded'; payload: TimelineView; errorToClear?: TcadApiError}
   | {type: 'timeline/loadFailed'; error: TcadApiError}
   | {type: 'timeline/restoreSucceeded'; payload: TimelineRestoreView}
   | {type: 'timeline/restoreFailed'; error: TcadApiError}
@@ -107,10 +107,16 @@ function withoutKey<T>(source: Record<string, T>, key: string): Record<string, T
   return result;
 }
 
-function withoutStepError(
+function withoutMatchingParameterError(
   source: Record<number, TcadApiError>,
   index: number,
+  key: string,
 ): Record<number, TcadApiError> {
+  const error = source[index];
+  const parameterPath = error?.parameterPath;
+  if (typeof parameterPath !== 'string') return source;
+  const pathSegments = parameterPath.match(/[^.[\]]+/g) ?? [];
+  if (pathSegments.at(-1) !== key) return source;
   const result = {...source};
   delete result[index];
   return result;
@@ -198,7 +204,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         drafts: withoutKey(state.drafts, draftKey),
-        stepErrors: withoutStepError(state.stepErrors, action.index),
+        stepErrors: withoutMatchingParameterError(state.stepErrors, action.index, action.key),
       };
     }
     case 'parameter/saveFailed': {
@@ -242,6 +248,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         recipe: applyTimelineStatuses(state.recipe, action.payload),
         timeline: action.payload,
+        globalError: action.errorToClear !== undefined
+          && state.globalError === action.errorToClear
+          ? null
+          : state.globalError,
       };
     case 'timeline/loadFailed':
       return {...state, globalError: action.error};
@@ -250,6 +260,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         && action.payload.recipe.some(item => item.index === action.payload.timeline.current)
         ? action.payload.timeline.current
         : null;
+      // lastModelRevision 仅保留最近一次 run 报告提示；几何权威始终是 manifest.rev。
       return {
         ...state,
         recipe: action.payload.recipe,

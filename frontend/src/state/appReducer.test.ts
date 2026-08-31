@@ -179,6 +179,63 @@ describe('appReducer 参数序号', () => {
     expect(stale).toBe(editing);
     expect(stale.stepErrors[1]).toBeUndefined();
   });
+
+  it('字段保存成功只清除同字段错误，不吞掉其他字段的结构化错误', () => {
+    const fieldBError = new TcadApiError('温度无效', {
+      status: 400,
+      parameterPath: 'params.temperature',
+    });
+    let state = readyState();
+    state = appReducer(state, {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 120,
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+    state = appReducer(state, {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'temperature',
+      value: -1,
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+    state = appReducer(state, {
+      type: 'parameter/saveFailed',
+      index: 1,
+      key: 'temperature',
+      sequence: 1,
+      error: fieldBError,
+    });
+
+    state = appReducer(state, {
+      type: 'parameter/saveSucceeded',
+      index: 1,
+      key: 'dose',
+      sequence: 1,
+      payload: {
+        step: step(1, {params: {dose: 120, temperature: 300}}),
+        statuses: ['ready', 'dirty'],
+        warnings: [],
+      },
+    });
+    expect(state.stepErrors[1]).toBe(fieldBError);
+
+    state = appReducer(state, {
+      type: 'parameter/saveSucceeded',
+      index: 1,
+      key: 'temperature',
+      sequence: 1,
+      payload: {
+        step: step(1, {params: {dose: 120, temperature: 300}}),
+        statuses: ['ready', 'dirty'],
+        warnings: [],
+      },
+    });
+    expect(state.stepErrors[1]).toBeUndefined();
+  });
 });
 
 describe('appReducer 执行与 Timeline', () => {
@@ -265,6 +322,34 @@ describe('appReducer 执行与 Timeline', () => {
 
     expect(loaded.recipe.map(item => item.runtimeStatus)).toEqual(['dirty', 'done']);
     expect(loaded.timeline).toEqual(payload);
+  });
+
+  it('Timeline 成功响应清除此前对应的加载错误', () => {
+    const error = new TcadApiError('时间线暂不可用', {status: 503});
+    const failed = appReducer(readyState(), {
+      type: 'timeline/loadFailed',
+      error,
+    });
+    const loaded = appReducer(failed, {
+      type: 'timeline/loaded',
+      payload: timeline,
+      errorToClear: error,
+    });
+
+    expect(loaded.globalError).toBeNull();
+  });
+
+  it('Timeline 成功响应不清除其他操作写入的 globalError', () => {
+    const timelineError = new TcadApiError('旧时间线错误', {status: 503});
+    const runError = new TcadApiError('当前运行错误', {status: 400});
+    const state = {...readyState(), globalError: runError};
+    const loaded = appReducer(state, {
+      type: 'timeline/loaded',
+      payload: timeline,
+      errorToClear: timelineError,
+    });
+
+    expect(loaded.globalError).toBe(runError);
   });
 
   it('mutation 完成可靠释放 gate，但保留步骤错误', () => {

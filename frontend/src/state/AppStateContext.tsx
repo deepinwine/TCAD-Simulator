@@ -69,6 +69,14 @@ function errorStepIndex(error: TcadApiError, fallback?: number): number | undefi
   return fallback;
 }
 
+function isAbortError(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as {name?: unknown}).name === 'AbortError';
+}
+
 export function AppStateProvider({api, children}: AppStateProviderProps) {
   const [state, reactDispatch] = useReducer(appReducer, initialAppState);
   const stateRef = useRef(state);
@@ -79,6 +87,13 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const mutationGateRef = useRef<ActiveMutation>(null);
   const sequenceRef = useRef<Record<string, number>>({});
   const savingRef = useRef<Record<string, number>>({});
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveCountRef = useRef(0);
+  const timelineGenerationRef = useRef(0);
+  const standaloneTimelineControllerRef = useRef<AbortController | null>(null);
+  const timelineErrorRef = useRef<TcadApiError | null>(null);
+  const activeControllersRef = useRef(new Set<AbortController>());
+  const lifecycleGenerationRef = useRef(0);
 
   const dispatch = useCallback<Dispatch<AppAction>>((action) => {
     if (!mountedRef.current) return;
@@ -86,12 +101,29 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     reactDispatch(action);
   }, []);
 
+  const createController = useCallback(() => {
+    const controller = new AbortController();
+    activeControllersRef.current.add(controller);
+    return controller;
+  }, []);
+
+  const releaseController = useCallback((controller: AbortController) => {
+    activeControllersRef.current.delete(controller);
+  }, []);
+
+  const cancelStandaloneTimeline = useCallback(() => {
+    timelineGenerationRef.current += 1;
+    const controller = standaloneTimelineControllerRef.current;
+    standaloneTimelineControllerRef.current = null;
+    controller?.abort();
+  }, []);
+
   const bootstrap = useCallback((): Promise<void> => {
     if (bootstrapCompletedRef.current) return Promise.resolve();
     if (bootstrapPromiseRef.current !== null) return bootstrapPromiseRef.current;
 
     dispatch({type: 'bootstrap/started'});
-    const controller = new AbortController();
+    const controller = createController();
     const attempt = {};
     bootstrapAttemptRef.current = attempt;
     const operation = (async () => {
@@ -103,9 +135,11 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
         dispatch({type: 'bootstrap/succeeded', payload});
       } catch (error) {
         if (!mountedRef.current) return;
+        if (isAbortError(error, controller.signal)) return;
         dispatch({type: 'bootstrap/failed', error: normalizeError(error)});
       } finally {
-        if (mountedRef.current && bootstrapAttemptRef.current === attempt) {
+        releaseController(controller);
+        if (bootstrapAttemptRef.current === attempt) {
           bootstrapPromiseRef.current = null;
           bootstrapAttemptRef.current = null;
         }
@@ -113,7 +147,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     })();
     bootstrapPromiseRef.current = operation;
     return operation;
-  }, [api, dispatch]);
+  }, [api, createController, dispatch, releaseController]);
 
   const selectStep = useCallback((index: number) => {
     if (!mountedRef.current) return;
@@ -146,53 +180,68 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     return sequence;
   }, [dispatch]);
 
-  const saveParameter = useCallback(async (index: number, key: string): Promise<void> => {
-    if (!mountedRef.current || mutationGateRef.current !== null) return;
+  const saveParameter = useCallback((index: number, key: string): Promise<void> => {
+    if (!mountedRef.current || mutationGateRef.current !== null) return Promise.resolve();
     const draftKey = parameterDraftKey(index, key);
     const draft = stateRef.current.drafts[draftKey];
-    if (draft === undefined || draft.validation.status !== 'valid') return;
-    if (savingRef.current[draftKey] === draft.sequence) return;
+    if (draft === undefined || draft.validation.status !== 'valid') return Promise.resolve();
+    if (savingRef.current[draftKey] === draft.sequence) return Promise.resolve();
 
     savingRef.current[draftKey] = draft.sequence;
-    const controller = new AbortController();
-    try {
-      const payload = await api.setStep(
-        {index, params: {[key]: draft.value}},
-        controller.signal,
-      );
-      if (!mountedRef.current) return;
-      dispatch({
-        type: 'parameter/saveSucceeded',
-        index,
-        key,
-        sequence: draft.sequence,
-        payload,
+    pendingSaveCountRef.current += 1;
+    const controller = createController();
+    const operation = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (!mountedRef.current || controller.signal.aborted) return;
+        try {
+          const payload = await api.setStep(
+            {index, params: {[key]: draft.value}},
+            controller.signal,
+          );
+          if (!mountedRef.current || controller.signal.aborted) return;
+          dispatch({
+            type: 'parameter/saveSucceeded',
+            index,
+            key,
+            sequence: draft.sequence,
+            payload,
+          });
+        } catch (error) {
+          if (!mountedRef.current || isAbortError(error, controller.signal)) return;
+          dispatch({
+            type: 'parameter/saveFailed',
+            index,
+            key,
+            sequence: draft.sequence,
+            error: normalizeError(error),
+          });
+        }
+      })
+      .finally(() => {
+        releaseController(controller);
+        pendingSaveCountRef.current = Math.max(0, pendingSaveCountRef.current - 1);
+        if (savingRef.current[draftKey] === draft.sequence) {
+          delete savingRef.current[draftKey];
+        }
       });
-    } catch (error) {
-      if (!mountedRef.current) return;
-      dispatch({
-        type: 'parameter/saveFailed',
-        index,
-        key,
-        sequence: draft.sequence,
-        error: normalizeError(error),
-      });
-    } finally {
-      if (
-        mountedRef.current
-        && savingRef.current[draftKey] === draft.sequence
-      ) {
-        delete savingRef.current[draftKey];
-      }
-    }
-  }, [api, dispatch]);
+    saveQueueRef.current = operation.catch(() => undefined);
+    return operation;
+  }, [api, createController, dispatch, releaseController]);
 
   const beginMutation = useCallback((operation: Exclude<ActiveMutation, null>): boolean => {
-    if (!mountedRef.current || mutationGateRef.current !== null) return false;
+    if (
+      !mountedRef.current
+      || mutationGateRef.current !== null
+      || pendingSaveCountRef.current > 0
+    ) {
+      return false;
+    }
+    cancelStandaloneTimeline();
     mutationGateRef.current = operation;
     dispatch({type: 'run/started', operation});
     return true;
-  }, [dispatch]);
+  }, [cancelStandaloneTimeline, dispatch]);
 
   const finishMutation = useCallback((operation: Exclude<ActiveMutation, null>) => {
     if (!mountedRef.current || mutationGateRef.current !== operation) return;
@@ -206,22 +255,34 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     fallbackStepIndex?: number,
   ): Promise<void> => {
     if (!beginMutation(operation)) return;
-    const controller = new AbortController();
+    const controller = createController();
     try {
       const payload = await request(controller.signal);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || controller.signal.aborted) return;
       dispatch({type: 'run/succeeded', payload, index: fallbackStepIndex});
       if (!mountedRef.current) return;
+      const timelineGeneration = ++timelineGenerationRef.current;
       try {
         const timeline = await api.getTimeline(controller.signal);
-        if (!mountedRef.current) return;
-        dispatch({type: 'timeline/loaded', payload: timeline});
+        if (
+          !mountedRef.current
+          || controller.signal.aborted
+          || timelineGeneration !== timelineGenerationRef.current
+        ) return;
+        const errorToClear = timelineErrorRef.current ?? undefined;
+        timelineErrorRef.current = null;
+        dispatch({type: 'timeline/loaded', payload: timeline, errorToClear});
       } catch (error) {
         if (!mountedRef.current) return;
-        dispatch({type: 'timeline/loadFailed', error: normalizeError(error)});
+        if (isAbortError(error, controller.signal)) return;
+        if (timelineGeneration !== timelineGenerationRef.current) return;
+        const normalized = normalizeError(error);
+        timelineErrorRef.current = normalized;
+        dispatch({type: 'timeline/loadFailed', error: normalized});
       }
     } catch (error) {
       if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
       const normalized = normalizeError(error);
       dispatch({
         type: 'run/failed',
@@ -229,9 +290,10 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
         error: normalized,
       });
     } finally {
+      releaseController(controller);
       finishMutation(operation);
     }
-  }, [api, beginMutation, dispatch, finishMutation]);
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   const runStep = useCallback((index = stateRef.current.selectedStepIndex ?? undefined) => {
     if (index === undefined) return Promise.resolve();
@@ -249,41 +311,76 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   );
 
   const loadTimeline = useCallback(async (): Promise<void> => {
-    if (!mountedRef.current) return;
-    const controller = new AbortController();
+    if (!mountedRef.current || mutationGateRef.current !== null) return;
+    const previous = standaloneTimelineControllerRef.current;
+    previous?.abort();
+    const generation = ++timelineGenerationRef.current;
+    const controller = createController();
+    standaloneTimelineControllerRef.current = controller;
     try {
       const payload = await api.getTimeline(controller.signal);
-      if (!mountedRef.current) return;
-      dispatch({type: 'timeline/loaded', payload});
+      if (
+        !mountedRef.current
+        || controller.signal.aborted
+        || standaloneTimelineControllerRef.current !== controller
+        || generation !== timelineGenerationRef.current
+      ) return;
+      const errorToClear = timelineErrorRef.current ?? undefined;
+      timelineErrorRef.current = null;
+      dispatch({type: 'timeline/loaded', payload, errorToClear});
     } catch (error) {
       if (!mountedRef.current) return;
-      dispatch({type: 'timeline/loadFailed', error: normalizeError(error)});
+      if (isAbortError(error, controller.signal)) return;
+      if (
+        standaloneTimelineControllerRef.current !== controller
+        || generation !== timelineGenerationRef.current
+      ) return;
+      const normalized = normalizeError(error);
+      timelineErrorRef.current = normalized;
+      dispatch({type: 'timeline/loadFailed', error: normalized});
+    } finally {
+      releaseController(controller);
+      if (standaloneTimelineControllerRef.current === controller) {
+        standaloneTimelineControllerRef.current = null;
+      }
     }
-  }, [api, dispatch]);
+  }, [api, createController, dispatch, releaseController]);
 
   const restoreTimeline = useCallback(async (index: number): Promise<void> => {
     const item = stateRef.current.timeline?.items.find(candidate => candidate.index === index);
     if (item?.snapshotValid !== true || !beginMutation('timeline')) return;
 
-    const controller = new AbortController();
+    const controller = createController();
     try {
       const payload = await api.restoreTimeline(index, controller.signal);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || controller.signal.aborted) return;
       dispatch({type: 'timeline/restoreSucceeded', payload});
     } catch (error) {
       if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
       dispatch({type: 'timeline/restoreFailed', error: normalizeError(error)});
     } finally {
+      releaseController(controller);
       finishMutation('timeline');
     }
-  }, [api, beginMutation, dispatch, finishMutation]);
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   useEffect(() => {
+    const lifecycleGeneration = ++lifecycleGenerationRef.current;
     mountedRef.current = true;
     stateRef.current = state;
     void bootstrap();
     return () => {
       mountedRef.current = false;
+      queueMicrotask(() => {
+        if (
+          mountedRef.current
+          || lifecycleGenerationRef.current !== lifecycleGeneration
+        ) return;
+        timelineGenerationRef.current += 1;
+        standaloneTimelineControllerRef.current = null;
+        for (const controller of activeControllersRef.current) controller.abort();
+      });
     };
   }, [bootstrap]);
 
