@@ -216,4 +216,55 @@ describe('TimelineBar', () => {
       expect.any(AbortSignal),
     ));
   });
+
+  it('无序重复 Timeline 使用首项语义且只渲染一个节点，导航跳过无效项', async () => {
+    const unordered: TimelineView = {
+      current: 1,
+      items: [
+        {index: 3, state: 'ready', runtimeStatus: 'ready', snapshotValid: true},
+        {index: 1, state: 'first-invalid', runtimeStatus: 'done', snapshotValid: false},
+        {index: 1, state: 'duplicate-valid', runtimeStatus: 'error', snapshotValid: true},
+        {index: 0, state: 'done', runtimeStatus: 'done', snapshotValid: true},
+      ],
+    };
+    const api = apiStub({getTimeline: vi.fn(async () => unordered)});
+    render(<App api={api} />);
+
+    const duplicate = await screen.findAllByRole('button', {name: '恢复步骤 2'});
+    expect(duplicate).toHaveLength(1);
+    expect(duplicate[0]).toBeDisabled();
+    expect(screen.getByText('#2 first-invalid').closest('li')).toHaveAttribute(
+      'aria-current',
+      'step',
+    );
+    expect(screen.getAllByRole('listitem').map(item => item.textContent?.slice(0, 2)))
+      .toEqual(['#1', '#2', '#4']);
+
+    fireEvent.click(screen.getByRole('button', {name: '上一个有效快照'}));
+    await waitFor(() => expect(api.restoreTimeline).toHaveBeenCalledWith(
+      0,
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it('current 不存在时按 -1 计算 Next，不保留伪 aria-current', async () => {
+    const missingCurrent: TimelineView = {
+      current: 8,
+      items: [
+        {index: 3, state: 'ready', runtimeStatus: 'ready', snapshotValid: true},
+        {index: 1, state: 'done', runtimeStatus: 'done', snapshotValid: false},
+      ],
+    };
+    const api = apiStub({getTimeline: vi.fn(async () => missingCurrent)});
+    render(<App api={api} />);
+    await screen.findByRole('button', {name: '恢复步骤 2'});
+
+    expect(screen.queryByRole('listitem', {current: 'step'})).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {name: '上一个有效快照'})).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', {name: '下一个有效快照'}));
+    await waitFor(() => expect(api.restoreTimeline).toHaveBeenCalledWith(
+      3,
+      expect.any(AbortSignal),
+    ));
+  });
 });
