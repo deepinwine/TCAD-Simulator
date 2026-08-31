@@ -1,7 +1,7 @@
 # M3 Viewer 完善设计说明
 
 - 日期：2026-08-31
-- 状态：待评审（实现按计划文档逐任务推进）
+- 状态：已实现（M3 交付于 `codex/m3-viewer`，详见 `docs/ROADMAP_PROCESS_CAD.md`）
 - 目标里程碑：M3 — Three.js Viewer (React)
 - 基线提交：`8b2d4c0`（backup/main，M2 已合并）
 

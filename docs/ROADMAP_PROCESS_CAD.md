@@ -46,10 +46,18 @@ mesh viewer. Parallel client only; legacy WebUI untouched (ADR-012). React consu
 (existing WebUI HTTP endpoints, additive-only) — this is how M2 could start before the
 M4 facade exists. Delivered on `codex/m2-react-shell` (see Current Branch State).
 
-## M3 — Three.js Viewer (React)
+## M3 — Three.js Viewer (React) ✅（已交付）
 
-Mesh load, orbit/pan/zoom, six views + ISO, perspective/orthographic, X/Y/Z clipping,
-material visibility/transparency, selection, measurement visualization.
+Mesh load, orbit/pan/zoom, six views + ISO (delivered with M2); then completed in
+M3 on `codex/m3-viewer`: perspective/orthographic projection toggle (equivalent
+view-size switch, no visual jump), X/Y/Z independent clipping planes
+(normalized sliders mapped to world coordinates), material visibility/opacity
+control (from manifest `visual` data, browser-local only), mesh picking with hit
+info + highlight, and two-point distance measurement with markers/line/readout.
+Plus: run network-failure reconciliation — a one-click 重新同步 that refetches the
+server-authoritative timeline and forces a viewer geometry refresh (closes the
+M2 known limitation observed during acceptance). All M3 capabilities issue zero
+API requests.
 
 ## M4 — Python API Facade
 
@@ -105,18 +113,18 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-31, M2 merged to backup/main)
+## Current Branch State (2026-08-31, M3 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
-| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1/M2 实现 |
-| `backup/main`（deepinwine） | `d293d34` | **M2 已由所有者授权快进合并**（M1 `063838a` + M2 28 提交，2026-08-31） |
-| 本地 `main` | `d293d34` | 与 `backup/main` 一致 |
-| `codex/m2-react-shell` | `d293d34` | M2 交付分支，已全部包含于 `main`（保留作历史） |
+| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1/M2/M3 实现 |
+| `backup/main`（deepinwine） | `8b2d4c0` | **M2 已合并**（`d293d34` + 治理文档 `546b70f`/`8b2d4c0`） |
+| 本地 `main` | `8b2d4c0` | 与 `backup/main` 一致 |
+| `codex/m3-viewer` | M3 交付分支（计划 + 5 个功能/修复提交 + 本文档提交） | 线性领先 `backup/main`，可快进合并 |
 
-祖先关系：`41a2fcd ⊂ 063838a ⊂ …M2 28 提交… ⊂ d293d34 ⊂ 546b70f`。**`origin`（FonaTech）
-是上游第三方仓库，不归本项目所有者——永远不做同步/推送（ADR-010/017）；`backup`
-（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开 fork PR #1，已立即关闭。
+祖先关系：`41a2fcd ⊂ 063838a ⊂ d293d34 ⊂ 546b70f ⊂ 8b2d4c0 ⊂ …M3 提交…`。**`origin`
+（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送（ADR-010/017）；
+`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开 fork PR #1，已立即关闭。
 
-- Next: 开始 M3 Three.js Viewer 完善（正交相机、X/Y/Z 裁剪、材料显示控制、选择与测量）；
-  修复 run/all 长 POST 静默期连接中断的用户体验（进度流式或失败后状态对账）。
+- Next: M3 经所有者审查后合并 `backup/main` → 开始 M4 Python API Facade（冻结契约语义
+  之上的类型化 facade，向 FastAPI + Pydantic 演进）。

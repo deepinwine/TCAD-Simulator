@@ -131,7 +131,7 @@ Rules:
    React never parses them as JSON; `slice` is JSON with `data_b64`.
 4. Cookie/session model stays as-is; WebSocket additions are new endpoints, not changes.
 
-## Frontend Structure (delivered in M2)
+## Frontend Structure (delivered in M2, extended in M3)
 
 ```text
 frontend/
@@ -139,17 +139,19 @@ frontend/
 └── src/
     ├── App.tsx                 # bootstrap + composition（可注入 viewerRuntimeFactory 测试缝）
     ├── components/             # Toolbar, ProcessFlowPane, ParameterPanel, TimelineBar, ErrorNotice
-    ├── viewer/                 # ThreeViewer + fitCamera/meshLoader 纯函数 + viewerRuntime(Three.js)
+    ├── viewer/                 # ThreeViewer + fitCamera/clipping/picking/meshLoader 纯函数
+    │                           #   + MaterialPanel + viewerRuntime(Three.js)
     ├── api/                    # client(TcadApiError) + schemas + types（冻结契约的 TS 边界）
-    ├── state/                  # appReducer(纯) + AppStateContext(会话动作/变更 gate)
+    ├── state/                  # appReducer(纯) + AppStateContext(会话动作/变更 gate/网络失败对账)
     └── styles.css
 ```
 
 React is a parallel client against the existing backend; the legacy WebUI stays until
 React passes feature parity and regression tests (M5). Never delete the old WebUI early.
 The built bundle is served same-origin at `/studio/` by the Python WebUI (ADR-012);
-Three.js visualization is browser-local — camera/view operations never issue API
-requests, only `preview/manifest` + `preview/stl` on model revision changes.
+Three.js visualization is browser-local — camera/projection/clipping/material/pick/measure
+operations never issue API requests, only `preview/manifest` + `preview/stl` on model
+revision changes.
 
 ## Migration Strategy — Strangler, Never Big Bang
 
@@ -160,9 +162,10 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
 2. **M2** React/TS/Vite shell as a parallel frontend (`frontend/`) — delivered: dense
    three-pane shell, frozen-API typed client, run/timeline integration, minimal real
    mesh load + orbit/pan/zoom in the Three.js viewer.
-3. **M3** Three.js viewer completion inside React (perspective/orthographic, X/Y/Z
-   clipping, material display control, selection, measurement; six views + ISO and
-   orbit/pan/zoom already delivered in M2).
+3. **M3** Three.js viewer completion inside React — delivered: perspective/orthographic
+   toggle, X/Y/Z clipping planes, material visibility/opacity control, mesh picking
+   with hit info, two-point distance measurement, and run network-failure
+   reconciliation (one-click resync to server-authoritative timeline).
 4. **M4** Stable Python API facade around the existing runtime; then standardize toward
    FastAPI + Pydantic (compatibility API first, strangler-style).
 5. **M5** React reaches parity → legacy WebUI deprecated (not before).

@@ -503,14 +503,26 @@ Some regression selftests require local fixtures such as `SAQP_Thinking_Flow.jso
 
 部分 regression selftest 需要本地 fixture。缺少这些 fixture 时测试失败，不一定表示 simulator 无法运行。
 
-### React Studio (M2 parallel client)
+### React Studio (M2 + M3 parallel client)
 
-The M2 React + TypeScript + Vite client lives in `frontend/` and talks to the same
+The React + TypeScript + Vite client lives in `frontend/` and talks to the same
 WebUI backend through the frozen M2 Compatibility API. The legacy WebUI at `/` is
 unchanged; the React client is served same-origin at `/studio/`.
 
-M2 的 React + TypeScript + Vite 客户端位于 `frontend/`，通过冻结的 M2 Compatibility API
+The 3D viewer (M3) supports perspective/orthographic projection toggle, X/Y/Z
+clipping planes with per-axis sliders, per-material visibility/opacity control,
+mesh picking with hit info, and two-point distance measurement — all
+browser-local (camera/clip/material/pick operations issue zero API requests).
+After a run fails with a network error, a one-click 重新同步 reconciles the UI
+with the server-authoritative timeline (the server may have finished the run).
+
+React + TypeScript + Vite 客户端位于 `frontend/`，通过冻结的 M2 Compatibility API
 访问同一个 WebUI 后端。旧 WebUI（`/`）保持不变；React 客户端在同源路径 `/studio/` 提供。
+
+3D 查看器（M3）支持透视/正交投影切换、X/Y/Z 独立裁剪平面（逐轴滑杆）、材料级
+可见性/透明度控制、网格点选信息与两点距离测量——全部为浏览器本地能力（相机、
+裁剪、材料、拾取操作不产生任何 API 请求）。运行因网络错误失败后，一键
+「重新同步」即可按服务端权威 timeline 对账（服务端可能已完成运行）。
 
 ```bash
 # 后端（无桌面环境的无头启动；WebUI 以守护线程提供，进程需保持运行。
