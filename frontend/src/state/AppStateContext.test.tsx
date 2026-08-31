@@ -344,6 +344,57 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     expect(captured?.state.activeMutation).toBeNull();
   });
 
+  it('服务端返回当前 recipe 中的步骤索引时精确映射步骤错误', async () => {
+    const error = new TcadApiError('步骤 1 失败', {
+      status: 400,
+      details: {stepIndex: 0},
+    });
+    const api = apiStub({runTo: vi.fn(async () => { throw error; })});
+    mount(api);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.runTo(1));
+
+    expect(captured?.state.stepErrors[0]).toBe(error);
+    expect(captured?.state.globalError).toBeNull();
+  });
+
+  it('服务端返回 recipe 外步骤索引时显示全局错误且不回退请求步骤', async () => {
+    const error = new TcadApiError('未知步骤失败', {
+      status: 400,
+      details: {stepIndex: 99},
+    });
+    const api = apiStub({runStep: vi.fn(async () => { throw error; })});
+    mount(api);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.runStep(1));
+
+    expect(captured?.state.stepErrors).toEqual({});
+    expect(captured?.state.globalError).toBe(error);
+  });
+
+  it('服务端缺失步骤索引时只有 runStep 回退到请求步骤', async () => {
+    const stepError = new TcadApiError('单步失败', {status: 400});
+    const stepApi = apiStub({runStep: vi.fn(async () => { throw stepError; })});
+    const first = mount(stepApi);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.runStep(1));
+    expect(captured?.state.stepErrors[1]).toBe(stepError);
+    expect(captured?.state.globalError).toBeNull();
+    first.unmount();
+
+    const toError = new TcadApiError('运行至目标失败', {status: 400});
+    const toApi = apiStub({runTo: vi.fn(async () => { throw toError; })});
+    mount(toApi);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.runTo(1));
+    expect(captured?.state.stepErrors).toEqual({});
+    expect(captured?.state.globalError).toBe(toError);
+  });
+
   it('同字段新版保存排在旧版之后，网络请求严格串行且最终采用新版', async () => {
     const oldSave = deferred<SetStepView>();
     const newSave = deferred<SetStepView>();
@@ -500,6 +551,28 @@ describe('AppStateProvider mutation gate 与顺序', () => {
 });
 
 describe('AppStateProvider Timeline 与生命周期', () => {
+  it('历史恢复失败时继续显示原历史步骤', async () => {
+    const restoreTimeline = vi.fn()
+      .mockResolvedValueOnce({
+        timeline: {...timeline, current: 0},
+        model: initView.model,
+        recipe: initView.recipe,
+        log: [],
+      } satisfies TimelineRestoreView)
+      .mockRejectedValueOnce(new TcadApiError('恢复失败', {status: 409}));
+    const api = apiStub({restoreTimeline});
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(captured?.state.historicalStepIndex).toBe(0);
+
+    await act(async () => captured!.actions.restoreTimeline(0));
+
+    expect(captured?.state.historicalStepIndex).toBe(0);
+    expect(captured?.state.globalError?.message).toBe('恢复失败');
+  });
+
   it('只恢复 snapshotValid 节点，且不调用任何 run API', async () => {
     const restored: TimelineRestoreView = {
       timeline: {...timeline, current: 0},
