@@ -1,13 +1,288 @@
-import type {StepView} from '../api/types';
-import {summarizeParams} from './ProcessFlowPane';
+import {type KeyboardEvent, useEffect, useMemo, useRef, useState} from 'react';
+import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/types';
+import {parameterDraftKey} from '../state/appReducer';
+import {useAppState} from '../state/AppStateContext';
 import {StatusBadge} from './StatusBadge';
+import {validateParameter} from './parameterValidation';
 
 interface ParameterPanelProps {
   step: StepView | null;
   collapsed: boolean;
 }
 
+interface ParameterFieldProps {
+  stepIndex: number;
+  spec: ParameterSpecView;
+  serverValue: unknown;
+  disabled: boolean;
+  serverErrorId?: string;
+}
+
+type DisplayValue = string | boolean;
+
+interface ParameterControlProps {
+  spec: ParameterSpecView;
+  inputId: string;
+  displayValue: DisplayValue;
+  disabled: boolean;
+  hasError: boolean;
+  describedBy?: string;
+  onUpdate(raw: unknown, display: DisplayValue): void;
+  onFlush(): void;
+}
+
+function safeText(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized ?? '';
+  } catch {
+    return '无法显示的复杂值';
+  }
+}
+
+function isChoice(spec: ParameterSpecView): boolean {
+  return spec.type === 'choice' || spec.type === 'enum';
+}
+
+function isBoolean(spec: ParameterSpecView): boolean {
+  return spec.type === 'bool' || spec.type === 'boolean';
+}
+
+function choiceIndex(
+  choices: readonly (readonly [ParameterChoiceValue, string])[] | undefined,
+  value: unknown,
+): string {
+  const index = choices?.findIndex(([candidate]) => Object.is(candidate, value)) ?? -1;
+  return index < 0 ? '' : String(index);
+}
+
+function initialDisplayValue(spec: ParameterSpecView, value: unknown): DisplayValue {
+  if (isChoice(spec)) return choiceIndex(spec.choices, value);
+  if (isBoolean(spec)) return value === true || value === 'true' || value === '1';
+  return safeText(value);
+}
+
+function parameterDescription(spec: ParameterSpecView): string {
+  const parts: string[] = [];
+  if (spec.tooltip) parts.push(spec.tooltip);
+  if (spec.minimum !== undefined || spec.maximum !== undefined) {
+    const minimum = spec.minimum === undefined ? '不限' : String(spec.minimum);
+    const maximum = spec.maximum === undefined ? '不限' : String(spec.maximum);
+    parts.push(`范围 ${minimum} 至 ${maximum}`);
+  }
+  if (spec.step !== undefined) parts.push(`步进 ${spec.step}`);
+  if (spec.decimals !== undefined) parts.push(`显示精度 ${spec.decimals} 位小数`);
+  return parts.join('；');
+}
+
+function ParameterControl({
+  spec,
+  inputId,
+  displayValue,
+  disabled,
+  hasError,
+  describedBy,
+  onUpdate,
+  onFlush,
+}: ParameterControlProps) {
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    onFlush();
+  };
+
+  const accessibility = {
+    disabled,
+    'aria-invalid': hasError,
+    'aria-describedby': describedBy,
+  };
+
+  if (isChoice(spec)) {
+    return (
+      <select
+        id={inputId}
+        value={typeof displayValue === 'string' ? displayValue : ''}
+        {...accessibility}
+        onChange={event => {
+          const selectedIndex = Number(event.currentTarget.value);
+          const value = spec.choices?.[selectedIndex]?.[0];
+          onUpdate(value, event.currentTarget.value);
+        }}
+        onBlur={onFlush}
+      >
+        <option value="" disabled>请选择</option>
+        {spec.choices?.map(([value, label], index) => (
+          <option key={index} value={String(index)}>{label || safeText(value)}</option>
+        ))}
+      </select>
+    );
+  }
+
+  if (isBoolean(spec)) {
+    return (
+      <input
+        id={inputId}
+        type="checkbox"
+        checked={displayValue === true}
+        {...accessibility}
+        onChange={event => onUpdate(event.currentTarget.checked, event.currentTarget.checked)}
+        onBlur={onFlush}
+      />
+    );
+  }
+
+  if (spec.type === 'text' || spec.type === 'string') {
+    return (
+      <textarea
+        id={inputId}
+        value={typeof displayValue === 'string' ? displayValue : ''}
+        {...accessibility}
+        title={spec.tooltip}
+        onChange={event => onUpdate(event.currentTarget.value, event.currentTarget.value)}
+        onBlur={onFlush}
+        onKeyDown={handleKeyDown}
+      />
+    );
+  }
+
+  const numeric = spec.type === 'float' || spec.type === 'int' || spec.type === 'integer';
+  return (
+    <input
+      id={inputId}
+      type="text"
+      inputMode={numeric ? 'decimal' : 'text'}
+      value={typeof displayValue === 'string' ? displayValue : ''}
+      {...accessibility}
+      title={spec.tooltip}
+      onChange={event => onUpdate(event.currentTarget.value, event.currentTarget.value)}
+      onBlur={onFlush}
+      onKeyDown={handleKeyDown}
+    />
+  );
+}
+
+function ParameterField({
+  stepIndex,
+  spec,
+  serverValue,
+  disabled,
+  serverErrorId,
+}: ParameterFieldProps) {
+  const {state, actions} = useAppState();
+  const key = parameterDraftKey(stepIndex, spec.key);
+  const draft = state.drafts[key];
+  const inputId = `parameter-${stepIndex}-${spec.key}`;
+  const descriptionId = `${inputId}-description`;
+  const validationId = `${inputId}-validation`;
+  const initialValue = serverValue === undefined ? spec.defaultValue : serverValue;
+  const [displayValue, setDisplayValue] = useState<DisplayValue>(
+    () => initialDisplayValue(spec, initialValue),
+  );
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const validDraftRef = useRef(false);
+  const description = parameterDescription(spec);
+  const clientError = draft?.validation.status === 'invalid'
+    ? draft.validation.message ?? '参数值无效'
+    : undefined;
+  const hasError = clientError !== undefined || serverErrorId !== undefined;
+  const describedBy = [
+    description ? descriptionId : undefined,
+    clientError ? validationId : undefined,
+    serverErrorId,
+  ].filter((value): value is string => value !== undefined).join(' ') || undefined;
+
+  const clearTimer = () => {
+    if (timerRef.current === null) return;
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+  };
+
+  useEffect(() => {
+    if (draft !== undefined) return;
+    setDisplayValue(initialDisplayValue(spec, initialValue));
+    validDraftRef.current = false;
+  }, [draft, initialValue, spec]);
+
+  useEffect(() => {
+    if (disabled) clearTimer();
+  }, [disabled]);
+
+  useEffect(() => () => clearTimer(), []);
+
+  const update = (raw: unknown, display: DisplayValue) => {
+    if (disabled) return;
+    clearTimer();
+    setDisplayValue(display);
+    const validation = validateParameter(spec, raw);
+    validDraftRef.current = validation.ok;
+    if (!validation.ok) {
+      actions.updateDraft(stepIndex, spec.key, raw, {
+        status: 'invalid',
+        message: validation.message,
+      });
+      return;
+    }
+    actions.updateDraft(stepIndex, spec.key, validation.value, {status: 'valid'});
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      void actions.saveParameter(stepIndex, spec.key);
+    }, 350);
+  };
+
+  const flush = () => {
+    clearTimer();
+    if (!disabled && validDraftRef.current) {
+      void actions.saveParameter(stepIndex, spec.key);
+    }
+  };
+
+  return (
+    <div className={`parameter-field${hasError ? ' has-error' : ''}`}>
+      <div className="parameter-label-row">
+        <label htmlFor={inputId}>{spec.label || spec.key}</label>
+        {spec.units && <span className="parameter-units">{spec.units}</span>}
+      </div>
+      <ParameterControl
+        spec={spec}
+        inputId={inputId}
+        displayValue={displayValue}
+        disabled={disabled}
+        hasError={hasError}
+        describedBy={describedBy}
+        onUpdate={update}
+        onFlush={flush}
+      />
+      {description && <p id={descriptionId} className="parameter-help">{description}</p>}
+      {clientError && <p id={validationId} className="parameter-error">{clientError}</p>}
+    </div>
+  );
+}
+
+function pathMatchesKey(path: string | undefined, key: string): boolean {
+  if (path === undefined) return false;
+  const segments = path.match(/[^.[\]]+/g) ?? [];
+  return segments.at(-1) === key;
+}
+
 export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
+  const {state} = useAppState();
+  const disabled = state.phase === 'running' || state.activeMutation !== null;
+  const serverError = step === null ? undefined : state.stepErrors[step.index];
+  const matchedErrorKey = useMemo(
+    () => step?.parameterSpecs.find(spec => pathMatchesKey(serverError?.parameterPath, spec.key))?.key,
+    [serverError?.parameterPath, step],
+  );
+  const serverErrorId = step === null || serverError === undefined
+    ? undefined
+    : matchedErrorKey === undefined
+      ? `parameter-server-error-${step.index}`
+      : `parameter-server-error-${step.index}-${matchedErrorKey}`;
+
   return (
     <section
       id="parameter-panel"
@@ -33,21 +308,34 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
-          <dl className="summary-grid">
-            <div>
-              <dt>参数规格</dt>
-              <dd>{step.parameterSpecs.length}</dd>
+          {serverError !== undefined && (
+            <div id={serverErrorId} className="parameter-server-error" role="alert">
+              <strong>{serverError.message}</strong>
+              {serverError.parameterPath && <span>参数路径：{serverError.parameterPath}</span>}
+              {serverError.suggestion && <span>建议：{serverError.suggestion}</span>}
             </div>
-            <div>
-              <dt>已配置参数</dt>
-              <dd>{Object.keys(step.params).length}</dd>
-            </div>
-          </dl>
-          <div className="summary-block">
-            <span>参数摘要</span>
-            <p>{summarizeParams(step.params)}</p>
-          </div>
-          <p className="placeholder-note">参数编辑将在下一阶段启用。</p>
+          )}
+          {step.parameterSpecs.length === 0 ? (
+            <p className="pane-empty">此步骤没有可编辑参数</p>
+          ) : (
+            <form className="parameter-form" onSubmit={event => event.preventDefault()}>
+              {step.parameterSpecs.map(spec => {
+                const serverValue = Object.hasOwn(step.params, spec.key)
+                  ? step.params[spec.key]
+                  : spec.defaultValue;
+                return (
+                  <ParameterField
+                    key={`${step.index}:${spec.key}`}
+                    stepIndex={step.index}
+                    spec={spec}
+                    serverValue={serverValue}
+                    disabled={disabled}
+                    serverErrorId={matchedErrorKey === spec.key ? serverErrorId : undefined}
+                  />
+                );
+              })}
+            </form>
+          )}
         </div>
       )}
     </section>

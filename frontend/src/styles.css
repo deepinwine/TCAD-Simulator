@@ -411,6 +411,102 @@ button:focus-visible,
   margin: 10px 0 0;
 }
 
+.parameter-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.parameter-field {
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid #263444;
+  border-radius: 5px;
+  background: #101925;
+}
+
+.parameter-field.has-error {
+  border-color: #7e3c49;
+}
+
+.parameter-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: #cbd8e5;
+  font-size: 10px;
+}
+
+.parameter-units {
+  color: #7890a8;
+  font: 9px/1.2 ui-monospace, monospace;
+}
+
+.parameter-field input[type="text"],
+.parameter-field select,
+.parameter-field textarea {
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 1px solid #34485d;
+  border-radius: 4px;
+  color: #dce7f2;
+  background: #0b121b;
+}
+
+.parameter-field textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+
+.parameter-field input:focus-visible,
+.parameter-field select:focus-visible,
+.parameter-field textarea:focus-visible {
+  outline: 2px solid #56b5ff;
+  outline-offset: 1px;
+}
+
+.parameter-field input:disabled,
+.parameter-field select:disabled,
+.parameter-field textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.parameter-help,
+.parameter-error {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.parameter-help {
+  color: #748ba2;
+}
+
+.parameter-error {
+  color: #f2a6ae;
+}
+
+.parameter-server-error {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid #703643;
+  border-radius: 5px;
+  color: #d7aeb4;
+  background: #25141a;
+  font-size: 9px;
+}
+
+.parameter-server-error strong {
+  color: #ffd5d9;
+  font-size: 10px;
+}
+
 .pane-empty {
   margin: auto;
   padding: 24px;
