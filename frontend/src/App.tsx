@@ -53,10 +53,20 @@ function StudioShell() {
   return (
     <main className="studio-shell">
       <Toolbar
-        phase={state.phase}
         parametersCollapsed={parametersCollapsed}
         onToggleParameters={() => setParametersCollapsed(value => !value)}
       />
+      {state.globalError !== null && state.globalError !== state.timelineError && (
+        <div className="global-error-strip">
+          <ErrorNotice
+            title="操作失败"
+            message={state.globalError.message}
+            parameterPath={state.globalError.parameterPath}
+            suggestion={state.globalError.suggestion}
+            rolledBack={state.globalError.rolledBack}
+          />
+        </div>
+      )}
       <div className={workspaceClass}>
         <ProcessFlowPane
           recipe={state.recipe}
@@ -66,7 +76,7 @@ function StudioShell() {
         <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} />
         <ThreeViewer refreshToken={state.previewGeneration} />
       </div>
-      <TimelineBar timeline={state.timeline} />
+      <TimelineBar />
     </main>
   );
 }

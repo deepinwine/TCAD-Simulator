@@ -3,6 +3,7 @@ import type {TcadApiError} from '../api/client';
 import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/types';
 import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
+import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
 
@@ -313,6 +314,7 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
       id="parameter-panel"
       className="workspace-pane parameter-pane"
       aria-label="Parameters"
+      aria-busy={disabled}
       hidden={collapsed}
     >
       <header className="pane-header">
@@ -334,11 +336,13 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
             <StatusBadge status={step.runtimeStatus} />
           </div>
           {runError !== undefined && (
-            <div className="parameter-server-error" role="alert">
-              <strong>{runError.message}</strong>
-              {runError.parameterPath && <span>参数路径：{runError.parameterPath}</span>}
-              {runError.suggestion && <span>建议：{runError.suggestion}</span>}
-            </div>
+            <ErrorNotice
+              title="步骤执行失败"
+              message={runError.message}
+              parameterPath={runError.parameterPath}
+              suggestion={runError.suggestion}
+              rolledBack={runError.rolledBack}
+            />
           )}
           {step.parameterSpecs.length === 0 ? (
             <p className="pane-empty">此步骤没有可编辑参数</p>

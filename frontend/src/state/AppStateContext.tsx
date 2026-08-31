@@ -93,6 +93,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const pendingSaveCountRef = useRef(0);
   const timelineGenerationRef = useRef(0);
   const standaloneTimelineControllerRef = useRef<AbortController | null>(null);
+  const standaloneTimelinePromiseRef = useRef<Promise<void> | null>(null);
+  const standaloneTimelineDedupeRef = useRef(false);
   const timelineErrorRef = useRef<TcadApiError | null>(null);
   const activeControllersRef = useRef(new Set<AbortController>());
   const lifecycleGenerationRef = useRef(0);
@@ -117,8 +119,13 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     timelineGenerationRef.current += 1;
     const controller = standaloneTimelineControllerRef.current;
     standaloneTimelineControllerRef.current = null;
+    standaloneTimelinePromiseRef.current = null;
+    standaloneTimelineDedupeRef.current = false;
     controller?.abort();
-  }, []);
+    if (controller !== null && mountedRef.current) {
+      dispatch({type: 'timeline/loadCancelled'});
+    }
+  }, [dispatch]);
 
   const bootstrap = useCallback((): Promise<void> => {
     if (bootstrapCompletedRef.current) return Promise.resolve();
@@ -315,40 +322,61 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     [api, runMutation],
   );
 
-  const loadTimeline = useCallback(async (): Promise<void> => {
-    if (!mountedRef.current || mutationGateRef.current !== null) return;
+  const loadTimeline = useCallback((): Promise<void> => {
+    if (!mountedRef.current || mutationGateRef.current !== null) return Promise.resolve();
+    if (
+      standaloneTimelinePromiseRef.current !== null
+      && standaloneTimelineDedupeRef.current
+    ) {
+      return standaloneTimelinePromiseRef.current;
+    }
     const previous = standaloneTimelineControllerRef.current;
-    previous?.abort();
+    if (previous !== null) {
+      timelineGenerationRef.current += 1;
+      previous.abort();
+    }
     const generation = ++timelineGenerationRef.current;
     const controller = createController();
     standaloneTimelineControllerRef.current = controller;
-    try {
-      const payload = await api.getTimeline(controller.signal);
-      if (
-        !mountedRef.current
-        || controller.signal.aborted
-        || standaloneTimelineControllerRef.current !== controller
-        || generation !== timelineGenerationRef.current
-      ) return;
-      const errorToClear = timelineErrorRef.current ?? undefined;
-      timelineErrorRef.current = null;
-      dispatch({type: 'timeline/loaded', payload, errorToClear});
-    } catch (error) {
-      if (!mountedRef.current) return;
-      if (isAbortError(error, controller.signal)) return;
-      if (
-        standaloneTimelineControllerRef.current !== controller
-        || generation !== timelineGenerationRef.current
-      ) return;
-      const normalized = normalizeError(error);
-      timelineErrorRef.current = normalized;
-      dispatch({type: 'timeline/loadFailed', error: normalized});
-    } finally {
-      releaseController(controller);
+    standaloneTimelineDedupeRef.current = true;
+    queueMicrotask(() => {
       if (standaloneTimelineControllerRef.current === controller) {
-        standaloneTimelineControllerRef.current = null;
+        standaloneTimelineDedupeRef.current = false;
       }
-    }
+    });
+    dispatch({type: 'timeline/loadStarted'});
+    const operation = (async () => {
+      try {
+        const payload = await api.getTimeline(controller.signal);
+        if (
+          !mountedRef.current
+          || controller.signal.aborted
+          || standaloneTimelineControllerRef.current !== controller
+          || generation !== timelineGenerationRef.current
+        ) return;
+        const errorToClear = timelineErrorRef.current ?? undefined;
+        timelineErrorRef.current = null;
+        dispatch({type: 'timeline/loaded', payload, errorToClear});
+      } catch (error) {
+        if (!mountedRef.current) return;
+        if (isAbortError(error, controller.signal)) return;
+        if (
+          standaloneTimelineControllerRef.current !== controller
+          || generation !== timelineGenerationRef.current
+        ) return;
+        const normalized = normalizeError(error);
+        timelineErrorRef.current = normalized;
+        dispatch({type: 'timeline/loadFailed', error: normalized});
+      } finally {
+        releaseController(controller);
+        if (standaloneTimelineControllerRef.current === controller) {
+          standaloneTimelineControllerRef.current = null;
+          standaloneTimelinePromiseRef.current = null;
+        }
+      }
+    })();
+    standaloneTimelinePromiseRef.current = operation;
+    return operation;
   }, [api, createController, dispatch, releaseController]);
 
   const restoreTimeline = useCallback(async (index: number): Promise<void> => {
@@ -384,6 +412,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
         ) return;
         timelineGenerationRef.current += 1;
         standaloneTimelineControllerRef.current = null;
+        standaloneTimelinePromiseRef.current = null;
+        standaloneTimelineDedupeRef.current = false;
         for (const controller of activeControllersRef.current) controller.abort();
       });
     };

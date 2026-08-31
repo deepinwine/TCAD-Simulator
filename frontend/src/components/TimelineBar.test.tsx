@@ -1,0 +1,219 @@
+import {fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {StrictMode} from 'react';
+import {describe, expect, it, vi} from 'vitest';
+import {App} from '../App';
+import {TcadApiError} from '../api/client';
+import type {
+  InitView,
+  RuntimeStatus,
+  StepView,
+  TcadApi,
+  TimelineRestoreView,
+  TimelineView,
+} from '../api/types';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return {promise, resolve};
+}
+
+function step(index: number, overrides: Partial<StepView> = {}): StepView {
+  return {
+    index,
+    name: `step-${index}`,
+    instanceName: `Step ${index + 1}`,
+    group: '',
+    loop: '',
+    enabled: true,
+    params: {},
+    parameterSpecs: [],
+    runtimeStatus: 'ready',
+    ...overrides,
+  };
+}
+
+const recipe = [step(0), step(1), step(2), step(3)];
+
+const initView: InitView = {
+  recipe,
+  model: {gridShape: [8, 8, 8], voxelSizeNm: 10},
+  factories: ['deposit'],
+  materials: [],
+  uiState: {},
+};
+
+const timeline: TimelineView = {
+  current: 1,
+  items: [
+    {index: 0, state: 'done', runtimeStatus: 'done', snapshotValid: true},
+    {index: 1, state: 'current', runtimeStatus: 'done', snapshotValid: false},
+    {index: 2, state: 'dirty', runtimeStatus: 'dirty', snapshotValid: false},
+    {index: 3, state: 'ready', runtimeStatus: 'ready', snapshotValid: true},
+  ],
+};
+
+function restored(index: number): TimelineRestoreView {
+  return {
+    timeline: {...timeline, current: index},
+    model: initView.model,
+    recipe,
+    log: ['restored'],
+  };
+}
+
+function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
+  return {
+    init: vi.fn(async () => initView),
+    setStep: vi.fn(async request => ({
+      step: recipe[request.index],
+      statuses: recipe.map(() => 'ready' as RuntimeStatus),
+      warnings: [],
+    })),
+    runStep: vi.fn(async () => ({})),
+    runTo: vi.fn(async () => ({})),
+    runAll: vi.fn(async () => ({})),
+    getTimeline: vi.fn(async () => timeline),
+    restoreTimeline: vi.fn(async index => restored(index)),
+    getPreviewManifest: vi.fn(async () => ({revision: 1, meshes: []})),
+    getMaterialStl: vi.fn(async () => new ArrayBuffer(0)),
+    ...overrides,
+  };
+}
+
+describe('TimelineBar', () => {
+  it('ready 后在 StrictMode 中也只初始加载一次 Timeline', async () => {
+    const api = apiStub();
+    render(<StrictMode><App api={api} /></StrictMode>);
+
+    await screen.findByRole('button', {name: '恢复步骤 1'});
+    expect(api.getTimeline).toHaveBeenCalledTimes(1);
+  });
+
+  it('显示加载、失败与可访问 retry', async () => {
+    const getTimeline = vi.fn()
+      .mockRejectedValueOnce(new TcadApiError('Timeline 暂不可用', {status: 503}))
+      .mockResolvedValueOnce(timeline);
+    const api = apiStub({getTimeline});
+    render(<App api={api} />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Timeline 暂不可用');
+    fireEvent.click(screen.getByRole('button', {name: '重试 Timeline'}));
+
+    expect(await screen.findByRole('button', {name: '恢复步骤 1'})).toBeEnabled();
+    expect(getTimeline).toHaveBeenCalledTimes(2);
+  });
+
+  it('初始请求挂起时显示可访问 loading 状态', async () => {
+    const pending = deferred<TimelineView>();
+    const api = apiStub({getTimeline: vi.fn(() => pending.promise)});
+    render(<App api={api} />);
+
+    expect(await screen.findByText('正在加载 Timeline…')).toHaveAttribute('role', 'status');
+    expect(screen.getByRole('navigation', {name: 'Process Timeline'})).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+    pending.resolve(timeline);
+    await screen.findByRole('button', {name: '恢复步骤 1'});
+  });
+
+  it('只允许恢复有效快照，Previous 与 Next 跳过无效节点', async () => {
+    const api = apiStub();
+    render(<App api={api} />);
+
+    expect(await screen.findByRole('button', {name: '恢复步骤 1'})).toBeEnabled();
+    expect(screen.getByRole('button', {name: '恢复步骤 2'})).toBeDisabled();
+    expect(screen.getByRole('button', {name: '恢复步骤 3'})).toBeDisabled();
+    expect(screen.getByRole('button', {name: '恢复步骤 4'})).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', {name: '上一个有效快照'}));
+    await waitFor(() => expect(api.restoreTimeline).toHaveBeenCalledWith(
+      0,
+      expect.any(AbortSignal),
+    ));
+    expect(api.runStep).not.toHaveBeenCalled();
+    expect(api.runTo).not.toHaveBeenCalled();
+    expect(api.runAll).not.toHaveBeenCalled();
+  });
+
+  it('Next 跳过无效节点，成功后显示历史快照并刷新 Viewer', async () => {
+    const api = apiStub();
+    render(<App api={api} />);
+    await screen.findByRole('button', {name: '恢复步骤 4'});
+    expect(screen.getByRole('region', {name: '3D Viewer'})).toHaveAttribute(
+      'data-refresh-token',
+      '1',
+    );
+
+    fireEvent.click(screen.getByRole('button', {name: '下一个有效快照'}));
+
+    await waitFor(() => expect(api.restoreTimeline).toHaveBeenCalledWith(
+      3,
+      expect.any(AbortSignal),
+    ));
+    expect(await screen.findByText('历史快照 Step 4')).toBeVisible();
+    expect(screen.getByRole('region', {name: '3D Viewer'})).toHaveAttribute(
+      'data-refresh-token',
+      '2',
+    );
+  });
+
+  it('restore 同步 gate 防止双击并禁用全部恢复操作', async () => {
+    const pending = deferred<TimelineRestoreView>();
+    const restoreTimeline = vi.fn(() => pending.promise);
+    const api = apiStub({restoreTimeline});
+    render(<App api={api} />);
+    const restore = await screen.findByRole('button', {name: '恢复步骤 1'});
+
+    fireEvent.click(restore);
+    fireEvent.click(restore);
+
+    await waitFor(() => expect(restoreTimeline).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', {name: '恢复步骤 4'})).toBeDisabled();
+    expect(screen.getByRole('button', {name: '上一个有效快照'})).toBeDisabled();
+    pending.resolve(restored(0));
+    await screen.findByText('历史快照 Step 1');
+  });
+
+  it('restore 失败保持当前位置与最后成功几何，并可见结构化错误', async () => {
+    const api = apiStub({
+      restoreTimeline: vi.fn(async () => {
+        throw new TcadApiError('快照恢复失败', {
+          status: 409,
+          suggestion: '请选择其他有效快照',
+          rolledBack: false,
+        });
+      }),
+    });
+    render(<App api={api} />);
+    await screen.findByRole('button', {name: '恢复步骤 1'});
+    const viewer = screen.getByRole('region', {name: '3D Viewer'});
+
+    fireEvent.click(screen.getByRole('button', {name: '恢复步骤 1'}));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('快照恢复失败');
+    expect(alert).toHaveTextContent('请选择其他有效快照');
+    expect(screen.getByText('#2 current').closest('li')).toHaveAttribute('aria-current', 'step');
+    expect(viewer).toHaveAttribute('data-refresh-token', '1');
+  });
+
+  it('current=-1 时 Previous 安全禁用，Next 指向第一个有效节点', async () => {
+    const noCurrent = {...timeline, current: -1};
+    const api = apiStub({getTimeline: vi.fn(async () => noCurrent)});
+    render(<App api={api} />);
+    await screen.findByRole('button', {name: '恢复步骤 1'});
+
+    expect(screen.getByRole('button', {name: '上一个有效快照'})).toBeDisabled();
+    expect(screen.getByRole('button', {name: '下一个有效快照'})).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', {name: '下一个有效快照'}));
+    await waitFor(() => expect(api.restoreTimeline).toHaveBeenCalledWith(
+      0,
+      expect.any(AbortSignal),
+    ));
+  });
+});

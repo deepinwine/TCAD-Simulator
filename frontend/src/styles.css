@@ -60,6 +60,7 @@ button:focus-visible,
 }
 
 .studio-shell {
+  position: relative;
   display: grid;
   grid-template-rows: 56px minmax(0, 1fr) 92px;
   width: 100vw;
@@ -80,6 +81,7 @@ button:focus-visible,
 }
 
 .product-lockup,
+.toolbar-run-group,
 .toolbar-actions,
 .step-heading-row,
 .selected-step-heading {
@@ -127,6 +129,26 @@ button:focus-visible,
 .toolbar-actions {
   min-width: 0;
   gap: 10px;
+}
+
+.toolbar-run-group {
+  min-width: 0;
+  gap: 6px;
+}
+
+.toolbar-run-group .run-button {
+  white-space: nowrap;
+}
+
+.toolbar-run-group .is-primary {
+  border-color: #397ca8;
+  background: #17344a;
+}
+
+.toolbar-gate-copy {
+  color: #f0ba69;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .connection-state,
@@ -191,6 +213,26 @@ button:focus-visible,
 .error-notice button:hover {
   border-color: #4b8fbe;
   background: #1d3042;
+}
+
+.toolbar-button:disabled,
+.timeline-nav-button:disabled,
+.timeline-restore-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.global-error-strip {
+  position: absolute;
+  z-index: 5;
+  top: 64px;
+  right: 14px;
+  width: min(420px, calc(100vw - 28px));
+}
+
+.global-error-strip .error-notice {
+  max-width: none;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 38%);
 }
 
 .studio-workspace {
@@ -575,6 +617,13 @@ button:focus-visible,
   border-right: 1px solid #293644;
 }
 
+.timeline-history-state {
+  margin-top: 5px;
+  color: #7fd0ff;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .timeline-heading strong {
   margin-top: 3px;
   font-size: 11px;
@@ -583,6 +632,37 @@ button:focus-visible,
 .timeline-empty {
   align-self: center;
   margin: 0;
+}
+
+.timeline-navigation {
+  display: grid;
+  width: 116px;
+  flex: 0 0 auto;
+  gap: 5px;
+  align-content: center;
+}
+
+.timeline-nav-button,
+.timeline-restore-button {
+  border: 1px solid #2e4052;
+  border-radius: 4px;
+  color: #b9cadb;
+  background: #111b27;
+  cursor: pointer;
+}
+
+.timeline-nav-button {
+  min-height: 27px;
+  padding: 4px 6px;
+  font-size: 8px;
+}
+
+.timeline-content {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: stretch;
+  overflow: hidden;
 }
 
 .timeline-items {
@@ -596,19 +676,31 @@ button:focus-visible,
 }
 
 .timeline-item {
-  display: grid;
   min-width: 135px;
-  gap: 4px;
-  padding: 7px 9px;
   border: 1px solid #263545;
   border-radius: 5px;
-  color: #8498ac;
   background: #111b27;
-  font-size: 9px;
 }
 
 .timeline-item.is-current {
   border-color: #397ca8;
+  color: #bfcee0;
+  background: #142638;
+}
+
+.timeline-restore-button {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 0;
+  color: #8498ac;
+  text-align: left;
+  font-size: 9px;
+}
+
+.timeline-item.is-current .timeline-restore-button {
   color: #bfcee0;
   background: #142638;
 }
@@ -648,11 +740,28 @@ button:focus-visible,
   font-size: 11px;
 }
 
+.error-notice .rollback-warning {
+  color: #ff9ca6;
+  font-weight: 700;
+}
+
+.error-notice .rollback-confirmation {
+  color: #9dddb9;
+}
+
 .error-notice button {
   padding: 0 12px;
 }
 
 @media (max-width: 1100px) {
+  .toolbar-run-group {
+    overflow-x: auto;
+  }
+
+  .toolbar-gate-copy,
+  .connection-state {
+    display: none;
+  }
   .studio-workspace,
   .studio-workspace.parameters-collapsed {
     grid-template-columns: minmax(240px, 34%) minmax(0, 1fr);

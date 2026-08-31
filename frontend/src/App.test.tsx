@@ -87,7 +87,7 @@ describe('App shell', () => {
     expect(api.runStep).not.toHaveBeenCalled();
     expect(api.runTo).not.toHaveBeenCalled();
     expect(api.runAll).not.toHaveBeenCalled();
-    expect(api.getTimeline).not.toHaveBeenCalled();
+    expect(api.getTimeline).toHaveBeenCalledTimes(1);
     expect(api.restoreTimeline).not.toHaveBeenCalled();
     expect(api.getPreviewManifest).not.toHaveBeenCalled();
     expect(api.getMaterialStl).not.toHaveBeenCalled();

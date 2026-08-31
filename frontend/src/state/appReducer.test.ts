@@ -371,7 +371,7 @@ describe('appReducer 参数序号', () => {
 
 describe('appReducer 执行与 Timeline', () => {
   it('mutation gate 标记运行中，并在成功时只采用真实 revision 与目标状态', () => {
-    const running = appReducer(readyState(), {
+    const running = appReducer({...readyState(), historicalStepIndex: 0}, {
       type: 'run/started',
       operation: 'all',
     });
@@ -390,6 +390,7 @@ describe('appReducer 执行与 Timeline', () => {
     expect(succeeded.recipe[1].runtimeStatus).toBe('done');
     expect(succeeded.lastRunResult).toEqual({server: 'authoritative'});
     expect(succeeded.previewGeneration).toBe(2);
+    expect(succeeded.historicalStepIndex).toBeNull();
     expect(succeeded.activeMutation).toBe('all');
   });
 
@@ -416,6 +417,7 @@ describe('appReducer 执行与 Timeline', () => {
     expect(failed.lastModelRevision).toBe(12);
     expect(failed.stepErrors[1]).toBe(error);
     expect(failed.stepErrors[1].rolledBack).toBe(false);
+    expect(failed.recipe[1].runtimeStatus).toBe('error');
   });
 
   it('Timeline load 与有效快照恢复采用服务端 current/recipe 并刷新预览', () => {
@@ -444,6 +446,7 @@ describe('appReducer 执行与 Timeline', () => {
     expect(restored.selectedStepIndex).toBeNull();
     expect(restored.recipe).toEqual(restoredPayload.recipe);
     expect(restored.lastModelRevision).toBe(19);
+    expect(restored.historicalStepIndex).toBeNull();
     expect(restored.previewGeneration).toBe(2);
     expect(restored.drafts).toEqual({});
     expect(restored.parameterErrors).toEqual({});

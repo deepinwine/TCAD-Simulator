@@ -13,6 +13,7 @@ import type {
 
 export type AppPhase = 'booting' | 'ready' | 'running' | 'fatal';
 export type ActiveMutation = 'step' | 'to' | 'all' | 'timeline' | null;
+export type TimelineStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ParameterValidation {
   status: 'valid' | 'invalid';
@@ -39,6 +40,9 @@ export interface AppState {
   lastModelRevision: number | null;
   lastRunResult: unknown;
   timeline: TimelineView | null;
+  timelineStatus: TimelineStatus;
+  timelineError: TcadApiError | null;
+  historicalStepIndex: number | null;
   drafts: Record<string, ParameterDraft>;
   parameterErrors: Record<string, ParameterError>;
   stepErrors: Record<number, TcadApiError>;
@@ -81,6 +85,8 @@ export type AppAction =
   | {type: 'run/started'; operation: Exclude<ActiveMutation, null>}
   | {type: 'run/succeeded'; payload: RunView; index?: number}
   | {type: 'run/failed'; index?: number; error: TcadApiError}
+  | {type: 'timeline/loadStarted'}
+  | {type: 'timeline/loadCancelled'}
   | {type: 'timeline/loaded'; payload: TimelineView; errorToClear?: TcadApiError}
   | {type: 'timeline/loadFailed'; error: TcadApiError}
   | {type: 'timeline/restoreSucceeded'; payload: TimelineRestoreView}
@@ -95,6 +101,9 @@ export const initialAppState: AppState = {
   lastModelRevision: null,
   lastRunResult: undefined,
   timeline: null,
+  timelineStatus: 'idle',
+  timelineError: null,
+  historicalStepIndex: null,
   drafts: {},
   parameterErrors: {},
   stepErrors: {},
@@ -126,6 +135,16 @@ function withoutMatchingParameterError(
   sequence: number,
 ): Record<string, ParameterError> {
   return source[key]?.sequence === sequence ? withoutKey(source, key) : source;
+}
+
+function withoutStepError(
+  source: Record<number, TcadApiError>,
+  index: number | undefined,
+): Record<number, TcadApiError> {
+  if (index === undefined || source[index] === undefined) return source;
+  const result = {...source};
+  delete result[index];
+  return result;
 }
 
 function applyStatuses(
@@ -176,6 +195,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectedStepIndex: action.payload.recipe[0]?.index ?? null,
         previewGeneration: state.previewGeneration + 1,
         timeline: null,
+        timelineStatus: 'idle',
+        timelineError: null,
+        historicalStepIndex: null,
         drafts: {},
         parameterErrors: {},
         stepErrors: {},
@@ -238,39 +260,69 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         activeMutation: action.operation,
         globalError: null,
       };
-    case 'run/succeeded':
+    case 'run/succeeded': {
+      const index = action.payload.index ?? action.index;
       return {
         ...state,
         recipe: updateStepRuntimeStatus(
           state.recipe,
-          action.payload.index ?? action.index,
+          index,
           action.payload.runtimeStatus,
         ),
         model: action.payload.model ?? state.model,
         lastModelRevision: action.payload.modelRevision ?? state.lastModelRevision,
         lastRunResult: action.payload.result,
         previewGeneration: state.previewGeneration + 1,
+        stepErrors: state.activeMutation === 'all'
+          ? {}
+          : withoutStepError(state.stepErrors, index),
+        historicalStepIndex: null,
         globalError: null,
       };
-    case 'run/failed':
+    }
+    case 'run/failed': {
+      const recipe = updateStepRuntimeStatus(state.recipe, action.index, 'error');
       return action.index === undefined
         ? {...state, globalError: action.error}
         : {
           ...state,
+          recipe,
           stepErrors: {...state.stepErrors, [action.index]: action.error},
         };
+    }
+    case 'timeline/loadStarted':
+      return {
+        ...state,
+        timelineStatus: 'loading',
+        timelineError: null,
+        globalError: state.timelineError !== null && state.globalError === state.timelineError
+          ? null
+          : state.globalError,
+      };
+    case 'timeline/loadCancelled':
+      return {
+        ...state,
+        timelineStatus: state.timeline === null ? 'idle' : 'ready',
+      };
     case 'timeline/loaded':
       return {
         ...state,
         recipe: applyTimelineStatuses(state.recipe, action.payload),
         timeline: action.payload,
+        timelineStatus: 'ready',
+        timelineError: null,
         globalError: action.errorToClear !== undefined
           && state.globalError === action.errorToClear
           ? null
           : state.globalError,
       };
     case 'timeline/loadFailed':
-      return {...state, globalError: action.error};
+      return {
+        ...state,
+        timelineStatus: 'error',
+        timelineError: action.error,
+        globalError: action.error,
+      };
     case 'timeline/restoreSucceeded': {
       const selectedStepIndex = action.payload.timeline.current >= 0
         && action.payload.recipe.some(item => item.index === action.payload.timeline.current)
@@ -282,6 +334,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         recipe: action.payload.recipe,
         model: action.payload.model,
         timeline: action.payload.timeline,
+        timelineStatus: 'ready',
+        timelineError: null,
+        historicalStepIndex: action.payload.timeline.current >= 0
+          ? action.payload.timeline.current
+          : null,
         selectedStepIndex,
         previewGeneration: state.previewGeneration + 1,
         drafts: {},
