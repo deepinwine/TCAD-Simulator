@@ -849,3 +849,67 @@ button:focus-visible,
   padding: 0 8px;
   font-size: 10px;
 }
+
+.viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #22303f;
+}
+
+.viewer-view-button {
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid #2e4052;
+  border-radius: 4px;
+  color: #b9cadb;
+  background: #111b27;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.viewer-view-button:hover {
+  border-color: #4b8fbe;
+  background: #1d3042;
+}
+
+.viewer-view-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.viewer-stage {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: stretch;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.viewer-stage canvas.viewer-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.viewer-backend-badge {
+  padding: 2px 8px;
+  border: 1px solid #2b526c;
+  border-radius: 999px;
+  color: #7fd0ff;
+  background: #102231;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.viewer-stage .error-notice {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 10px;
+  max-width: min(420px, calc(100% - 20px));
+}

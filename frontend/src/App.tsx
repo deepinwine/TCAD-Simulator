@@ -8,12 +8,14 @@ import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
 import {AppStateProvider, useAppState} from './state/AppStateContext';
 import {ThreeViewer} from './viewer/ThreeViewer';
+import type {ViewerRuntime} from './viewer/viewerRuntime';
 
 interface AppProps {
   api?: TcadApi;
+  viewerRuntimeFactory?: (api: TcadApi) => ViewerRuntime;
 }
 
-function StudioShell() {
+function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFactory?: (api: TcadApi) => ViewerRuntime}) {
   const {state, actions} = useAppState();
   const [parametersCollapsed, setParametersCollapsed] = useState(false);
   const selectedStep = useMemo(
@@ -74,18 +76,18 @@ function StudioShell() {
           onSelect={actions.selectStep}
         />
         <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} />
-        <ThreeViewer refreshToken={state.previewGeneration} />
+        <ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />
       </div>
       <TimelineBar />
     </main>
   );
 }
 
-export function App({api}: AppProps) {
+export function App({api, viewerRuntimeFactory}: AppProps) {
   const resolvedApi = useMemo(() => api ?? createTcadApi(), [api]);
   return (
     <AppStateProvider api={resolvedApi}>
-      <StudioShell />
+      <StudioShell api={resolvedApi} viewerRuntimeFactory={viewerRuntimeFactory} />
     </AppStateProvider>
   );
 }

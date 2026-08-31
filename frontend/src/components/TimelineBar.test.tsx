@@ -83,10 +83,38 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
   };
 }
 
+const stubViewerRuntime = () => ({
+  backend: 'WebGL2',
+  mount: () => {},
+  setStandardView: () => {},
+  fit: () => {},
+  loadMeshes: async () => ({warnings: []}),
+  dispose: () => {},
+});
+
+
+function recordingViewerRuntime() {
+  const loadedTokens: number[] = [];
+  return {
+    loadedTokens,
+    factory: () => ({
+      backend: 'WebGL2',
+      mount: () => {},
+      setStandardView: () => {},
+      fit: () => {},
+      loadMeshes: async (token: number) => {
+        loadedTokens.push(token);
+        return {warnings: []};
+      },
+      dispose: () => {},
+    }),
+  };
+}
+
 describe('TimelineBar', () => {
   it('ready 后在 StrictMode 中也只初始加载一次 Timeline', async () => {
     const api = apiStub();
-    render(<StrictMode><App api={api} /></StrictMode>);
+    render(<StrictMode><App api={api} viewerRuntimeFactory={stubViewerRuntime} /></StrictMode>);
 
     await screen.findByRole('button', {name: '恢复步骤 1'});
     expect(api.getTimeline).toHaveBeenCalledTimes(1);
@@ -97,7 +125,7 @@ describe('TimelineBar', () => {
       .mockRejectedValueOnce(new TcadApiError('Timeline 暂不可用', {status: 503}))
       .mockResolvedValueOnce(timeline);
     const api = apiStub({getTimeline});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Timeline 暂不可用');
@@ -110,7 +138,7 @@ describe('TimelineBar', () => {
   it('初始请求挂起时显示可访问 loading 状态', async () => {
     const pending = deferred<TimelineView>();
     const api = apiStub({getTimeline: vi.fn(() => pending.promise)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     expect(await screen.findByText('正在加载 Timeline…')).toHaveAttribute('role', 'status');
     expect(screen.getByRole('navigation', {name: 'Process Timeline'})).toHaveAttribute(
@@ -123,7 +151,7 @@ describe('TimelineBar', () => {
 
   it('只允许恢复有效快照，Previous 与 Next 跳过无效节点', async () => {
     const api = apiStub();
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     expect(await screen.findByRole('button', {name: '恢复步骤 1'})).toBeEnabled();
     expect(screen.getByRole('button', {name: '恢复步骤 2'})).toBeDisabled();
@@ -142,12 +170,10 @@ describe('TimelineBar', () => {
 
   it('Next 跳过无效节点，成功后显示历史快照并刷新 Viewer', async () => {
     const api = apiStub();
-    render(<App api={api} />);
+    const viewerRuntime = recordingViewerRuntime();
+    render(<App api={api} viewerRuntimeFactory={viewerRuntime.factory} />);
     await screen.findByRole('button', {name: '恢复步骤 4'});
-    expect(screen.getByRole('region', {name: '3D Viewer'})).toHaveAttribute(
-      'data-refresh-token',
-      '1',
-    );
+    await waitFor(() => expect(viewerRuntime.loadedTokens).toEqual([1]));
 
     fireEvent.click(screen.getByRole('button', {name: '下一个有效快照'}));
 
@@ -156,17 +182,14 @@ describe('TimelineBar', () => {
       expect.any(AbortSignal),
     ));
     expect(await screen.findByText('历史快照 Step 4')).toBeVisible();
-    expect(screen.getByRole('region', {name: '3D Viewer'})).toHaveAttribute(
-      'data-refresh-token',
-      '2',
-    );
+    await waitFor(() => expect(viewerRuntime.loadedTokens).toEqual([1, 2]));
   });
 
   it('restore 同步 gate 防止双击并禁用全部恢复操作', async () => {
     const pending = deferred<TimelineRestoreView>();
     const restoreTimeline = vi.fn(() => pending.promise);
     const api = apiStub({restoreTimeline});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     const restore = await screen.findByRole('button', {name: '恢复步骤 1'});
 
     fireEvent.click(restore);
@@ -189,9 +212,10 @@ describe('TimelineBar', () => {
         });
       }),
     });
-    render(<App api={api} />);
+    const viewerRuntime = recordingViewerRuntime();
+    render(<App api={api} viewerRuntimeFactory={viewerRuntime.factory} />);
     await screen.findByRole('button', {name: '恢复步骤 1'});
-    const viewer = screen.getByRole('region', {name: '3D Viewer'});
+    await waitFor(() => expect(viewerRuntime.loadedTokens).toEqual([1]));
 
     fireEvent.click(screen.getByRole('button', {name: '恢复步骤 1'}));
 
@@ -199,13 +223,14 @@ describe('TimelineBar', () => {
     expect(alert).toHaveTextContent('快照恢复失败');
     expect(alert).toHaveTextContent('请选择其他有效快照');
     expect(screen.getByText('#2 current').closest('li')).toHaveAttribute('aria-current', 'step');
-    expect(viewer).toHaveAttribute('data-refresh-token', '1');
+    // restore 失败不刷新几何：仍只有初始加载
+    expect(viewerRuntime.loadedTokens).toEqual([1]);
   });
 
   it('current=-1 时 Previous 安全禁用，Next 指向第一个有效节点', async () => {
     const noCurrent = {...timeline, current: -1};
     const api = apiStub({getTimeline: vi.fn(async () => noCurrent)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     await screen.findByRole('button', {name: '恢复步骤 1'});
 
     expect(screen.getByRole('button', {name: '上一个有效快照'})).toBeDisabled();
@@ -228,7 +253,7 @@ describe('TimelineBar', () => {
       ],
     };
     const api = apiStub({getTimeline: vi.fn(async () => unordered)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const duplicate = await screen.findAllByRole('button', {name: '恢复步骤 2'});
     expect(duplicate).toHaveLength(1);
@@ -252,7 +277,7 @@ describe('TimelineBar', () => {
     const getTimeline = vi.fn()
       .mockRejectedValue(new TcadApiError(longMessage, {status: 500}));
     const api = apiStub({getTimeline});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const alert = await screen.findByRole('alert');
     const compact = alert.closest('.timeline-error');
@@ -273,7 +298,7 @@ describe('TimelineBar', () => {
       ],
     };
     const api = apiStub({getTimeline: vi.fn(async () => missingCurrent)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     await screen.findByRole('button', {name: '恢复步骤 2'});
 
     expect(screen.queryByRole('listitem', {current: 'step'})).not.toBeInTheDocument();

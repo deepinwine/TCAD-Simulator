@@ -83,10 +83,37 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
   };
 }
 
+const stubViewerRuntime = () => ({
+  backend: 'WebGL2',
+  mount: () => {},
+  setStandardView: () => {},
+  fit: () => {},
+  loadMeshes: async () => ({warnings: []}),
+  dispose: () => {},
+});
+
+function recordingViewerRuntime() {
+  const loadedTokens: number[] = [];
+  return {
+    loadedTokens,
+    factory: () => ({
+      backend: 'WebGL2',
+      mount: () => {},
+      setStandardView: () => {},
+      fit: () => {},
+      loadMeshes: async (token: number) => {
+        loadedTokens.push(token);
+        return {warnings: []};
+      },
+      dispose: () => {},
+    }),
+  };
+}
+
 describe('Toolbar 执行操作', () => {
   it('三个运行按钮分别调用选中步骤、运行至步骤和运行全部', async () => {
     const api = apiStub();
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     await screen.findByRole('button', {name: '运行选中步骤'});
 
     fireEvent.click(screen.getByRole('button', {name: '运行选中步骤'}));
@@ -100,7 +127,7 @@ describe('Toolbar 执行操作', () => {
   it('Run All 进行中锁住参数和其他运行按钮，双击也只调用一次', async () => {
     const pending = deferred<RunView>();
     const api = apiStub({runAll: vi.fn(() => pending.promise)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const runAll = await screen.findByRole('button', {name: '运行全部'});
     fireEvent.click(runAll);
@@ -121,7 +148,7 @@ describe('Toolbar 执行操作', () => {
 
   it('没有选中步骤时只禁用依赖选择的两个操作', async () => {
     const api = apiStub({init: vi.fn(async () => initView([]))});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     expect(await screen.findByRole('button', {name: '运行选中步骤'})).toBeDisabled();
     expect(screen.getByRole('button', {name: '运行至选中步骤'})).toBeDisabled();
@@ -130,7 +157,7 @@ describe('Toolbar 执行操作', () => {
 
   it('存在未保存 draft 时禁用全部运行与恢复，并解释处理方式', async () => {
     const api = apiStub();
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     const dose = await screen.findByRole('textbox', {name: 'Dose'});
     await screen.findByRole('button', {name: '恢复步骤 1'});
 
@@ -165,7 +192,7 @@ describe('Toolbar 执行操作', () => {
         });
       }),
     });
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     fireEvent.click(await screen.findByRole('option', {name: /Step 2/}));
     fireEvent.click(screen.getByRole('button', {name: '运行选中步骤'}));
 
@@ -197,7 +224,8 @@ describe('Toolbar 执行操作', () => {
       } satisfies RunView)),
       getTimeline,
     });
-    render(<App api={api} />);
+    const viewerRuntime = recordingViewerRuntime();
+    render(<App api={api} viewerRuntimeFactory={viewerRuntime.factory} />);
     fireEvent.click(await screen.findByRole('option', {name: /Step 2/}));
     await waitFor(() => expect(getTimeline).toHaveBeenCalledTimes(1));
 
@@ -208,10 +236,7 @@ describe('Toolbar 执行操作', () => {
       expect(screen.getByRole('navigation', {name: 'Process Timeline'}))
         .toHaveTextContent('#2 current');
     });
-    expect(screen.getByRole('region', {name: '3D Viewer'})).toHaveAttribute(
-      'data-refresh-token',
-      '2',
-    );
+    await waitFor(() => expect(viewerRuntime.loadedTokens).toEqual([1, 2]));
   });
 
   it('Run All 的无步骤结构化错误显示为全局错误', async () => {
@@ -224,7 +249,7 @@ describe('Toolbar 执行操作', () => {
         });
       }),
     });
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     fireEvent.click(await screen.findByRole('button', {name: '运行全部'}));
 
     const alert = await screen.findByRole('alert');
@@ -236,7 +261,7 @@ describe('Toolbar 执行操作', () => {
   it('运行中通过 live region 播报当前操作，连接指示切换为 Running，结束后恢复', async () => {
     const pending = deferred<RunView>();
     const api = apiStub({runAll: vi.fn(() => pending.promise)});
-    render(<App api={api} />);
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const runAll = await screen.findByRole('button', {name: '运行全部'});
     expect(screen.getByText('已连接 Connected')).toBeInTheDocument();
