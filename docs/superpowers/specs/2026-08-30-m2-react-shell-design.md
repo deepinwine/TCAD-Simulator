@@ -1,7 +1,7 @@
 # M2 React Shell 设计说明
 
 - 日期：2026-08-30
-- 状态：已完成交互评审，待书面规格复核
+- 状态：已实现（M2 交付，实现尖端 `c47acdf`，详见 `docs/ROADMAP_PROCESS_CAD.md`）
 - 目标里程碑：M2 — React Shell
 - 基线提交：`063838ae9c829ad91ab67e9f5976bed18a3be07b`
 

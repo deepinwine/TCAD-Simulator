@@ -37,13 +37,14 @@ Golden regression tests now cover all five named flows:
 Golden tests assert final geometry/material composition per flow so later migrations
 (M2–M12) can prove behavior preservation.
 
-## M2 — React Shell
+## M2 — React Shell ✅（已交付）
 
-`frontend/` with React + TypeScript + Vite: Process Flow, Parameters, Viewer shell,
-Timeline shell. Parallel client only; legacy WebUI untouched (ADR-012). React consumes
+`frontend/` with React + TypeScript + Vite: dense three-pane Process Flow /
+Parameters / Viewer workspace, run + timeline integration, and a minimal real Three.js
+mesh viewer. Parallel client only; legacy WebUI untouched (ADR-012). React consumes
 **exactly** the frozen "M2 Compatibility API" defined in `docs/ARCHITECTURE_TARGET.md`
-(existing WebUI HTTP endpoints, additive-only) — this is how M2 can start before the M4
-facade exists.
+(existing WebUI HTTP endpoints, additive-only) — this is how M2 could start before the
+M4 facade exists. Delivered on `codex/m2-react-shell` (see Current Branch State).
 
 ## M3 — Three.js Viewer (React)
 
@@ -104,17 +105,18 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-29, post-review-repairs)
+## Current Branch State (2026-08-31, M2 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
-| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1 实现 |
-| 本地 `main` | `d15722d` | **线性领先 `origin/main` 恰好一个提交**（M1 设计文档）；同样不含实现 |
-| `codex/process-cad-shell` | `10f6fbd` | 已被快进包含全部 M1 实现（至 `22fbc33`）+ 基准校准；与 backup 远程一致 |
-| `zcode/process-cad-shell` | M0 宪法 `b4aaec2` + 评审修复提交 | **`10f6fbd` 的直接后代**（线性领先，无分叉） |
+| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1/M2 实现 |
+| 本地 `main` | `d15722d` | 线性领先 `origin/main` 一个提交（M1 设计文档）；不含实现 |
+| `backup/main`（deepinwine） | `063838a` | **M1 已通过 PR #1 合并**（五流程 Golden 基线 + 契约测试） |
+| `codex/m2-react-shell` | `c47acdf`（实现尖端，其后再叠加 Task 9 文档收口提交） | 线性领先 `backup/main` 28 个提交（含 M2 全部 27 个实现/测试提交 + 本文档提交），可快进合并 |
 
-祖先关系：`main ⊂ (4c3e32f …) ⊂ 10f6fbd ⊂ b4aaec2 ⊂ 本修复提交`。两条 feature 分支
-没有内容冲突，合并即快进。**合并顺序、是否落 `main`、何时推送 `origin` 由仓库所有者
-决定；Agent 不得自行合并 feature 分支或推送 `origin`（ADR-010/017）。**
+祖先关系：`main ⊂ 063838a ⊂ …M2 提交… ⊂ c47acdf ⊂ docs 收口提交`。`origin` 上不存在
+任何 M1/M2 功能分支。**是否将 M2 合并进 `backup/main`、何时同步 `origin/main` 由仓库
+所有者决定；Agent 不得自行合并 feature 分支或推送 `origin`（ADR-010/017）。**
 
-- Next: 完成 M1 五流程最终验证与审查 → 所有者决定合并 → 开始 M2 React Shell。
+- Next: 独立 architecture/code review 通过后由所有者合并 M2 → 开始 M3 Three.js Viewer
+  完善（正交相机、X/Y/Z 裁剪、材料显示控制、选择与测量）。

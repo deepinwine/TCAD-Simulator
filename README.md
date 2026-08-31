@@ -503,6 +503,31 @@ Some regression selftests require local fixtures such as `SAQP_Thinking_Flow.jso
 
 部分 regression selftest 需要本地 fixture。缺少这些 fixture 时测试失败，不一定表示 simulator 无法运行。
 
+### React Studio (M2 parallel client)
+
+The M2 React + TypeScript + Vite client lives in `frontend/` and talks to the same
+WebUI backend through the frozen M2 Compatibility API. The legacy WebUI at `/` is
+unchanged; the React client is served same-origin at `/studio/`.
+
+M2 的 React + TypeScript + Vite 客户端位于 `frontend/`，通过冻结的 M2 Compatibility API
+访问同一个 WebUI 后端。旧 WebUI（`/`）保持不变；React 客户端在同源路径 `/studio/` 提供。
+
+```bash
+# 后端（无桌面环境的无头启动；WebUI 以守护线程提供，进程需保持运行。
+# 有 Qt 桌面环境时，从桌面应用内启动 WebUI 亦可。）
+TCAD_SKIP_QT=1 MPLBACKEND=Agg python3 -c \
+  "import time; from tcad_simulator import WebUIServerManager as W; W(host='127.0.0.1', port=8765).start(); time.sleep(3600)"
+
+# React 开发服务器（开发期热更新，代理 /api 到后端）
+cd frontend
+npm ci
+npm run dev
+
+# 同源生产构建（构建产物由后端在 /studio/ 直接提供）
+npm run build
+# 访问 http://127.0.0.1:8765/studio/
+```
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):

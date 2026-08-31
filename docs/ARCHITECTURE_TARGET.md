@@ -131,22 +131,25 @@ Rules:
    React never parses them as JSON; `slice` is JSON with `data_b64`.
 4. Cookie/session model stays as-is; WebSocket additions are new endpoints, not changes.
 
-## Frontend Structure (when M2 begins)
+## Frontend Structure (delivered in M2)
 
 ```text
 frontend/
-├── package.json / vite.config.ts / tsconfig.json
+├── package.json / vite.config.ts / tsconfig.json   # base=/studio/, dev proxy /api -> 8765
 └── src/
-    ├── App.tsx
-    ├── components/   # ProcessFlow, ParameterPanel, MaterialPanel, Timeline, Toolbar
-    ├── viewer/       # ThreeViewer, camera, clipping, materials, selection
-    ├── api/          # tcadApi client
-    ├── state/
-    └── types/
+    ├── App.tsx                 # bootstrap + composition（可注入 viewerRuntimeFactory 测试缝）
+    ├── components/             # Toolbar, ProcessFlowPane, ParameterPanel, TimelineBar, ErrorNotice
+    ├── viewer/                 # ThreeViewer + fitCamera/meshLoader 纯函数 + viewerRuntime(Three.js)
+    ├── api/                    # client(TcadApiError) + schemas + types（冻结契约的 TS 边界）
+    ├── state/                  # appReducer(纯) + AppStateContext(会话动作/变更 gate)
+    └── styles.css
 ```
 
 React is a parallel client against the existing backend; the legacy WebUI stays until
 React passes feature parity and regression tests (M5). Never delete the old WebUI early.
+The built bundle is served same-origin at `/studio/` by the Python WebUI (ADR-012);
+Three.js visualization is browser-local — camera/view operations never issue API
+requests, only `preview/manifest` + `preview/stl` on model revision changes.
 
 ## Migration Strategy — Strangler, Never Big Bang
 
@@ -154,9 +157,12 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
 
 1. **M1** Stabilize the existing Process CAD workflow and lock it with golden regression
    tests (five named flows).
-2. **M2** React/TS/Vite shell as a parallel frontend (`frontend/`).
-3. **M3** Three.js viewer inside React (mesh load, orbit/pan/zoom, six views + ISO,
-   clipping, materials, selection).
+2. **M2** React/TS/Vite shell as a parallel frontend (`frontend/`) — delivered: dense
+   three-pane shell, frozen-API typed client, run/timeline integration, minimal real
+   mesh load + orbit/pan/zoom in the Three.js viewer.
+3. **M3** Three.js viewer completion inside React (perspective/orthographic, X/Y/Z
+   clipping, material display control, selection, measurement; six views + ISO and
+   orbit/pan/zoom already delivered in M2).
 4. **M4** Stable Python API facade around the existing runtime; then standardize toward
    FastAPI + Pydantic (compatibility API first, strangler-style).
 5. **M5** React reaches parity → legacy WebUI deprecated (not before).
