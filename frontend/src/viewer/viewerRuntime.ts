@@ -2,15 +2,17 @@ import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 import {STLLoader} from 'three/examples/jsm/loaders/STLLoader.js';
 import type {TcadApi} from '../api/types';
-import {calculatePerspectiveFit} from './fitCamera';
+import {calculateOrthographicFit, calculatePerspectiveFit} from './fitCamera';
 import {createMeshLoader, type LoadedMesh} from './meshLoader';
 
 export type StandardView = 'iso' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right';
+export type ProjectionMode = 'perspective' | 'orthographic';
 
 export interface ViewerRuntime {
   readonly backend: string;
   mount(container: HTMLElement): void;
   setStandardView(view: StandardView): void;
+  setProjection(mode: ProjectionMode): void;
   fit(): void;
   loadMeshes(token: number): Promise<{warnings: string[]}>;
   dispose(): void;
@@ -36,6 +38,8 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let renderer: THREE.WebGLRenderer | null = null;
   let scene: THREE.Scene | null = null;
   let camera: THREE.PerspectiveCamera | null = null;
+  let orthoCamera: THREE.OrthographicCamera | null = null;
+  let projection: ProjectionMode = 'perspective';
   let controls: OrbitControls | null = null;
   let group: THREE.Group | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -53,23 +57,48 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     parseStl: bytes => stlLoader.parse(bytes),
   });
 
+  const activeCamera = (): THREE.PerspectiveCamera | THREE.OrthographicCamera | null =>
+    projection === 'orthographic' ? orthoCamera : camera;
+
+  const viewAspect = (): number => {
+    if (container === null) return 1;
+    const width = Math.max(1, container.clientWidth);
+    const height = Math.max(1, container.clientHeight);
+    return width / height;
+  };
+
   const scheduleRender = () => {
-    if (disposed || renderer === null || scene === null || camera === null) return;
+    if (disposed || renderer === null || scene === null) return;
+    const view = activeCamera();
+    if (view === null) return;
     if (renderHandle !== 0) return;
     renderHandle = requestAnimationFrame(() => {
       renderHandle = 0;
-      if (disposed || renderer === null || scene === null || camera === null) return;
-      renderer.render(scene, camera);
+      if (disposed || renderer === null || scene === null) return;
+      const current = activeCamera();
+      if (current === null) return;
+      renderer.render(scene, current);
     });
   };
 
   const resize = () => {
-    if (renderer === null || camera === null || container === null) return;
+    if (renderer === null || container === null) return;
     const width = Math.max(1, container.clientWidth);
     const height = Math.max(1, container.clientHeight);
+    const aspect = width / height;
     renderer.setSize(width, height, false);
-    camera.aspect = width / height;
-    camera.updateProjectionMatrix();
+    if (camera !== null) {
+      camera.aspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+      camera.updateProjectionMatrix();
+    }
+    if (orthoCamera !== null) {
+      // 保持半高不变，仅按新宽高比重排半宽，避免布局变化改变放大倍率
+      const halfHeight = (orthoCamera.top - orthoCamera.bottom) / 2;
+      const halfWidth = halfHeight * (Number.isFinite(aspect) && aspect > 0 ? aspect : 1);
+      orthoCamera.left = -halfWidth;
+      orthoCamera.right = halfWidth;
+      orthoCamera.updateProjectionMatrix();
+    }
     scheduleRender();
   };
 
@@ -84,7 +113,26 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   };
 
   const applyPose = (direction: THREE.Vector3) => {
-    if (camera === null || controls === null) return;
+    if (controls === null) return;
+    if (projection === 'orthographic') {
+      if (orthoCamera === null) return;
+      const fit = calculateOrthographicFit(contentBounds(), viewAspect());
+      orthoCamera.left = -fit.halfWidth;
+      orthoCamera.right = fit.halfWidth;
+      orthoCamera.top = fit.halfHeight;
+      orthoCamera.bottom = -fit.halfHeight;
+      orthoCamera.near = fit.near;
+      orthoCamera.far = fit.far;
+      orthoCamera.position.copy(direction).multiplyScalar(fit.distance).add(fit.target);
+      orthoCamera.up.set(0, 0, 1);
+      orthoCamera.lookAt(fit.target);
+      orthoCamera.updateProjectionMatrix();
+      controls.target.copy(fit.target);
+      controls.update();
+      scheduleRender();
+      return;
+    }
+    if (camera === null) return;
     const fit = calculatePerspectiveFit(
       contentBounds(),
       camera.fov,
@@ -97,6 +145,17 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     controls.target.copy(fit.target);
     controls.update();
     scheduleRender();
+  };
+
+  const rebindControls = (target: THREE.Vector3) => {
+    if (renderer === null) return;
+    const view = activeCamera();
+    if (view === null) return;
+    controls?.dispose();
+    controls = new OrbitControls(view, renderer.domElement);
+    controls.addEventListener('change', scheduleRender);
+    controls.target.copy(target);
+    controls.update();
   };
 
   const runtime: ViewerRuntime = {
@@ -128,6 +187,8 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       scene.background = new THREE.Color(0x0d141e);
       camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
       camera.up.set(0, 0, 1);
+      orthoCamera = new THREE.OrthographicCamera(-5, 5, 5, -5, -50, 200);
+      orthoCamera.up.set(0, 0, 1);
       const hemisphere = new THREE.HemisphereLight(0xbfd6ea, 0x1a2431, 1.1);
       const key = new THREE.DirectionalLight(0xffffff, 1.6);
       key.position.set(6, -8, 10);
@@ -146,9 +207,54 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     setStandardView(view: StandardView) {
       applyPose(VIEW_DIRECTIONS[view]);
     },
+    setProjection(mode: ProjectionMode) {
+      if (mode === projection) return;
+      const view = activeCamera();
+      if (view === null || controls === null || renderer === null) return;
+      const target = controls.target.clone();
+      const offset = view.position.clone().sub(target);
+      const direction = offset.clone().normalize();
+      const aspect = viewAspect();
+      const radius = Math.max(
+        contentBounds().getBoundingSphere(new THREE.Sphere()).radius,
+        1e-6,
+      );
+      if (mode === 'orthographic') {
+        if (orthoCamera === null || camera === null) return;
+        // 等效视尺寸：与当前透视相机在相同距离处的可见半高一致，切换无视觉跳变
+        const halfHeight = Math.max(
+          offset.length() * Math.tan((camera.fov * Math.PI) / 360),
+          1e-6,
+        );
+        const halfWidth = halfHeight * aspect;
+        orthoCamera.left = -halfWidth;
+        orthoCamera.right = halfWidth;
+        orthoCamera.top = halfHeight;
+        orthoCamera.bottom = -halfHeight;
+        orthoCamera.near = -(radius * 4);
+        orthoCamera.far = offset.length() + radius * 4;
+        orthoCamera.position.copy(view.position);
+        orthoCamera.up.set(0, 0, 1);
+        orthoCamera.lookAt(target);
+        orthoCamera.updateProjectionMatrix();
+      } else {
+        if (camera === null || orthoCamera === null) return;
+        const halfHeight = Math.max((orthoCamera.top - orthoCamera.bottom) / 2, 1e-6);
+        const distance = halfHeight / Math.tan((camera.fov * Math.PI) / 360);
+        camera.near = Math.max((distance - radius) * 0.05, 1e-3);
+        camera.far = Math.max((distance + radius) * 4, camera.near * 2);
+        camera.position.copy(target).addScaledVector(direction, distance);
+        camera.lookAt(target);
+        camera.updateProjectionMatrix();
+      }
+      projection = mode;
+      rebindControls(target);
+      scheduleRender();
+    },
     fit() {
-      if (camera === null) return;
-      const direction = camera.position.clone().sub(controls?.target ?? new THREE.Vector3());
+      const view = activeCamera();
+      if (view === null) return;
+      const direction = view.position.clone().sub(controls?.target ?? new THREE.Vector3());
       if (direction.lengthSq() < 1e-9) direction.copy(VIEW_DIRECTIONS.iso);
       applyPose(direction.normalize());
     },
@@ -210,6 +316,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       container = null;
       scene = null;
       camera = null;
+      orthoCamera = null;
       group = null;
     },
   };

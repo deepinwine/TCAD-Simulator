@@ -58,3 +58,55 @@ export function calculatePerspectiveFit(
   const far = Math.max((distance + radius) * 4, near * 2);
   return {target, distance, near, far};
 }
+
+export interface OrthographicFit {
+  target: Vector3;
+  halfWidth: number;
+  halfHeight: number;
+  /** 相机沿视线方向的安放距离（仅影响裁剪范围与控制手感，不影响成像大小）。 */
+  distance: number;
+  near: number;
+  far: number;
+}
+
+const defaultOrthoFit = (): OrthographicFit => ({
+  target: new Vector3(),
+  halfWidth: 5,
+  halfHeight: 5,
+  distance: 30,
+  near: -50,
+  far: 200,
+});
+
+/**
+ * 计算完整容纳 bounds 的正交视锥。
+ *
+ * 任意视线方向下包围球投影半径最坏为 r，因此半高与半宽都必须 ≥ r；
+ * 宽高比只决定两者的比例（halfWidth = halfHeight × aspect）。
+ * near 取负值：正交成像与距离无关，模型允许越过相机平面。
+ */
+export function calculateOrthographicFit(bounds: Box3, aspect: number): OrthographicFit {
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+
+  if (bounds.isEmpty() || !isFiniteVector(bounds.min) || !isFiniteVector(bounds.max)) {
+    return defaultOrthoFit();
+  }
+
+  const sphere = bounds.getBoundingSphere(new Sphere());
+  if (
+    !isFiniteVector(sphere.center)
+    || !Number.isFinite(sphere.radius)
+    || sphere.radius < 0
+  ) {
+    return defaultOrthoFit();
+  }
+
+  const target = sphere.center.clone();
+  const radius = Math.max(sphere.radius, 1e-6);
+  const halfHeight = radius * Math.max(1, 1 / safeAspect);
+  const halfWidth = halfHeight * safeAspect;
+  const distance = radius * 3;
+  const near = -(radius * 4);
+  const far = distance + radius * 4;
+  return {target, halfWidth, halfHeight, distance, near, far};
+}

@@ -87,6 +87,7 @@ const stubViewerRuntime = () => ({
   backend: 'WebGL2',
   mount: () => {},
   setStandardView: () => {},
+  setProjection: () => {},
   fit: () => {},
   loadMeshes: async () => ({warnings: []}),
   dispose: () => {},
@@ -100,6 +101,7 @@ function recordingViewerRuntime() {
       backend: 'WebGL2',
       mount: () => {},
       setStandardView: () => {},
+      setProjection: () => {},
       fit: () => {},
       loadMeshes: async (token: number) => {
         loadedTokens.push(token);

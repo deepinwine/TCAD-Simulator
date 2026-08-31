@@ -10,12 +10,16 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
     standardViews: [] as StandardView[],
     fits: 0,
     disposed: 0,
+    projections: [] as Array<'perspective' | 'orthographic'>,
   };
   const runtime: ViewerRuntime = {
     backend: 'WebGL2',
     mount: vi.fn(),
     setStandardView: vi.fn((view: StandardView) => {
       calls.standardViews.push(view);
+    }),
+    setProjection: vi.fn((mode: 'perspective' | 'orthographic') => {
+      calls.projections.push(mode);
     }),
     fit: vi.fn(() => {
       calls.fits += 1;
@@ -79,6 +83,31 @@ describe('ThreeViewer', () => {
     expect(shared.calls.standardViews).toEqual(views);
   });
 
+  it('透视/正交切换翻转 aria-pressed 并调用 setProjection', async () => {
+    const shared = fakeViewerRuntime();
+    render(
+      <ThreeViewer
+        api={apiStub}
+        refreshToken={3}
+        runtimeFactory={() => shared.runtime}
+      />,
+    );
+    await screen.findByText('WebGL2');
+    const toggle = screen.getByRole('button', {name: '正交视图'});
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    const callsBefore = shared.calls.apiCalls;
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(shared.calls.projections).toEqual(['orthographic']);
+    expect(shared.calls.apiCalls).toBe(callsBefore);
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(shared.calls.projections).toEqual(['orthographic', 'perspective']);
+    expect(shared.calls.apiCalls).toBe(callsBefore);
+  });
+
   it('refreshToken 变化触发网格加载，材料失败可重试', async () => {
     let shouldFail = true;
     const shared = fakeViewerRuntime({
@@ -129,5 +158,7 @@ describe('ThreeViewer', () => {
     expect(alert).toHaveTextContent('WebGL2 上下文创建失败：canvas 被占用');
     expect(document.querySelector('canvas')).toBeNull();
     expect(screen.queryByText('WebGL2')).toBeNull();
+    expect(screen.getByRole('button', {name: '正交视图'})).toBeDisabled();
+    expect(screen.getByRole('button', {name: 'ISO 视图'})).toBeDisabled();
   });
 });

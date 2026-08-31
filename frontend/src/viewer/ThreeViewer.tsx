@@ -4,6 +4,7 @@ import {ErrorNotice} from '../components/ErrorNotice';
 import {createThreeViewerRuntime} from './viewerRuntime';
 import type {StandardView, ViewerRuntime} from './viewerRuntime';
 
+export type ProjectionMode = 'perspective' | 'orthographic';
 export type {StandardView, ViewerRuntime} from './viewerRuntime';
 
 interface ThreeViewerProps {
@@ -28,6 +29,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   const [backend, setBackend] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [orthoActive, setOrthoActive] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -73,6 +75,14 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     });
   }, [refreshToken]);
 
+  const toggleProjection = useCallback(() => {
+    const runtime = runtimeRef.current;
+    if (runtime === null) return;
+    const next = orthoActive ? 'perspective' : 'orthographic';
+    runtime.setProjection(next);
+    setOrthoActive(!orthoActive);
+  }, [orthoActive]);
+
   return (
     <section className="workspace-pane viewer-pane" aria-label="3D Viewer">
       <header className="pane-header viewer-header">
@@ -101,6 +111,15 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           onClick={() => runtimeRef.current?.fit()}
         >
           适应窗口
+        </button>
+        <button
+          type="button"
+          className="viewer-view-button"
+          aria-pressed={orthoActive}
+          disabled={initError !== null}
+          onClick={toggleProjection}
+        >
+          正交视图
         </button>
       </div>
       <div className="viewer-stage" ref={containerRef}>
