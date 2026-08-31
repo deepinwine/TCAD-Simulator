@@ -21,6 +21,7 @@ export interface ParameterValidation {
 
 export interface ParameterDraft {
   value: unknown;
+  rawValue?: string | boolean;
   sequence: number;
   validation: ParameterValidation;
 }
@@ -53,6 +54,7 @@ export type AppAction =
     index: number;
     key: string;
     value: unknown;
+    rawValue?: string | boolean;
     sequence: number;
     validation: ParameterValidation;
   }
@@ -191,6 +193,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...state.drafts,
           [draftKey]: {
             value: action.value,
+            ...(action.rawValue === undefined ? {} : {rawValue: action.rawValue}),
             sequence: action.sequence,
             validation: action.validation,
           },

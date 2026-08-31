@@ -83,6 +83,7 @@ function Harness() {
   return (
     <>
       <button type="button" onClick={() => actions.selectStep(1)}>选择步骤 1</button>
+      <button type="button" onClick={() => actions.selectStep(0)}>选择步骤 0</button>
       <button type="button" onClick={() => void actions.runAll()}>开始运行</button>
       <output data-testid="statuses">
         {state.recipe.map(item => item.runtimeStatus).join(',')}
@@ -206,6 +207,26 @@ describe('ParameterPanel', () => {
     unmount();
   });
 
+  it('保存失败后切换步骤再返回仍显示原始 draft', async () => {
+    vi.useFakeTimers();
+    const initial = init();
+    const error = new TcadApiError('剂量不符合服务端约束', {
+      status: 400,
+      parameterPath: 'params.dose',
+    });
+    const api = apiStub(initial, {setStep: vi.fn(async () => { throw error; })});
+    const {unmount} = await mount(initial, api);
+
+    fireEvent.change(screen.getByLabelText('Dose'), {target: {value: '125.'}});
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    fireEvent.click(screen.getByRole('button', {name: '选择步骤 1'}));
+    fireEvent.click(screen.getByRole('button', {name: '选择步骤 0'}));
+
+    expect(screen.getByLabelText('Dose')).toHaveValue('125.');
+    expect(screen.getByText('剂量不符合服务端约束')).toBeInTheDocument();
+    unmount();
+  });
+
   it('切换步骤会取消旧步骤尚未触发的 debounce', async () => {
     vi.useFakeTimers();
     const initial = init();
@@ -271,6 +292,35 @@ describe('ParameterPanel', () => {
       {index: 0, params: {mode: '1'}},
       expect.any(AbortSignal),
     );
+    unmount();
+  });
+
+  it('choice 按 Enter 立即保存并取消 debounce', async () => {
+    vi.useFakeTimers();
+    const choiceStep = step(0, {
+      params: {mode: '1'},
+      parameterSpecs: [{
+        key: 'mode',
+        label: 'Mode',
+        type: 'choice',
+        choices: [['1', '字符串 1'], [1, '数字 1']],
+      }],
+    });
+    const initial = init([choiceStep]);
+    const {api, unmount} = await mount(initial);
+    const select = screen.getByLabelText('Mode');
+
+    fireEvent.change(select, {target: {value: '1'}});
+    expect(fireEvent.keyDown(select, {key: 'Enter'})).toBe(true);
+    await act(async () => Promise.resolve());
+
+    expect(api.setStep).toHaveBeenCalledTimes(1);
+    expect(api.setStep).toHaveBeenCalledWith(
+      {index: 0, params: {mode: 1}},
+      expect.any(AbortSignal),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(api.setStep).toHaveBeenCalledTimes(1);
     unmount();
   });
 
@@ -348,6 +398,18 @@ describe('ParameterPanel', () => {
 
     expect(screen.getByLabelText('Future')).toHaveValue('{"mode":"safe"}');
     expect(screen.queryByDisplayValue('[object Object]')).not.toBeInTheDocument();
+    expect(document.getElementById('parameter-0-future-units')).toBeNull();
+    unmount();
+  });
+
+  it('units 使用稳定 id 并关联到对应控件', async () => {
+    const initial = init();
+    const {unmount} = await mount(initial);
+    const input = screen.getByLabelText('Dose');
+    const units = screen.getByText('mJ/cm²');
+
+    expect(units).toHaveAttribute('id', 'parameter-0-dose-units');
+    expect(input.getAttribute('aria-describedby')?.split(' ')).toContain(units.id);
     unmount();
   });
 });

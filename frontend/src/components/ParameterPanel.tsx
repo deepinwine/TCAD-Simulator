@@ -90,9 +90,11 @@ function ParameterControl({
   onUpdate,
   onFlush,
 }: ParameterControlProps) {
-  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const handleKeyDown = (
+    event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
+  ) => {
     if (event.key !== 'Enter') return;
-    event.preventDefault();
+    if (event.currentTarget.tagName !== 'SELECT') event.preventDefault();
     onFlush();
   };
 
@@ -114,6 +116,7 @@ function ParameterControl({
           onUpdate(value, event.currentTarget.value);
         }}
         onBlur={onFlush}
+        onKeyDown={handleKeyDown}
       >
         <option value="" disabled>请选择</option>
         {spec.choices?.map(([value, label], index) => (
@@ -177,11 +180,12 @@ function ParameterField({
   const key = parameterDraftKey(stepIndex, spec.key);
   const draft = state.drafts[key];
   const inputId = `parameter-${stepIndex}-${spec.key}`;
+  const unitsId = spec.units ? `${inputId}-units` : undefined;
   const descriptionId = `${inputId}-description`;
   const validationId = `${inputId}-validation`;
   const initialValue = serverValue === undefined ? spec.defaultValue : serverValue;
   const [displayValue, setDisplayValue] = useState<DisplayValue>(
-    () => initialDisplayValue(spec, initialValue),
+    () => draft?.rawValue ?? initialDisplayValue(spec, initialValue),
   );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validDraftRef = useRef(false);
@@ -191,10 +195,14 @@ function ParameterField({
     : undefined;
   const hasError = clientError !== undefined || serverErrorId !== undefined;
   const describedBy = [
+    unitsId,
     description ? descriptionId : undefined,
     clientError ? validationId : undefined,
     serverErrorId,
-  ].filter((value): value is string => value !== undefined).join(' ') || undefined;
+  ];
+  const uniqueDescriptions = [...new Set(
+    describedBy.filter((value): value is string => value !== undefined),
+  )].join(' ') || undefined;
 
   const clearTimer = () => {
     if (timerRef.current === null) return;
@@ -203,7 +211,11 @@ function ParameterField({
   };
 
   useEffect(() => {
-    if (draft !== undefined) return;
+    if (draft !== undefined) {
+      if (draft.rawValue !== undefined) setDisplayValue(draft.rawValue);
+      validDraftRef.current = draft.validation.status === 'valid';
+      return;
+    }
     setDisplayValue(initialDisplayValue(spec, initialValue));
     validDraftRef.current = false;
   }, [draft, initialValue, spec]);
@@ -221,13 +233,22 @@ function ParameterField({
     const validation = validateParameter(spec, raw);
     validDraftRef.current = validation.ok;
     if (!validation.ok) {
-      actions.updateDraft(stepIndex, spec.key, raw, {
-        status: 'invalid',
-        message: validation.message,
-      });
+      actions.updateDraft(
+        stepIndex,
+        spec.key,
+        raw,
+        {status: 'invalid', message: validation.message},
+        display,
+      );
       return;
     }
-    actions.updateDraft(stepIndex, spec.key, validation.value, {status: 'valid'});
+    actions.updateDraft(
+      stepIndex,
+      spec.key,
+      validation.value,
+      {status: 'valid'},
+      display,
+    );
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       void actions.saveParameter(stepIndex, spec.key);
@@ -245,7 +266,9 @@ function ParameterField({
     <div className={`parameter-field${hasError ? ' has-error' : ''}`}>
       <div className="parameter-label-row">
         <label htmlFor={inputId}>{spec.label || spec.key}</label>
-        {spec.units && <span className="parameter-units">{spec.units}</span>}
+        {spec.units && (
+          <span id={unitsId} className="parameter-units">{spec.units}</span>
+        )}
       </div>
       <ParameterControl
         spec={spec}
@@ -253,7 +276,7 @@ function ParameterField({
         displayValue={displayValue}
         disabled={disabled}
         hasError={hasError}
-        describedBy={describedBy}
+        describedBy={uniqueDescriptions}
         onUpdate={update}
         onFlush={flush}
       />

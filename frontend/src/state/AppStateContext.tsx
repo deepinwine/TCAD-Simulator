@@ -29,6 +29,7 @@ export interface AppStateActions {
     key: string,
     value: unknown,
     validation?: ParameterValidation,
+    rawValue?: string | boolean,
   ): number;
   saveParameter(index: number, key: string): Promise<void>;
   runStep(index?: number): Promise<void>;
@@ -160,6 +161,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     key: string,
     value: unknown,
     validation: ParameterValidation = {status: 'valid'},
+    rawValue?: string | boolean,
   ): number => {
     if (!mountedRef.current) return 0;
     const draftKey = parameterDraftKey(index, key);
@@ -174,6 +176,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       index,
       key,
       value,
+      rawValue,
       sequence,
       validation,
     });

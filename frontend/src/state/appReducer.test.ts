@@ -86,6 +86,25 @@ describe('appReducer bootstrap 与本地编辑', () => {
 });
 
 describe('appReducer 参数序号', () => {
+  it('按字段保存 raw display 与 typed draft', () => {
+    const editing = appReducer(readyState(), {
+      type: 'parameter/draftChanged',
+      index: 1,
+      key: 'dose',
+      value: 125,
+      rawValue: '125.',
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+
+    expect(editing.drafts['1:dose']).toEqual({
+      value: 125,
+      rawValue: '125.',
+      sequence: 1,
+      validation: {status: 'valid'},
+    });
+  });
+
   it('保存成功只接受最新 field sequence 并使用服务端 step/statuses', () => {
     const editing = appReducer(readyState(), {
       type: 'parameter/draftChanged',
