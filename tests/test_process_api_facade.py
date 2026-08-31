@@ -168,5 +168,89 @@ class FacadeCoreTests(unittest.TestCase):
         self.assertEqual(facade.present_material_names(), direct_materials)
 
 
+def _find_numeric_spec(step: StepView):
+    for spec in step.parameterSpecs:
+        if spec.minimum is not None and isinstance(spec.default_value, (int, float)):
+            return spec
+    return None
+
+
+def _find_choice_spec(step: StepView):
+    for spec in step.parameterSpecs:
+        if spec.choices:
+            return spec
+    return None
+
+
+class FacadeSetStepTests(unittest.TestCase):
+    def test_set_step_updates_params_and_cascades_dirty(self) -> None:
+        facade = make_facade()
+        target = facade.recipe()[1]
+        numeric = _find_numeric_spec(target)
+        self.assertIsNotNone(numeric)
+        revision_before = facade.model_revision()
+
+        result = facade.set_step(1, params={numeric.key: numeric.default_value})
+
+        self.assertEqual(result.step.index, 1)
+        self.assertEqual(result.step.params[numeric.key], numeric.default_value)
+        statuses = {step.index: step.runtimeStatus for step in facade.recipe()}
+        self.assertEqual(statuses[0], "ready")
+        self.assertEqual(statuses[1], "dirty")
+        self.assertTrue(
+            all(status == "dirty" for index, status in statuses.items() if index > 1),
+            statuses,
+        )
+        self.assertEqual(facade.model_revision(), revision_before)
+        payload = to_json(result)
+        self.assertEqual(
+            set(payload.keys()), {"step", "statuses", "warnings"},
+        )
+        self.assertEqual(len(payload["statuses"]), len(facade.recipe()))
+
+    def test_set_step_unknown_key_raises_without_side_effects(self) -> None:
+        facade = make_facade()
+        statuses_before = [step.runtimeStatus for step in facade.recipe()]
+        with self.assertRaises(ProcessCadError) as ctx:
+            facade.set_step(0, params={"__no_such_key__": 1})
+        self.assertEqual(ctx.exception.code, "unknown_parameter")
+        self.assertEqual(ctx.exception.parameter_path, "__no_such_key__")
+        self.assertEqual(
+            [step.runtimeStatus for step in facade.recipe()], statuses_before,
+        )
+
+    def test_set_step_out_of_range_raises_with_parameter_path(self) -> None:
+        facade = make_facade()
+        numeric = _find_numeric_spec(facade.recipe()[0])
+        self.assertIsNotNone(numeric)
+        bad = float(numeric.minimum) - 1.0
+        with self.assertRaises(ProcessCadError) as ctx:
+            facade.set_step(0, params={numeric.key: bad})
+        self.assertEqual(ctx.exception.code, "invalid_parameter")
+        self.assertEqual(ctx.exception.parameter_path, numeric.key)
+
+    def test_set_step_choice_value_enforced(self) -> None:
+        facade = make_facade()
+        for step in facade.recipe():
+            choice = _find_choice_spec(step)
+            if choice is None:
+                continue
+            with self.assertRaises(ProcessCadError) as ctx:
+                facade.set_step(step.index, params={choice.key: "__bogus_choice__"})
+            self.assertEqual(ctx.exception.code, "invalid_parameter")
+            self.assertEqual(ctx.exception.parameter_path, choice.key)
+            return
+        self.skipTest("demo recipe has no choice parameter")
+
+    def test_set_step_enabled_toggle_and_run_all_skips(self) -> None:
+        facade = make_facade()
+        result = facade.set_step(1, enabled=False)
+        self.assertFalse(result.step.enabled)
+        run = facade.run_all()
+        self.assertEqual(run.runtimeStatus, "done")
+        statuses = {step.index: step.runtimeStatus for step in facade.recipe()}
+        self.assertEqual(statuses[1], "done")
+
+
 if __name__ == "__main__":
     unittest.main()

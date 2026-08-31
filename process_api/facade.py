@@ -17,6 +17,7 @@ from .schemas import (
     ModelSummaryView,
     ParameterSpecView,
     RunView,
+    SetStepView,
     StepView,
 )
 
@@ -136,6 +137,117 @@ class ProcessCadFacade:
 
     # ---- 运行 -----------------------------------------------------------
 
+    def set_step(
+        self,
+        index: int,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        enabled: Optional[bool] = None,
+        loop: Optional[str] = None,
+        group: Optional[str] = None,
+    ) -> SetStepView:
+        self._ensure_loaded()
+        if int(index) not in self._statuses:
+            raise ProcessCadError(
+                f"步骤索引越界：{index}",
+                code="unknown_step",
+            )
+        position = int(index)
+        step = self._deserialize(position)
+        if step is None:
+            raise ProcessCadError(
+                f"步骤反序列化失败：{self._blobs[position].get('name')!r}",
+                code="invalid_step",
+                step_index=position,
+            )
+
+        warnings: List[str] = []
+        blob = self._blobs[position]
+        blob_params = dict(blob.get("params", {}) or {})
+        if params is not None:
+            specs = {spec.key: spec for spec in step.parameter_specs()}
+            for key, value in params.items():
+                spec = specs.get(str(key))
+                if spec is None:
+                    raise ProcessCadError(
+                        f"未知参数：{key!r}",
+                        code="unknown_parameter",
+                        step_index=position,
+                        parameter_path=str(key),
+                        suggestion=f"可用参数：{sorted(specs)}",
+                    )
+                self._validate_parameter(position, str(key), value, spec)
+                blob_params[str(key)] = value
+            blob["params"] = blob_params
+        if enabled is not None:
+            blob["enabled"] = bool(enabled)
+        if loop is not None:
+            blob["loop"] = str(loop)
+        if group is not None:
+            blob["group"] = str(group)
+
+        # 契约语义：编辑使当前及后续步骤失效（dirty），模型与 revision 不变
+        for later in range(position, len(self._blobs)):
+            self._statuses[later] = "dirty"
+
+        updated = self._deserialize(position)
+        assert updated is not None
+        view = self._step_view(position, blob, updated)
+        return SetStepView(
+            step=view,
+            statuses=[
+                self._statuses.get(i, "ready") for i in range(len(self._blobs))
+            ],
+            warnings=warnings,
+        )
+
+    def _validate_parameter(
+        self,
+        position: int,
+        key: str,
+        value: Any,
+        spec: Any,
+    ) -> None:
+        minimum = getattr(spec, "minimum", None)
+        maximum = getattr(spec, "maximum", None)
+        if minimum is not None or maximum is not None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                raise ProcessCadError(
+                    f"参数 {key} 需要数值，收到 {value!r}",
+                    code="invalid_parameter",
+                    step_index=position,
+                    parameter_path=key,
+                ) from None
+            if minimum is not None and number < float(minimum):
+                raise ProcessCadError(
+                    f"参数 {key}={value!r} 低于最小值 {minimum}",
+                    code="invalid_parameter",
+                    step_index=position,
+                    parameter_path=key,
+                    suggestion=f"取值范围 [{minimum}, {maximum if maximum is not None else '∞'}]",
+                )
+            if maximum is not None and number > float(maximum):
+                raise ProcessCadError(
+                    f"参数 {key}={value!r} 超过最大值 {maximum}",
+                    code="invalid_parameter",
+                    step_index=position,
+                    parameter_path=key,
+                    suggestion=f"取值范围 [{minimum if minimum is not None else '-∞'}, {maximum}]",
+                )
+        choices = getattr(spec, "choices", None)
+        if choices:
+            allowed = [choice[0] for choice in choices]
+            if value not in allowed:
+                raise ProcessCadError(
+                    f"参数 {key}={value!r} 不在可选值内",
+                    code="invalid_parameter",
+                    step_index=position,
+                    parameter_path=key,
+                    suggestion=f"可选值：{allowed}",
+                )
+
     def run_step(self, index: int) -> RunView:
         self._ensure_loaded()
         if int(index) not in self._statuses:
@@ -183,18 +295,18 @@ class ProcessCadFacade:
 
     def run_all(self) -> RunView:
         self._ensure_loaded()
-        last: Optional[RunView] = None
+        last_executed: Optional[RunView] = None
         for position in range(len(self._blobs)):
-            if not bool(self._blobs[position].get("enabled", True)):
-                continue
-            last = self.run_step(position)
-        if last is None:
+            result = self.run_step(position)
+            if not result.skipped:
+                last_executed = result
+        if last_executed is None:
             raise ProcessCadError(
                 "配方没有可执行步骤",
                 code="empty_recipe",
             )
         return RunView(
-            index=last.index,
+            index=last_executed.index,
             runtimeStatus="done",
             modelRevision=self._revision,
             recipe=list(self.recipe()),

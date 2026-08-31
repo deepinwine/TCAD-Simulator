@@ -12,6 +12,7 @@ from .schemas import (
     ModelSummaryView,
     ParameterSpecView,
     RunView,
+    SetStepView,
     StepView,
     to_json,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "ProcessCadError",
     "ProcessCadFacade",
     "RunView",
+    "SetStepView",
     "StepView",
     "to_json",
 ]

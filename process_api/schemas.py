@@ -148,6 +148,20 @@ class RunView:
         })
 
 
+@dataclass(frozen=True)
+class SetStepView:
+    step: StepView
+    statuses: Sequence[RuntimeStatus]
+    warnings: Sequence[str]
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "step": self.step.to_json(),
+            "statuses": list(self.statuses),
+            "warnings": list(self.warnings),
+        }
+
+
 def to_json(view: Any) -> Dict[str, Any]:
     """按契约键名序列化任一视图对象。"""
     serializer = getattr(view, "to_json", None)
