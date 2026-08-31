@@ -182,7 +182,7 @@ describe('appReducer 参数序号', () => {
 });
 
 describe('appReducer 执行与 Timeline', () => {
-  it('mutation gate 标记运行中，并在成功时只采用真实 revision/recipe', () => {
+  it('mutation gate 标记运行中，并在成功时只采用真实 revision 与目标状态', () => {
     const running = appReducer(readyState(), {
       type: 'run/started',
       operation: 'all',
@@ -192,12 +192,14 @@ describe('appReducer 执行与 Timeline', () => {
 
     const response: RunView = {
       modelRevision: 42,
-      recipe: [step(0, {runtimeStatus: 'done'}), step(1, {runtimeStatus: 'done'})],
+      index: 1,
+      runtimeStatus: 'done',
       result: {server: 'authoritative'},
     };
     const succeeded = appReducer(running, {type: 'run/succeeded', payload: response});
     expect(succeeded.lastModelRevision).toBe(42);
-    expect(succeeded.recipe).toEqual(response.recipe);
+    expect(succeeded.recipe[0].runtimeStatus).toBe('ready');
+    expect(succeeded.recipe[1].runtimeStatus).toBe('done');
     expect(succeeded.lastRunResult).toEqual({server: 'authoritative'});
     expect(succeeded.previewGeneration).toBe(2);
     expect(succeeded.activeMutation).toBe('all');
@@ -232,22 +234,37 @@ describe('appReducer 执行与 Timeline', () => {
     const loaded = appReducer(readyState(), {type: 'timeline/loaded', payload: timeline});
     expect(loaded.timeline).toEqual(timeline);
 
-    const restoredPayload: TimelineRestoreView & {modelRevision?: number} = {
-      timeline,
+    const restoredPayload: TimelineRestoreView = {
+      timeline: {...timeline, current: -1},
       model: initView.model,
       recipe: [step(0, {runtimeStatus: 'done'}), step(1)],
       log: ['restored'],
-      modelRevision: 23,
     };
-    const restored = appReducer(loaded, {
+    const restored = appReducer({...loaded, lastModelRevision: 19}, {
       type: 'timeline/restoreSucceeded',
       payload: restoredPayload,
     });
-    expect(restored.timeline?.current).toBe(1);
-    expect(restored.selectedStepIndex).toBe(1);
+    expect(restored.timeline?.current).toBe(-1);
+    expect(restored.selectedStepIndex).toBeNull();
     expect(restored.recipe).toEqual(restoredPayload.recipe);
-    expect(restored.lastModelRevision).toBe(23);
+    expect(restored.lastModelRevision).toBe(19);
     expect(restored.previewGeneration).toBe(2);
+  });
+
+  it('Timeline 按 item.index 同步权威 runtimeStatus，重复项首个生效并忽略越界项', () => {
+    const payload: TimelineView = {
+      current: 1,
+      items: [
+        {index: 1, state: 'error-label-is-ignored', runtimeStatus: 'done', snapshotValid: true},
+        {index: 1, state: 'duplicate', runtimeStatus: 'error', snapshotValid: false},
+        {index: 99, state: 'out-of-range', runtimeStatus: 'error', snapshotValid: false},
+        {index: 0, state: 'not-a-runtime-status', runtimeStatus: 'dirty', snapshotValid: true},
+      ],
+    };
+    const loaded = appReducer(readyState(), {type: 'timeline/loaded', payload});
+
+    expect(loaded.recipe.map(item => item.runtimeStatus)).toEqual(['dirty', 'done']);
+    expect(loaded.timeline).toEqual(payload);
   });
 
   it('mutation 完成可靠释放 gate，但保留步骤错误', () => {

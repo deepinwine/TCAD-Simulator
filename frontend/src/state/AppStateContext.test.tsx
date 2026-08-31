@@ -169,7 +169,7 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     expect(api.setStep).not.toHaveBeenCalled();
     expect(captured?.state.activeMutation).toBe('all');
 
-    await act(async () => run.resolve({modelRevision: 4, recipe: initView.recipe}));
+    await act(async () => run.resolve({modelRevision: 4}));
     await first;
     await waitUntilReady();
     expect(captured?.state.activeMutation).toBeNull();
@@ -181,7 +181,7 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     const api = apiStub({
       runAll: vi.fn(async () => {
         events.push('api:run');
-        return {modelRevision: 17, recipe: [step(0, {runtimeStatus: 'done'}), step(1)]};
+        return {modelRevision: 17};
       }),
       getTimeline: vi.fn(() => {
         events.push('api:timeline');
@@ -197,11 +197,67 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     });
     await waitFor(() => expect(screen.getByText(/running:all:17:none/)).toBeInTheDocument());
     expect(events.slice(0, 3)).toEqual(['api:run', 'api:timeline', 'ui:revision:17']);
-    expect(captured?.state.recipe[0].runtimeStatus).toBe('done');
+    expect(captured?.state.recipe[0].runtimeStatus).toBe('ready');
 
     await act(async () => timelinePending.resolve(timeline));
     await operation;
     expect(captured?.state.timeline).toEqual(timeline);
+    expect(captured?.state.recipe.map(item => item.runtimeStatus)).toEqual(['done', 'ready']);
+    expect(captured?.state.activeMutation).toBeNull();
+  });
+
+  it('runStep 的真实最小响应立即更新目标步骤，Timeline 再同步全部状态', async () => {
+    const timelinePending = deferred<TimelineView>();
+    const api = apiStub({
+      runStep: vi.fn(async () => ({
+        runtimeStatus: 'done',
+        modelRevision: 18,
+        result: 'deposited',
+      } satisfies RunView)),
+      getTimeline: vi.fn(() => timelinePending.promise),
+    });
+    mount(api);
+    await waitUntilReady();
+
+    let operation!: Promise<void>;
+    act(() => {
+      operation = captured!.actions.runStep(1);
+    });
+    await waitFor(() => expect(captured?.state.lastModelRevision).toBe(18));
+    expect(captured?.state.recipe.map(item => item.runtimeStatus)).toEqual(['ready', 'done']);
+
+    await act(async () => timelinePending.resolve({
+      current: 1,
+      items: [
+        {index: 0, state: 'done', runtimeStatus: 'dirty', snapshotValid: true},
+        {index: 1, state: 'current', runtimeStatus: 'done', snapshotValid: true},
+      ],
+    }));
+    await operation;
+    expect(captured?.state.recipe.map(item => item.runtimeStatus)).toEqual(['dirty', 'done']);
+  });
+
+  it('Timeline 刷新失败仍保留 run 结果并释放 gate', async () => {
+    const api = apiStub({
+      runStep: vi.fn(async () => ({
+        runtimeStatus: 'done',
+        modelRevision: 21,
+        result: 'ok',
+      } satisfies RunView)),
+      getTimeline: vi.fn(async () => {
+        throw new TcadApiError('时间线不可用', {status: 503});
+      }),
+    });
+    mount(api);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.runStep(0));
+
+    expect(captured?.state.lastModelRevision).toBe(21);
+    expect(captured?.state.lastRunResult).toBe('ok');
+    expect(captured?.state.recipe[0].runtimeStatus).toBe('done');
+    expect(captured?.state.globalError?.message).toBe('时间线不可用');
+    expect(captured?.state.phase).toBe('ready');
     expect(captured?.state.activeMutation).toBeNull();
   });
 
@@ -278,12 +334,11 @@ describe('AppStateProvider mutation gate 与顺序', () => {
 
 describe('AppStateProvider Timeline 与生命周期', () => {
   it('只恢复 snapshotValid 节点，且不调用任何 run API', async () => {
-    const restored: TimelineRestoreView & {modelRevision?: number} = {
+    const restored: TimelineRestoreView = {
       timeline: {...timeline, current: 0},
       model: initView.model,
       recipe: [step(0, {runtimeStatus: 'done'}), step(1)],
       log: ['restored'],
-      modelRevision: 31,
     };
     const api = apiStub({restoreTimeline: vi.fn(async () => restored)});
     mount(api);
@@ -300,8 +355,21 @@ describe('AppStateProvider Timeline 与生命周期', () => {
     expect(api.runAll).not.toHaveBeenCalled();
     expect(captured?.state.timeline?.current).toBe(0);
     expect(captured?.state.selectedStepIndex).toBe(0);
-    expect(captured?.state.lastModelRevision).toBe(31);
+    expect(captured?.state.lastModelRevision).toBeNull();
     expect(captured?.state.previewGeneration).toBe(2);
+  });
+
+  it('首次 Timeline load 接受 current=-1 而不进入 fatal', async () => {
+    const emptyTimeline: TimelineView = {items: [], current: -1};
+    const api = apiStub({getTimeline: vi.fn(async () => emptyTimeline)});
+    mount(api);
+    await waitUntilReady();
+
+    await act(async () => captured!.actions.loadTimeline());
+
+    expect(captured?.state.timeline).toEqual(emptyTimeline);
+    expect(captured?.state.phase).toBe('ready');
+    expect(captured?.state.globalError).toBeNull();
   });
 
   it('unmount 后异步完成不会 dispatch 或产生 React 警告', async () => {

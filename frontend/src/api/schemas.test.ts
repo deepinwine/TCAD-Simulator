@@ -115,12 +115,26 @@ describe('mutation and timeline schemas', () => {
     expect(parsed.statuses).toEqual(['done', 'dirty']);
   });
 
-  it('解析 run 响应但不要求 disabled step 返回模型', () => {
+  it('解析真实最小 run 响应且不要求 disabled step 返回模型', () => {
+    expect(parseRunEnvelope({
+      ok: true,
+      result: {
+        index: 1,
+        runtime_status: 'done',
+        model_revision: 7,
+        result: 'deposited',
+      },
+    })).toEqual({
+      index: 1,
+      runtimeStatus: 'done',
+      modelRevision: 7,
+      result: 'deposited',
+    });
+
     expect(parseRunEnvelope({ok: true, result: {skipped: true, reason: 'disabled'}})).toEqual({
       skipped: true,
       reason: 'disabled',
     });
-    expect(parseRunEnvelope({ok: true, result: {model_revision: 7}}).modelRevision).toBe(7);
   });
 
   it('run 和 timeline restore 容忍客户端未读取的真实 metrics 二维数组', () => {
@@ -163,6 +177,22 @@ describe('mutation and timeline schemas', () => {
       ok: true,
       result: {items: [{index: 0, state: 'done', runtime_status: 'done'}], current: 0},
     })).toThrow('result.items[0].snapshot_valid');
+  });
+
+  it('Timeline current 接受无有效快照的 -1，但拒绝更小值和非整数', () => {
+    expect(parseTimelineEnvelope({
+      ok: true,
+      result: {items: [], current: -1},
+    })).toEqual({items: [], current: -1});
+
+    expect(() => parseTimelineEnvelope({
+      ok: true,
+      result: {items: [], current: -2},
+    })).toThrow('result.current');
+    expect(() => parseTimelineEnvelope({
+      ok: true,
+      result: {items: [], current: -0.5},
+    })).toThrow('result.current');
   });
 });
 

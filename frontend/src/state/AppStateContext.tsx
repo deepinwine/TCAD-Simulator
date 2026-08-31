@@ -210,7 +210,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     try {
       const payload = await request(controller.signal);
       if (!mountedRef.current) return;
-      dispatch({type: 'run/succeeded', payload});
+      dispatch({type: 'run/succeeded', payload, index: fallbackStepIndex});
       if (!mountedRef.current) return;
       try {
         const timeline = await api.getTimeline(controller.signal);

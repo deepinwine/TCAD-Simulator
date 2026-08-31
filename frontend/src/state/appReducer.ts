@@ -71,7 +71,7 @@ export type AppAction =
     error: TcadApiError;
   }
   | {type: 'run/started'; operation: Exclude<ActiveMutation, null>}
-  | {type: 'run/succeeded'; payload: RunView}
+  | {type: 'run/succeeded'; payload: RunView; index?: number}
   | {type: 'run/failed'; index?: number; error: TcadApiError}
   | {type: 'timeline/loaded'; payload: TimelineView}
   | {type: 'timeline/loadFailed'; error: TcadApiError}
@@ -132,11 +132,24 @@ function applyStatuses(
   });
 }
 
-function optionalModelRevision(value: TimelineRestoreView): number | undefined {
-  const candidate = (value as TimelineRestoreView & {modelRevision?: unknown}).modelRevision;
-  return typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0
-    ? candidate
-    : undefined;
+function updateStepRuntimeStatus(
+  recipe: StepView[],
+  index: number | undefined,
+  runtimeStatus: RuntimeStatus | undefined,
+): StepView[] {
+  if (index === undefined || runtimeStatus === undefined) return recipe;
+  return recipe.map(item => item.index === index ? {...item, runtimeStatus} : item);
+}
+
+function applyTimelineStatuses(recipe: StepView[], timeline: TimelineView): StepView[] {
+  const statuses = new Map<number, RuntimeStatus>();
+  for (const item of timeline.items) {
+    if (!statuses.has(item.index)) statuses.set(item.index, item.runtimeStatus);
+  }
+  return recipe.map(item => {
+    const runtimeStatus = statuses.get(item.index);
+    return runtimeStatus === undefined ? item : {...item, runtimeStatus};
+  });
 }
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -206,7 +219,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'run/succeeded':
       return {
         ...state,
-        recipe: action.payload.recipe ?? state.recipe,
+        recipe: updateStepRuntimeStatus(
+          state.recipe,
+          action.payload.index ?? action.index,
+          action.payload.runtimeStatus,
+        ),
         model: action.payload.model ?? state.model,
         lastModelRevision: action.payload.modelRevision ?? state.lastModelRevision,
         lastRunResult: action.payload.result,
@@ -221,18 +238,24 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           stepErrors: {...state.stepErrors, [action.index]: action.error},
         };
     case 'timeline/loaded':
-      return {...state, timeline: action.payload};
+      return {
+        ...state,
+        recipe: applyTimelineStatuses(state.recipe, action.payload),
+        timeline: action.payload,
+      };
     case 'timeline/loadFailed':
       return {...state, globalError: action.error};
     case 'timeline/restoreSucceeded': {
-      const modelRevision = optionalModelRevision(action.payload);
+      const selectedStepIndex = action.payload.timeline.current >= 0
+        && action.payload.recipe.some(item => item.index === action.payload.timeline.current)
+        ? action.payload.timeline.current
+        : null;
       return {
         ...state,
         recipe: action.payload.recipe,
         model: action.payload.model,
         timeline: action.payload.timeline,
-        selectedStepIndex: action.payload.timeline.current,
-        lastModelRevision: modelRevision ?? state.lastModelRevision,
+        selectedStepIndex,
         previewGeneration: state.previewGeneration + 1,
         drafts: {},
         stepErrors: {},

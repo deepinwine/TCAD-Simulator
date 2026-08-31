@@ -302,7 +302,6 @@ export function parseRunEnvelope(payload: unknown): RunView {
   if (modelRevision !== undefined) parsed.modelRevision = modelRevision;
   if (result.model !== undefined) parsed.model = parseModel(result.model, 'result.model');
   if (result.runtime_status !== undefined) parsed.runtimeStatus = parseRuntimeStatus(result.runtime_status);
-  if (result.recipe !== undefined) parsed.recipe = parseRecipe(result.recipe, 'result.recipe');
   if (result.log !== undefined) parsed.log = parseStringArray(result.log, 'result.log');
   if (result.skipped !== undefined) parsed.skipped = requireBoolean(result.skipped, 'result.skipped');
   const reason = optionalString(result.reason, 'result.reason');
@@ -328,7 +327,7 @@ function parseTimeline(value: unknown, path: string): TimelineView {
         snapshotValid: requireBoolean(itemSource.snapshot_valid, `${itemPath}.snapshot_valid`),
       };
     }),
-    current: requireInteger(source.current, `${path}.current`),
+    current: requireInteger(source.current, `${path}.current`, -1),
   };
 }
 
