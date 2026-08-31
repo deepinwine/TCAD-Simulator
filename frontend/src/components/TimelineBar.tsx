@@ -86,15 +86,17 @@ export function TimelineBar() {
           <p className="timeline-empty" role="status">正在加载 Timeline…</p>
         )}
         {state.timelineError !== null && (
-          <ErrorNotice
-            title="Timeline 加载失败"
-            message={state.timelineError.message}
-            parameterPath={state.timelineError.parameterPath}
-            suggestion={state.timelineError.suggestion}
-            rolledBack={state.timelineError.rolledBack}
-            actionLabel="重试 Timeline"
-            onAction={() => void actions.loadTimeline()}
-          />
+          <div className="timeline-error">
+            <ErrorNotice
+              title="Timeline 加载失败"
+              message={state.timelineError.message}
+              parameterPath={state.timelineError.parameterPath}
+              suggestion={state.timelineError.suggestion}
+              rolledBack={state.timelineError.rolledBack}
+              actionLabel="重试 Timeline"
+              onAction={() => void actions.loadTimeline()}
+            />
+          </div>
         )}
         {timeline !== null && timeline.items.length === 0 && (
           <p className="timeline-empty">当前没有 Timeline 快照</p>

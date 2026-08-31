@@ -804,3 +804,48 @@ button:focus-visible,
   font-size: 10px;
   white-space: nowrap;
 }
+
+/* Timeline 底栏高度固定（92px），错误使用紧凑布局并允许滚动，避免 retry 被裁切。 */
+.timeline-error {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  overflow: auto;
+}
+
+.timeline-error .error-notice {
+  max-width: none;
+  flex: 1;
+  min-width: 0;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.timeline-error .error-notice .error-mark {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+}
+
+.timeline-error .error-notice > div {
+  min-width: 0;
+}
+
+.timeline-error .error-notice h2 {
+  font-size: 10px;
+}
+
+.timeline-error .error-notice p {
+  margin: 0;
+  font-size: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.timeline-error .error-notice button {
+  min-height: 22px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  font-size: 10px;
+}

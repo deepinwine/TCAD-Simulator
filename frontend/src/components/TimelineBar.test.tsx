@@ -247,6 +247,23 @@ describe('TimelineBar', () => {
     ));
   });
 
+  it('底栏错误使用紧凑容器渲染，超长消息不丢失且 retry 可达', async () => {
+    const longMessage = 'x'.repeat(600);
+    const getTimeline = vi.fn()
+      .mockRejectedValue(new TcadApiError(longMessage, {status: 500}));
+    const api = apiStub({getTimeline});
+    render(<App api={api} />);
+
+    const alert = await screen.findByRole('alert');
+    const compact = alert.closest('.timeline-error');
+    expect(compact).not.toBeNull();
+    expect(alert).toHaveTextContent('Timeline 加载失败');
+    expect(alert).toHaveTextContent(longMessage);
+    const retry = screen.getByRole('button', {name: '重试 Timeline'});
+    expect(retry).toBeEnabled();
+    expect(compact).toContainElement(retry);
+  });
+
   it('current 不存在时按 -1 计算 Next，不保留伪 aria-current', async () => {
     const missingCurrent: TimelineView = {
       current: 8,
