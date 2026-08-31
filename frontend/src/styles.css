@@ -283,7 +283,7 @@ button:focus-visible,
   box-shadow: inset 0 0 28px rgb(49 132 187 / 7%);
 }
 
-.process-step[aria-disabled="true"] {
+.process-step[data-process-enabled="false"] {
   opacity: 0.65;
 }
 

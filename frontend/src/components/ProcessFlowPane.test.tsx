@@ -59,4 +59,73 @@ describe('ProcessFlowPane', () => {
     render(<ProcessFlowPane recipe={[]} selectedStepIndex={null} onSelect={() => undefined} />);
     expect(screen.getByText('当前配方没有工艺步骤')).toBeVisible();
   });
+
+  it('只保留一个 Tab 入口并用方向键、Home 和 End 移动焦点而不选择', () => {
+    const onSelect = vi.fn();
+    render(
+      <ProcessFlowPane
+        recipe={[step(0, 'ready'), step(1, 'ready'), step(2, 'ready')]}
+        selectedStepIndex={1}
+        onSelect={onSelect}
+      />,
+    );
+    const options = screen.getAllByRole('option');
+
+    expect(options.map(option => option.tabIndex)).toEqual([-1, 0, -1]);
+    options[1].focus();
+    fireEvent.keyDown(options[1], {key: 'ArrowDown'});
+    expect(options[2]).toHaveFocus();
+    fireEvent.keyDown(options[2], {key: 'ArrowDown'});
+    expect(options[2]).toHaveFocus();
+    fireEvent.keyDown(options[2], {key: 'ArrowUp'});
+    expect(options[1]).toHaveFocus();
+    fireEvent.keyDown(options[1], {key: 'Home'});
+    expect(options[0]).toHaveFocus();
+    fireEvent.keyDown(options[0], {key: 'End'});
+    expect(options[2]).toHaveFocus();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Enter、Space 和鼠标可选择禁用工艺步骤且不会重复触发', () => {
+    const onSelect = vi.fn();
+    const disabledStep = {...step(1, 'dirty'), enabled: false};
+    render(
+      <ProcessFlowPane
+        recipe={[step(0, 'ready'), disabledStep]}
+        selectedStepIndex={0}
+        onSelect={onSelect}
+      />,
+    );
+    const disabled = screen.getByRole('option', {name: /Instance 1/});
+
+    expect(disabled).not.toHaveAttribute('aria-disabled');
+    expect(disabled).toHaveTextContent('已禁用');
+    fireEvent.keyDown(disabled, {key: 'Enter'});
+    expect(onSelect).toHaveBeenNthCalledWith(1, 1);
+    fireEvent.keyDown(disabled, {key: ' '});
+    expect(onSelect).toHaveBeenNthCalledWith(2, 1);
+    fireEvent.click(disabled);
+    expect(onSelect).toHaveBeenNthCalledWith(3, 1);
+    expect(onSelect).toHaveBeenCalledTimes(3);
+  });
+
+  it('外部 selection 与 recipe 更新会安全重置 roving Tab 点', () => {
+    const onSelect = vi.fn();
+    const recipe = [step(0, 'ready'), step(1, 'ready'), step(2, 'ready')];
+    const view = render(
+      <ProcessFlowPane recipe={recipe} selectedStepIndex={0} onSelect={onSelect} />,
+    );
+
+    fireEvent.click(screen.getAllByRole('option')[2]);
+    expect(onSelect).toHaveBeenCalledWith(2);
+    view.rerender(
+      <ProcessFlowPane recipe={recipe} selectedStepIndex={2} onSelect={onSelect} />,
+    );
+    expect(screen.getAllByRole('option').map(option => option.tabIndex)).toEqual([-1, -1, 0]);
+
+    view.rerender(
+      <ProcessFlowPane recipe={[step(5, 'ready')]} selectedStepIndex={2} onSelect={onSelect} />,
+    );
+    expect(screen.getByRole('option')).toHaveAttribute('tabindex', '0');
+  });
 });
