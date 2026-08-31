@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 import {STLLoader} from 'three/examples/jsm/loaders/STLLoader.js';
 import type {TcadApi} from '../api/types';
+import {clipStateAllOff, deriveClipPlanes, type ClipState} from './clipping';
 import {calculateOrthographicFit, calculatePerspectiveFit} from './fitCamera';
 import {createMeshLoader, type LoadedMesh} from './meshLoader';
 
@@ -13,6 +14,7 @@ export interface ViewerRuntime {
   mount(container: HTMLElement): void;
   setStandardView(view: StandardView): void;
   setProjection(mode: ProjectionMode): void;
+  setClipping(state: ClipState): void;
   fit(): void;
   loadMeshes(token: number): Promise<{warnings: string[]}>;
   dispose(): void;
@@ -49,6 +51,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let disposed = false;
   let firstLoadDone = false;
   let backendLabel = 'WebGL2';
+  let clipState: ClipState = clipStateAllOff();
 
   const stlLoader = new STLLoader();
   const meshLoader = createMeshLoader({
@@ -158,6 +161,20 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     controls.update();
   };
 
+  const applyClippingToMaterials = () => {
+    if (renderer === null || group === null) return;
+    const planes = deriveClipPlanes(clipState, contentBounds());
+    renderer.localClippingEnabled = planes.length > 0;
+    for (const child of group.children) {
+      const mesh = child as THREE.Mesh;
+      const material = mesh.material as THREE.Material | null;
+      if (material === null) continue;
+      const previous = material.clippingPlanes?.length ?? 0;
+      material.clippingPlanes = planes.length > 0 ? planes : null;
+      if (previous !== planes.length) material.needsUpdate = true;
+    }
+  };
+
   const runtime: ViewerRuntime = {
     get backend() {
       return backendLabel;
@@ -251,6 +268,11 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       rebindControls(target);
       scheduleRender();
     },
+    setClipping(state: ClipState) {
+      clipState = state;
+      applyClippingToMaterials();
+      scheduleRender();
+    },
     fit() {
       const view = activeCamera();
       if (view === null) return;
@@ -288,6 +310,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         firstLoadDone = true;
         runtime.setStandardView('iso');
       }
+      applyClippingToMaterials();
       scheduleRender();
       return {warnings: result.warnings};
     },

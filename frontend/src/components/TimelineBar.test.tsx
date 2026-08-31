@@ -88,6 +88,7 @@ const stubViewerRuntime = () => ({
   mount: () => {},
   setStandardView: () => {},
   setProjection: () => {},
+  setClipping: () => {},
   fit: () => {},
   loadMeshes: async () => ({warnings: []}),
   dispose: () => {},
@@ -103,6 +104,7 @@ function recordingViewerRuntime() {
       mount: () => {},
       setStandardView: () => {},
       setProjection: () => {},
+      setClipping: () => {},
       fit: () => {},
       loadMeshes: async (token: number) => {
         loadedTokens.push(token);

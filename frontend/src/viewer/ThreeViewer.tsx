@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import type {TcadApi} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
+import {clipStateAllOff, type ClipAxis, type ClipState} from './clipping';
 import {createThreeViewerRuntime} from './viewerRuntime';
 import type {StandardView, ViewerRuntime} from './viewerRuntime';
 
@@ -23,6 +24,12 @@ const STANDARD_VIEWS: ReadonlyArray<{view: StandardView; label: string}> = [
   {view: 'right', label: '右视图'},
 ];
 
+const CLIP_AXES: ReadonlyArray<{axis: ClipAxis; label: string}> = [
+  {axis: 'x', label: 'X'},
+  {axis: 'y', label: 'Y'},
+  {axis: 'z', label: 'Z'},
+];
+
 export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<ViewerRuntime | null>(null);
@@ -30,6 +37,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   const [initError, setInitError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [orthoActive, setOrthoActive] = useState(false);
+  const [clip, setClip] = useState<ClipState>(clipStateAllOff);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -83,6 +91,25 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     setOrthoActive(!orthoActive);
   }, [orthoActive]);
 
+  const updateClip = useCallback((next: ClipState) => {
+    setClip(next);
+    runtimeRef.current?.setClipping(next);
+  }, []);
+
+  const toggleClipAxis = (axis: ClipAxis) => {
+    updateClip({
+      ...clip,
+      [axis]: {...clip[axis], enabled: !clip[axis].enabled},
+    });
+  };
+
+  const moveClipAxis = (axis: ClipAxis, position: number) => {
+    updateClip({
+      ...clip,
+      [axis]: {...clip[axis], position},
+    });
+  };
+
   return (
     <section className="workspace-pane viewer-pane" aria-label="3D Viewer">
       <header className="pane-header viewer-header">
@@ -121,6 +148,32 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
         >
           正交视图
         </button>
+      </div>
+      <div className="viewer-clip-group" role="group" aria-label="裁剪平面">
+        {CLIP_AXES.map(({axis, label}) => (
+          <div key={axis} className="viewer-clip-row">
+            <label className="viewer-clip-axis">
+              <input
+                type="checkbox"
+                checked={clip[axis].enabled}
+                disabled={initError !== null}
+                aria-label={`启用 ${label} 裁剪`}
+                onChange={() => toggleClipAxis(axis)}
+              />
+              {label}
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={clip[axis].position}
+              disabled={initError !== null || !clip[axis].enabled}
+              aria-label={`${label} 裁剪位置`}
+              onChange={event => moveClipAxis(axis, Number(event.target.value))}
+            />
+          </div>
+        ))}
       </div>
       <div className="viewer-stage" ref={containerRef}>
         {initError !== null && (

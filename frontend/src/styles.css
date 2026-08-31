@@ -913,3 +913,34 @@ button:focus-visible,
   left: 10px;
   max-width: min(420px, calc(100% - 20px));
 }
+
+.viewer-clip-group {
+  display: flex;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1e2a3a;
+  background: #0f1722;
+}
+
+.viewer-clip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.viewer-clip-axis {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8fa3b8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.viewer-clip-row input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #4f9cf9;
+}

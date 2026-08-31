@@ -21,6 +21,7 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
     setProjection: vi.fn((mode: 'perspective' | 'orthographic') => {
       calls.projections.push(mode);
     }),
+    setClipping: vi.fn(),
     fit: vi.fn(() => {
       calls.fits += 1;
     }),
@@ -108,6 +109,42 @@ describe('ThreeViewer', () => {
     expect(shared.calls.apiCalls).toBe(callsBefore);
   });
 
+  it('裁剪控件默认全关，启用与滑杆操作调用 setClipping 且不发请求', async () => {
+    const shared = fakeViewerRuntime();
+    render(
+      <ThreeViewer
+        api={apiStub}
+        refreshToken={2}
+        runtimeFactory={() => shared.runtime}
+      />,
+    );
+    await screen.findByText('WebGL2');
+    const slider = screen.getByRole('slider', {name: 'X 裁剪位置'});
+    expect(slider).toBeDisabled();
+    expect(screen.getByRole('slider', {name: 'Y 裁剪位置'})).toBeDisabled();
+    expect(screen.getByRole('slider', {name: 'Z 裁剪位置'})).toBeDisabled();
+    expect(shared.runtime.setClipping).not.toHaveBeenCalled();
+    const callsBefore = shared.calls.apiCalls;
+
+    fireEvent.click(screen.getByRole('checkbox', {name: '启用 X 裁剪'}));
+    expect(shared.runtime.setClipping).toHaveBeenCalledTimes(1);
+    expect(shared.runtime.setClipping).toHaveBeenCalledWith({
+      x: {enabled: true, position: 0},
+      y: {enabled: false, position: 0},
+      z: {enabled: false, position: 0},
+    });
+
+    fireEvent.change(screen.getByRole('slider', {name: 'X 裁剪位置'}), {
+      target: {value: '0.75'},
+    });
+    expect(shared.runtime.setClipping).toHaveBeenLastCalledWith({
+      x: {enabled: true, position: 0.75},
+      y: {enabled: false, position: 0},
+      z: {enabled: false, position: 0},
+    });
+    expect(shared.calls.apiCalls).toBe(callsBefore);
+  });
+
   it('refreshToken 变化触发网格加载，材料失败可重试', async () => {
     let shouldFail = true;
     const shared = fakeViewerRuntime({
@@ -160,5 +197,7 @@ describe('ThreeViewer', () => {
     expect(screen.queryByText('WebGL2')).toBeNull();
     expect(screen.getByRole('button', {name: '正交视图'})).toBeDisabled();
     expect(screen.getByRole('button', {name: 'ISO 视图'})).toBeDisabled();
+    expect(screen.getByRole('checkbox', {name: '启用 X 裁剪'})).toBeDisabled();
+    expect(screen.getByRole('slider', {name: 'X 裁剪位置'})).toBeDisabled();
   });
 });
