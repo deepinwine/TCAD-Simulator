@@ -183,6 +183,21 @@ function applyTimelineStatuses(recipe: StepView[], timeline: TimelineView): Step
   });
 }
 
+function canonicalizeTimeline(timeline: TimelineView): TimelineView {
+  const seen = new Set<number>();
+  const items = timeline.items
+    .filter(item => {
+      if (seen.has(item.index)) return false;
+      seen.add(item.index);
+      return true;
+    })
+    .sort((left, right) => left.index - right.index);
+  return {
+    items,
+    current: items.some(item => item.index === timeline.current) ? timeline.current : -1,
+  };
+}
+
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'bootstrap/started':
@@ -258,7 +273,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         phase: 'running',
         activeMutation: action.operation,
-        historicalStepIndex: null,
+        historicalStepIndex: action.operation === 'timeline'
+          ? state.historicalStepIndex
+          : null,
         globalError: null,
       };
     case 'run/succeeded': {
@@ -282,13 +299,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case 'run/failed': {
-      const recipe = updateStepRuntimeStatus(state.recipe, action.index, 'error');
-      return action.index === undefined
+      const index = action.index !== undefined
+        && state.recipe.some(item => item.index === action.index)
+        ? action.index
+        : undefined;
+      const recipe = updateStepRuntimeStatus(state.recipe, index, 'error');
+      return index === undefined
         ? {...state, globalError: action.error}
         : {
           ...state,
           recipe,
-          stepErrors: {...state.stepErrors, [action.index]: action.error},
+          stepErrors: {...state.stepErrors, [index]: action.error},
         };
     }
     case 'timeline/loadStarted':
@@ -305,11 +326,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         timelineStatus: state.timeline === null ? 'idle' : 'ready',
       };
-    case 'timeline/loaded':
+    case 'timeline/loaded': {
+      const timeline = canonicalizeTimeline(action.payload);
       return {
         ...state,
-        recipe: applyTimelineStatuses(state.recipe, action.payload),
-        timeline: action.payload,
+        recipe: applyTimelineStatuses(state.recipe, timeline),
+        timeline,
         timelineStatus: 'ready',
         timelineError: null,
         globalError: action.errorToClear !== undefined
@@ -317,6 +339,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ? null
           : state.globalError,
       };
+    }
     case 'timeline/loadFailed':
       return {
         ...state,
@@ -325,20 +348,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         globalError: action.error,
       };
     case 'timeline/restoreSucceeded': {
-      const selectedStepIndex = action.payload.timeline.current >= 0
-        && action.payload.recipe.some(item => item.index === action.payload.timeline.current)
-        ? action.payload.timeline.current
+      const timeline = canonicalizeTimeline(action.payload.timeline);
+      const recipe = applyTimelineStatuses(action.payload.recipe, timeline);
+      const selectedStepIndex = timeline.current >= 0
+        && recipe.some(item => item.index === timeline.current)
+        ? timeline.current
         : null;
       // lastModelRevision 仅保留最近一次 run 报告提示；几何权威始终是 manifest.rev。
       return {
         ...state,
-        recipe: action.payload.recipe,
+        recipe,
         model: action.payload.model,
-        timeline: action.payload.timeline,
+        timeline,
         timelineStatus: 'ready',
         timelineError: null,
-        historicalStepIndex: action.payload.timeline.current >= 0
-          ? action.payload.timeline.current
+        historicalStepIndex: timeline.current >= 0
+          ? timeline.current
           : null,
         selectedStepIndex,
         previewGeneration: state.previewGeneration + 1,

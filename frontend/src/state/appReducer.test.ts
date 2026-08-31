@@ -383,6 +383,28 @@ describe('appReducer 执行与 Timeline', () => {
     expect(failed.historicalStepIndex).toBeNull();
   });
 
+  it('恢复 Timeline 开始和失败保留旧历史标识，成功后才替换为新步骤', () => {
+    const historical = {...readyState(), historicalStepIndex: 0};
+    const restoring = appReducer(historical, {type: 'run/started', operation: 'timeline'});
+    const failed = appReducer(restoring, {
+      type: 'timeline/restoreFailed',
+      error: new TcadApiError('恢复失败', {status: 409}),
+    });
+    const succeeded = appReducer(restoring, {
+      type: 'timeline/restoreSucceeded',
+      payload: {
+        timeline: {...timeline, current: 1},
+        model: initView.model,
+        recipe: initView.recipe,
+        log: [],
+      },
+    });
+
+    expect(restoring.historicalStepIndex).toBe(0);
+    expect(failed.historicalStepIndex).toBe(0);
+    expect(succeeded.historicalStepIndex).toBe(1);
+  });
+
   it('mutation gate 标记运行中，并在成功时只采用真实 revision 与目标状态', () => {
     const running = appReducer({...readyState(), historicalStepIndex: 0}, {
       type: 'run/started',
@@ -433,6 +455,15 @@ describe('appReducer 执行与 Timeline', () => {
     expect(failed.recipe[1].runtimeStatus).toBe('error');
   });
 
+  it('运行失败的步骤索引不在当前 recipe 时降级为全局错误', () => {
+    const error = new TcadApiError('未知步骤失败', {status: 400});
+    const failed = appReducer(readyState(), {type: 'run/failed', index: 99, error});
+
+    expect(failed.stepErrors).toEqual({});
+    expect(failed.globalError).toBe(error);
+    expect(failed.recipe.map(item => item.runtimeStatus)).toEqual(['ready', 'ready']);
+  });
+
   it('Timeline load 与有效快照恢复采用服务端 current/recipe 并刷新预览', () => {
     const loaded = appReducer(readyState(), {type: 'timeline/loaded', payload: timeline});
     expect(loaded.timeline).toEqual(timeline);
@@ -465,12 +496,12 @@ describe('appReducer 执行与 Timeline', () => {
     expect(restored.parameterErrors).toEqual({});
   });
 
-  it('Timeline 按 item.index 同步权威 runtimeStatus，重复项首个生效并忽略越界项', () => {
+  it('Timeline 稳定 first-wins 去重排序并用同一份数据同步状态', () => {
     const payload: TimelineView = {
       current: 1,
       items: [
-        {index: 1, state: 'error-label-is-ignored', runtimeStatus: 'done', snapshotValid: true},
-        {index: 1, state: 'duplicate', runtimeStatus: 'error', snapshotValid: false},
+        {index: 1, state: 'first-invalid', runtimeStatus: 'done', snapshotValid: false},
+        {index: 1, state: 'duplicate-valid', runtimeStatus: 'error', snapshotValid: true},
         {index: 99, state: 'out-of-range', runtimeStatus: 'error', snapshotValid: false},
         {index: 0, state: 'not-a-runtime-status', runtimeStatus: 'dirty', snapshotValid: true},
       ],
@@ -478,7 +509,38 @@ describe('appReducer 执行与 Timeline', () => {
     const loaded = appReducer(readyState(), {type: 'timeline/loaded', payload});
 
     expect(loaded.recipe.map(item => item.runtimeStatus)).toEqual(['dirty', 'done']);
-    expect(loaded.timeline).toEqual(payload);
+    expect(loaded.timeline).toEqual({
+      current: 1,
+      items: [payload.items[3], payload.items[0], payload.items[2]],
+    });
+  });
+
+  it('Timeline current 缺失时归一为 -1，current 快照无效时仍保留当前位置', () => {
+    const invalidCurrent: TimelineView = {
+      current: 1,
+      items: [
+        {index: 1, state: 'current', runtimeStatus: 'done', snapshotValid: false},
+        {index: 0, state: 'done', runtimeStatus: 'done', snapshotValid: true},
+      ],
+    };
+    const loaded = appReducer(readyState(), {
+      type: 'timeline/loaded',
+      payload: invalidCurrent,
+    });
+    expect(loaded.timeline?.current).toBe(1);
+
+    const restored = appReducer(readyState(), {
+      type: 'timeline/restoreSucceeded',
+      payload: {
+        timeline: {...invalidCurrent, current: 7},
+        model: initView.model,
+        recipe: initView.recipe,
+        log: [],
+      },
+    });
+    expect(restored.timeline?.current).toBe(-1);
+    expect(restored.historicalStepIndex).toBeNull();
+    expect(restored.selectedStepIndex).toBeNull();
   });
 
   it('Timeline 成功响应清除此前对应的加载错误', () => {

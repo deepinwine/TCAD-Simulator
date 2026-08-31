@@ -60,15 +60,24 @@ function normalizeError(error: unknown): TcadApiError {
   });
 }
 
-function errorStepIndex(error: TcadApiError, fallback?: number): number | undefined {
+function errorStepIndex(
+  error: TcadApiError,
+  recipe: AppState['recipe'],
+  operation: 'step' | 'to' | 'all',
+  fallback?: number,
+): number | undefined {
   const details = error.details;
   if (typeof details === 'object' && details !== null && !Array.isArray(details)) {
     const candidate = (details as Record<string, unknown>).stepIndex;
     if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0) {
-      return candidate;
+      return recipe.some(item => item.index === candidate) ? candidate : undefined;
     }
   }
-  return fallback;
+  return operation === 'step'
+    && fallback !== undefined
+    && recipe.some(item => item.index === fallback)
+    ? fallback
+    : undefined;
 }
 
 function isAbortError(error: unknown, signal: AbortSignal): boolean {
@@ -298,7 +307,12 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       const normalized = normalizeError(error);
       dispatch({
         type: 'run/failed',
-        index: errorStepIndex(normalized, fallbackStepIndex),
+        index: errorStepIndex(
+          normalized,
+          stateRef.current.recipe,
+          operation,
+          fallbackStepIndex,
+        ),
         error: normalized,
       });
     } finally {
