@@ -119,20 +119,18 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-31, M4 implementation complete)
+## Current Branch State (2026-08-31, M4 merged to backup/main)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
-| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1/M2/M3 实现 |
-| `backup/main`（deepinwine） | `d4c3414` | **M3 已由所有者授权快进合并**（M2 `8b2d4c0` + M3 7 提交，2026-08-31） |
-| 本地 `main` | `d4c3414` | 与 `backup/main` 一致 |
-| `codex/m3-viewer` | `d4c3414` | M3 交付分支，已全部包含于 `main`（保留作历史） |
-| `codex/m4-api-facade` | M4 交付分支（计划 + 5 个功能提交 + 本文档提交） | 线性领先 `backup/main`（`31ce391`），可快进合并 |
+| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1–M4 实现 |
+| `backup/main`（deepinwine） | `3f7faba` | **M4 已由所有者授权快进合并**（M3 `31ce391` + M4 7 提交，2026-08-31） |
+| 本地 `main` | `3f7faba` | 与 `backup/main` 一致 |
+| `codex/m4-api-facade` | `3f7faba` | M4 交付分支，已全部包含于 `main`（保留作历史） |
 
-祖先关系：`41a2fcd ⊂ 063838a ⊂ d293d34 ⊂ 546b70f ⊂ 8b2d4c0 ⊂ …M3 7 提交… ⊂ d4c3414`。
+祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: M4 经所有者审查后合并 `backup/main` → 开始 M5 React Parity（React 补齐旧
-  WebUI 剩余能力并过回归后，才允许弃用旧 UI）。
+- Next: 开始 M5 React Parity（React 补齐旧 WebUI 剩余能力并过回归后，才允许弃用旧 UI）。
