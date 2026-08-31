@@ -11,6 +11,7 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
     fits: 0,
     disposed: 0,
     projections: [] as Array<'perspective' | 'orthographic'>,
+    materialDisplay: [] as Array<[number, {visible?: boolean; opacity?: number}]>,
   };
   const runtime: ViewerRuntime = {
     backend: 'WebGL2',
@@ -22,13 +23,16 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
       calls.projections.push(mode);
     }),
     setClipping: vi.fn(),
+    setMaterialDisplay: vi.fn((matId: number, display: {visible?: boolean; opacity?: number}) => {
+      calls.materialDisplay.push([matId, display]);
+    }),
     fit: vi.fn(() => {
       calls.fits += 1;
     }),
     loadMeshes: vi.fn(async (token: number) => {
       calls.apiCalls += 1;
       calls.loadedTokens.push(token);
-      return {warnings: []};
+      return {warnings: [], materials: []};
     }),
     dispose: vi.fn(() => {
       calls.disposed += 1;
@@ -145,6 +149,43 @@ describe('ThreeViewer', () => {
     expect(shared.calls.apiCalls).toBe(callsBefore);
   });
 
+  it('加载后列出材料，显示控制调用 setMaterialDisplay 且不发请求', async () => {
+    const shared = fakeViewerRuntime({
+      loadMeshes: vi.fn(async (token: number) => {
+        shared.calls.apiCalls += 1;
+        shared.calls.loadedTokens.push(token);
+        return {
+          warnings: [],
+          materials: [
+            {matId: 1, name: 'Silicon', visible: true, opacity: 1},
+            {matId: 2, name: 'Silicon Dioxide', visible: true, opacity: 0.9},
+          ],
+        };
+      }),
+    });
+    render(
+      <ThreeViewer
+        api={apiStub}
+        refreshToken={4}
+        runtimeFactory={() => shared.runtime}
+      />,
+    );
+    await screen.findByText('Silicon');
+    expect(screen.getByText('Silicon Dioxide')).toBeVisible();
+    const callsBefore = shared.calls.apiCalls;
+
+    fireEvent.click(screen.getByRole('checkbox', {name: 'Silicon 可见'}));
+    expect(shared.calls.materialDisplay).toEqual([[1, {visible: false, opacity: 1}]]);
+
+    fireEvent.change(screen.getByRole('slider', {name: 'Silicon Dioxide 透明度'}), {
+      target: {value: '0.3'},
+    });
+    expect(
+      shared.calls.materialDisplay[shared.calls.materialDisplay.length - 1],
+    ).toEqual([2, {visible: true, opacity: 0.3}]);
+    expect(shared.calls.apiCalls).toBe(callsBefore);
+  });
+
   it('refreshToken 变化触发网格加载，材料失败可重试', async () => {
     let shouldFail = true;
     const shared = fakeViewerRuntime({
@@ -152,7 +193,7 @@ describe('ThreeViewer', () => {
         shared.calls.apiCalls += 1;
         shared.calls.loadedTokens.push(token);
         if (shouldFail) throw new Error('材料 mat-2 下载失败');
-        return {warnings: []};
+        return {warnings: [], materials: []};
       }),
     });
     const {rerender} = render(

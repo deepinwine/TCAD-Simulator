@@ -2,8 +2,9 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import type {TcadApi} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
 import {clipStateAllOff, type ClipAxis, type ClipState} from './clipping';
+import {MaterialPanel, type MaterialDisplayState} from './MaterialPanel';
 import {createThreeViewerRuntime} from './viewerRuntime';
-import type {StandardView, ViewerRuntime} from './viewerRuntime';
+import type {MaterialSummary, StandardView, ViewerRuntime} from './viewerRuntime';
 
 export type ProjectionMode = 'perspective' | 'orthographic';
 export type {StandardView, ViewerRuntime} from './viewerRuntime';
@@ -38,6 +39,8 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   const [loadError, setLoadError] = useState<string | null>(null);
   const [orthoActive, setOrthoActive] = useState(false);
   const [clip, setClip] = useState<ClipState>(clipStateAllOff);
+  const [materials, setMaterials] = useState<MaterialSummary[]>([]);
+  const [display, setDisplay] = useState<Record<number, MaterialDisplayState>>({});
 
   useEffect(() => {
     const container = containerRef.current;
@@ -65,7 +68,14 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     if (runtime === null) return;
     let cancelled = false;
     setLoadError(null);
-    runtime.loadMeshes(refreshToken).catch(error => {
+    runtime.loadMeshes(refreshToken).then(result => {
+      if (cancelled) return;
+      setMaterials(result.materials);
+      setDisplay(Object.fromEntries(result.materials.map(material => [
+        material.matId,
+        {visible: material.visible, opacity: material.opacity},
+      ])));
+    }).catch(error => {
       if (cancelled) return;
       setLoadError(error instanceof Error ? error.message : String(error));
     });
@@ -108,6 +118,11 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
       ...clip,
       [axis]: {...clip[axis], position},
     });
+  };
+
+  const changeMaterialDisplay = (matId: number, next: MaterialDisplayState) => {
+    setDisplay(current => ({...current, [matId]: next}));
+    runtimeRef.current?.setMaterialDisplay(matId, next);
   };
 
   return (
@@ -176,6 +191,12 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
         ))}
       </div>
       <div className="viewer-stage" ref={containerRef}>
+        <MaterialPanel
+          materials={materials}
+          display={display}
+          onChange={changeMaterialDisplay}
+          disabled={initError !== null}
+        />
         {initError !== null && (
           <ErrorNotice
             title="无法初始化 3D Viewer"

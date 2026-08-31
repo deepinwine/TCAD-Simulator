@@ -9,14 +9,27 @@ import {createMeshLoader, type LoadedMesh} from './meshLoader';
 export type StandardView = 'iso' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right';
 export type ProjectionMode = 'perspective' | 'orthographic';
 
+export interface MaterialSummary {
+  matId: number;
+  name: string;
+  visible: boolean;
+  opacity: number;
+}
+
+export interface MaterialDisplay {
+  visible?: boolean;
+  opacity?: number;
+}
+
 export interface ViewerRuntime {
   readonly backend: string;
   mount(container: HTMLElement): void;
   setStandardView(view: StandardView): void;
   setProjection(mode: ProjectionMode): void;
   setClipping(state: ClipState): void;
+  setMaterialDisplay(matId: number, display: MaterialDisplay): void;
   fit(): void;
-  loadMeshes(token: number): Promise<{warnings: string[]}>;
+  loadMeshes(token: number): Promise<{warnings: string[]; materials: MaterialSummary[]}>;
   dispose(): void;
 }
 
@@ -52,6 +65,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let firstLoadDone = false;
   let backendLabel = 'WebGL2';
   let clipState: ClipState = clipStateAllOff();
+  const meshesByMatId = new Map<number, THREE.Mesh>();
 
   const stlLoader = new STLLoader();
   const meshLoader = createMeshLoader({
@@ -273,6 +287,19 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       applyClippingToMaterials();
       scheduleRender();
     },
+    setMaterialDisplay(matId: number, display: MaterialDisplay) {
+      const mesh = meshesByMatId.get(matId);
+      if (mesh === undefined) return;
+      if (display.visible !== undefined) mesh.visible = display.visible;
+      if (display.opacity !== undefined) {
+        const material = mesh.material as THREE.MeshStandardMaterial;
+        const opacity = Math.min(1, Math.max(0, display.opacity));
+        material.opacity = opacity;
+        material.transparent = opacity < 1;
+        material.needsUpdate = true;
+      }
+      scheduleRender();
+    },
     fit() {
       const view = activeCamera();
       if (view === null) return;
@@ -282,9 +309,12 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     },
     async loadMeshes(token: number) {
       const result = await meshLoader.load(token);
-      if (result.stale || disposed || group === null) return {warnings: result.warnings};
+      if (result.stale || disposed || group === null) {
+        return {warnings: result.warnings, materials: [] as MaterialSummary[]};
+      }
       const previous = group.children.slice();
       group.clear();
+      meshesByMatId.clear();
       for (const child of previous) {
         const mesh = child as THREE.Mesh;
         (mesh.material as THREE.Material).dispose();
@@ -305,14 +335,21 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         const mesh = new THREE.Mesh(entry.geometry, material);
         mesh.name = entry.mesh.name;
         group.add(mesh);
+        meshesByMatId.set(entry.mesh.materialId, mesh);
       }
+      const materials: MaterialSummary[] = (result.meshes as LoadedMesh[]).map(entry => ({
+        matId: entry.mesh.materialId,
+        name: entry.mesh.name,
+        visible: true,
+        opacity: entry.material.opacity,
+      }));
       if (!firstLoadDone && result.meshes.length > 0) {
         firstLoadDone = true;
         runtime.setStandardView('iso');
       }
       applyClippingToMaterials();
       scheduleRender();
-      return {warnings: result.warnings};
+      return {warnings: result.warnings, materials};
     },
     dispose() {
       disposed = true;
@@ -321,6 +358,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         renderHandle = 0;
       }
       meshLoader.dispose();
+      meshesByMatId.clear();
       if (group !== null) {
         for (const child of group.children.slice()) {
           const mesh = child as THREE.Mesh;
