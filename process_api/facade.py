@@ -19,6 +19,9 @@ from .schemas import (
     RunView,
     SetStepView,
     StepView,
+    TimelineItemView,
+    TimelineRestoreView,
+    TimelineView,
 )
 
 PHYSICAL_EXTENT_NM = 640.0
@@ -46,6 +49,8 @@ class ProcessCadFacade:
         self._statuses: Dict[int, str] = {}
         self._model: Optional[Any] = None
         self._revision = 0
+        self._snapshots: Dict[int, Dict[str, Any]] = {}
+        self._current = -1
 
     # ---- 装载 -----------------------------------------------------------
 
@@ -86,6 +91,8 @@ class ProcessCadFacade:
         for position in range(len(self._blobs)):
             self._statuses[position] = "ready"
         self._revision = 0
+        self._snapshots = {}
+        self._current = -1
 
     # ---- 视图 -----------------------------------------------------------
 
@@ -286,6 +293,12 @@ class ProcessCadFacade:
             ) from exc
         self._statuses[position] = "done"
         self._mark_later_dirty(position)
+        # 与 Worker 语义一致：每步成功后保存可恢复快照，并推进 current
+        try:
+            self._snapshots[position] = self._model.snapshot_state(compression="dense")
+        except TypeError:
+            self._snapshots[position] = self._model.snapshot_state()
+        self._current = position
         self._revision += 1
         return RunView(
             index=position,
@@ -310,6 +323,70 @@ class ProcessCadFacade:
             runtimeStatus="done",
             modelRevision=self._revision,
             recipe=list(self.recipe()),
+        )
+
+    def run_to(self, index: int) -> RunView:
+        """执行到指定步骤（含）；已完成且未失效的步骤不重复执行。"""
+        self._ensure_loaded()
+        if int(index) not in self._statuses:
+            raise ProcessCadError(
+                f"步骤索引越界：{index}",
+                code="unknown_step",
+            )
+        target = int(index)
+        last: Optional[RunView] = None
+        for position in range(target + 1):
+            if self._statuses.get(position) == "done":
+                continue
+            last = self.run_step(position)
+        if last is None:
+            last = RunView(
+                index=target,
+                runtimeStatus=self._statuses.get(target, "done"),
+                modelRevision=self._revision,
+            )
+        return RunView(
+            index=target,
+            runtimeStatus="done",
+            modelRevision=self._revision,
+            recipe=list(self.recipe()),
+        )
+
+    def get_timeline(self) -> TimelineView:
+        self._ensure_loaded()
+        items: List[TimelineItemView] = []
+        for position in range(len(self._blobs)):
+            runtime_status = self._statuses.get(position, "ready")
+            state = "current" if position == self._current else runtime_status
+            items.append(TimelineItemView(
+                index=position,
+                state=state,
+                runtimeStatus=runtime_status,
+                snapshotValid=position in self._snapshots,
+            ))
+        return TimelineView(items=items, current=self._current)
+
+    def restore_timeline(self, index: int) -> TimelineRestoreView:
+        self._ensure_loaded()
+        self._ensure_model()
+        position = int(index)
+        snapshot = self._snapshots.get(position)
+        if snapshot is None or self._statuses.get(position) != "done":
+            raise ProcessCadError(
+                f"步骤 {position} 没有有效快照",
+                code="invalid_snapshot",
+                step_index=position,
+                suggestion="只能恢复已成功执行且未失效的快照。",
+            )
+        assert self._model is not None
+        self._model.restore_state(snapshot)
+        self._current = position
+        self._revision += 1
+        return TimelineRestoreView(
+            timeline=self.get_timeline(),
+            model=self.model_summary(),
+            recipe=list(self.recipe()),
+            log=[],
         )
 
     # ---- 观测辅助（parity / 诊断） ---------------------------------------

@@ -149,6 +149,50 @@ class RunView:
 
 
 @dataclass(frozen=True)
+class TimelineItemView:
+    index: int
+    state: str
+    runtimeStatus: RuntimeStatus
+    snapshotValid: bool
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "state": self.state,
+            "runtimeStatus": self.runtimeStatus,
+            "snapshotValid": self.snapshotValid,
+        }
+
+
+@dataclass(frozen=True)
+class TimelineView:
+    items: Sequence[TimelineItemView]
+    current: int
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "items": [item.to_json() for item in self.items],
+            "current": self.current,
+        }
+
+
+@dataclass(frozen=True)
+class TimelineRestoreView:
+    timeline: TimelineView
+    model: ModelSummaryView
+    recipe: Sequence[StepView]
+    log: Sequence[str]
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "timeline": self.timeline.to_json(),
+            "model": self.model.to_json(),
+            "recipe": [step.to_json() for step in self.recipe],
+            "log": list(self.log),
+        }
+
+
+@dataclass(frozen=True)
 class SetStepView:
     step: StepView
     statuses: Sequence[RuntimeStatus]

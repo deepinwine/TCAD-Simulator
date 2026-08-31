@@ -252,5 +252,75 @@ class FacadeSetStepTests(unittest.TestCase):
         self.assertEqual(statuses[1], "done")
 
 
+class FacadeTimelineTests(unittest.TestCase):
+    def test_run_to_executes_prefix_and_timeline_shape(self) -> None:
+        facade = make_facade()
+        facade.run_to(2)
+        statuses = {step.index: step.runtimeStatus for step in facade.recipe()}
+        for index in range(0, 3):
+            self.assertEqual(statuses[index], "done", statuses)
+        self.assertTrue(all(status == "dirty" for i, status in statuses.items() if i > 2))
+
+        timeline = facade.get_timeline()
+        payload = to_json(timeline)
+        self.assertEqual(set(payload.keys()), {"items", "current"})
+        self.assertEqual(payload["current"], 2)
+        self.assertEqual(len(payload["items"]), len(facade.recipe()))
+        item = payload["items"][2]
+        self.assertEqual(
+            set(item.keys()), {"index", "state", "runtimeStatus", "snapshotValid"},
+        )
+        self.assertEqual(item["state"], "current")
+        self.assertEqual(item["runtimeStatus"], "done")
+        self.assertTrue(item["snapshotValid"])
+        later = payload["items"][4]
+        self.assertFalse(later["snapshotValid"])
+
+    def test_run_to_after_edit_reruns_only_dirty_prefix(self) -> None:
+        facade = make_facade()
+        facade.run_to(2)
+        numeric = _find_numeric_spec(facade.recipe()[1])
+        self.assertIsNotNone(numeric)
+        facade.set_step(1, params={numeric.key: numeric.default_value})
+        revision_after_edit = facade.model_revision()
+        result = facade.run_to(2)
+        self.assertEqual(result.index, 2)
+        statuses = {step.index: step.runtimeStatus for step in facade.recipe()}
+        self.assertTrue(
+            all(statuses[i] == "done" for i in range(0, 3)), statuses,
+        )
+        self.assertGreater(facade.model_revision(), revision_after_edit)
+
+    def test_restore_timeline_invalid_snapshot_raises(self) -> None:
+        facade = make_facade()
+        with self.assertRaises(ProcessCadError) as ctx:
+            facade.restore_timeline(3)
+        self.assertEqual(ctx.exception.code, "invalid_snapshot")
+
+    def test_restore_timeline_restores_model_state(self) -> None:
+        facade = make_facade()
+        facade.run_all()
+        full_voxels = facade.occupied_voxels()
+
+        reference = make_facade()
+        reference.run_step(0)
+        step0_voxels = reference.occupied_voxels()
+        self.assertNotEqual(full_voxels, step0_voxels)
+
+        restored = facade.restore_timeline(0)
+        payload = to_json(restored)
+        self.assertEqual(
+            set(payload.keys()), {"timeline", "model", "recipe", "log"},
+        )
+        self.assertEqual(payload["timeline"]["current"], 0)
+        self.assertEqual(facade.occupied_voxels(), step0_voxels)
+
+    def test_get_timeline_before_any_run_is_current_minus_one(self) -> None:
+        facade = make_facade()
+        timeline = facade.get_timeline()
+        self.assertEqual(to_json(timeline)["current"], -1)
+        self.assertFalse(all(item.snapshotValid for item in timeline.items))
+
+
 if __name__ == "__main__":
     unittest.main()
