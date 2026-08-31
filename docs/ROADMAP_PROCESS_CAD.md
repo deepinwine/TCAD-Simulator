@@ -114,9 +114,9 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | 本地 `main` | `d293d34` | 与 `backup/main` 一致 |
 | `codex/m2-react-shell` | `d293d34` | M2 交付分支，已全部包含于 `main`（保留作历史） |
 
-祖先关系：`41a2fcd ⊂ 063838a ⊂ …M2 28 提交… ⊂ d293d34`。`origin` 上不存在任何 M1/M2
-功能分支；`origin/main` 同步需要 FonaTech 仓库写权限或 fork PR（所有者操作）。**合并
-与推送决定权始终在仓库所有者（ADR-010/017）。**
+祖先关系：`41a2fcd ⊂ 063838a ⊂ …M2 28 提交… ⊂ d293d34 ⊂ 546b70f`。**`origin`（FonaTech）
+是上游第三方仓库，不归本项目所有者——永远不做同步/推送（ADR-010/017）；`backup`
+（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开 fork PR #1，已立即关闭。
 
 - Next: 开始 M3 Three.js Viewer 完善（正交相机、X/Y/Z 裁剪、材料显示控制、选择与测量）；
   修复 run/all 长 POST 静默期连接中断的用户体验（进度流式或失败后状态对账）。
