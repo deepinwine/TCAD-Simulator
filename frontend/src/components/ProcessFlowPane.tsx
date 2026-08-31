@@ -1,4 +1,4 @@
-import {useRef, type KeyboardEvent} from 'react';
+import {useLayoutEffect, useRef, useState, type KeyboardEvent} from 'react';
 import type {StepView} from '../api/types';
 import {StatusBadge} from './StatusBadge';
 
@@ -45,8 +45,27 @@ export function summarizeParams(params: Record<string, unknown>): string {
 
 export function ProcessFlowPane({recipe, selectedStepIndex, onSelect}: ProcessFlowPaneProps) {
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
-  const selectedPosition = recipe.findIndex(step => step.index === selectedStepIndex);
-  const tabStopPosition = selectedPosition >= 0 ? selectedPosition : 0;
+  const pendingFocusRef = useRef<number | null>(null);
+  const [activeStepIndex, setActiveStepIndex] = useState<number | null>(() => {
+    const selectedExists = recipe.some(step => step.index === selectedStepIndex);
+    return selectedExists ? selectedStepIndex : recipe[0]?.index ?? null;
+  });
+
+  useLayoutEffect(() => {
+    const selectedExists = recipe.some(step => step.index === selectedStepIndex);
+    const nextActive = selectedExists ? selectedStepIndex : recipe[0]?.index ?? null;
+    setActiveStepIndex(current => current === nextActive ? current : nextActive);
+    if (!recipe.some(step => step.index === pendingFocusRef.current)) {
+      pendingFocusRef.current = null;
+    }
+  }, [recipe, selectedStepIndex]);
+
+  useLayoutEffect(() => {
+    if (pendingFocusRef.current !== activeStepIndex || activeStepIndex === null) return;
+    const target = optionRefs.current.get(activeStepIndex);
+    pendingFocusRef.current = null;
+    target?.focus();
+  }, [activeStepIndex, recipe]);
 
   function handleOptionKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -68,7 +87,13 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect}: ProcessFl
 
     event.preventDefault();
     const target = recipe[nextPosition];
-    if (target !== undefined) optionRefs.current.get(target.index)?.focus();
+    if (target === undefined) return;
+    if (target.index === activeStepIndex) {
+      optionRefs.current.get(target.index)?.focus();
+      return;
+    }
+    pendingFocusRef.current = target.index;
+    setActiveStepIndex(target.index);
   }
 
   return (
@@ -94,10 +119,11 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect}: ProcessFl
               type="button"
               role="option"
               aria-selected={step.index === selectedStepIndex}
-              tabIndex={position === tabStopPosition ? 0 : -1}
+              tabIndex={step.index === activeStepIndex ? 0 : -1}
               data-process-enabled={step.enabled}
               className="process-step"
               onClick={() => onSelect(step.index)}
+              onFocus={() => setActiveStepIndex(step.index)}
               onKeyDown={event => handleOptionKeyDown(event, position, step.index)}
             >
               <span className="step-index" aria-hidden="true">

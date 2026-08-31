@@ -1,4 +1,4 @@
-import {fireEvent, render, screen} from '@testing-library/react';
+import {act, fireEvent, render, screen} from '@testing-library/react';
 import {describe, expect, it, vi} from 'vitest';
 import type {RuntimeStatus, StepView} from '../api/types';
 import {ProcessFlowPane} from './ProcessFlowPane';
@@ -63,11 +63,14 @@ describe('ProcessFlowPane', () => {
   it('只保留一个 Tab 入口并用方向键、Home 和 End 移动焦点而不选择', () => {
     const onSelect = vi.fn();
     render(
-      <ProcessFlowPane
-        recipe={[step(0, 'ready'), step(1, 'ready'), step(2, 'ready')]}
-        selectedStepIndex={1}
-        onSelect={onSelect}
-      />,
+      <>
+        <ProcessFlowPane
+          recipe={[step(0, 'ready'), step(1, 'ready'), step(2, 'ready')]}
+          selectedStepIndex={1}
+          onSelect={onSelect}
+        />
+        <button type="button">下一个控件</button>
+      </>,
     );
     const options = screen.getAllByRole('option');
 
@@ -75,13 +78,23 @@ describe('ProcessFlowPane', () => {
     options[1].focus();
     fireEvent.keyDown(options[1], {key: 'ArrowDown'});
     expect(options[2]).toHaveFocus();
+    expect(options.map(option => option.tabIndex)).toEqual([-1, -1, 0]);
     fireEvent.keyDown(options[2], {key: 'ArrowDown'});
     expect(options[2]).toHaveFocus();
+    expect(options.map(option => option.tabIndex)).toEqual([-1, -1, 0]);
     fireEvent.keyDown(options[2], {key: 'ArrowUp'});
     expect(options[1]).toHaveFocus();
+    expect(options.map(option => option.tabIndex)).toEqual([-1, 0, -1]);
     fireEvent.keyDown(options[1], {key: 'Home'});
     expect(options[0]).toHaveFocus();
+    expect(options.map(option => option.tabIndex)).toEqual([0, -1, -1]);
     fireEvent.keyDown(options[0], {key: 'End'});
+    expect(options[2]).toHaveFocus();
+    expect(options.map(option => option.tabIndex)).toEqual([-1, -1, 0]);
+    act(() => screen.getByRole('button', {name: '下一个控件'}).focus());
+    expect(screen.getByRole('button', {name: '下一个控件'})).toHaveFocus();
+    expect(options.filter(option => option.tabIndex === 0)).toEqual([options[2]]);
+    act(() => options.find(option => option.tabIndex === 0)?.focus());
     expect(options[2]).toHaveFocus();
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -100,6 +113,9 @@ describe('ProcessFlowPane', () => {
 
     expect(disabled).not.toHaveAttribute('aria-disabled');
     expect(disabled).toHaveTextContent('已禁用');
+    act(() => disabled.focus());
+    expect(disabled).toHaveFocus();
+    expect(disabled).toHaveAttribute('tabindex', '0');
     fireEvent.keyDown(disabled, {key: 'Enter'});
     expect(onSelect).toHaveBeenNthCalledWith(1, 1);
     fireEvent.keyDown(disabled, {key: ' '});
