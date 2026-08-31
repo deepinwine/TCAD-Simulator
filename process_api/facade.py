@@ -12,10 +12,14 @@ import numpy as np
 
 from .errors import ProcessCadError
 from .schemas import (
+    BoundingBoxView,
     InitView,
     MaterialView,
+    MaterialVisualView,
     ModelSummaryView,
     ParameterSpecView,
+    PreviewManifestView,
+    PreviewMeshView,
     RunView,
     SetStepView,
     StepView,
@@ -25,6 +29,26 @@ from .schemas import (
 )
 
 PHYSICAL_EXTENT_NM = 640.0
+
+
+def _triangles_to_binary_stl(triangles: np.ndarray, header: bytes = b"TCAD process_api") -> bytes:
+    """三角面片 → 二进制 STL 字节（打包格式，不含工艺物理）。"""
+    tri = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 3)
+    if tri.shape[0] == 0:
+        raise ValueError("no triangles to serialize")
+    normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = normals / np.maximum(lengths, 1e-12)
+    records = np.zeros((tri.shape[0], 12), dtype=np.float32)
+    records[:, 0:3] = normals
+    records[:, 3:12] = tri.reshape(-1, 9)
+    out = bytearray()
+    out += header.ljust(80, b"\0")[:80]
+    out += np.uint32(tri.shape[0]).tobytes()
+    body = np.zeros(tri.shape[0], dtype=[("f", "<f4", 12), ("attr", "<u2")])
+    body["f"] = records
+    out += body.tobytes()
+    return bytes(out)
 
 
 class ProcessCadFacade:
@@ -390,6 +414,74 @@ class ProcessCadFacade:
         )
 
     # ---- 观测辅助（parity / 诊断） ---------------------------------------
+
+    def preview_manifest(
+        self,
+        mode: str = "solid",
+        face_limit: int = 40000,
+    ) -> PreviewManifestView:
+        """当前模型的 typed 几何清单（与 /api/preview/manifest 语义一致）。"""
+        self._ensure_model()
+        assert self._model is not None
+        meshes: List[PreviewMeshView] = []
+        for material_id, triangles in self._model.get_material_surfaces(
+            face_limit=max(1, int(face_limit)),
+        ):
+            tri = np.asarray(triangles)
+            if tri.size == 0:
+                continue
+            vertices = tri.reshape(-1, 3)
+            visual = self._database.material_visual(int(material_id))
+            meshes.append(PreviewMeshView(
+                materialId=int(material_id),
+                name=str(visual.display_name),
+                triangleCount=int(tri.reshape(-1, 3, 3).shape[0]),
+                boundingBox=BoundingBoxView(
+                    min=tuple(float(v) for v in vertices.min(axis=0)),
+                    max=tuple(float(v) for v in vertices.max(axis=0)),
+                ),
+                visual=MaterialVisualView(
+                    materialId=int(visual.material_id),
+                    displayName=str(visual.display_name),
+                    color=tuple(float(c) for c in visual.color),
+                    opacity=float(visual.opacity),
+                    metallic=float(visual.metallic),
+                    roughness=float(visual.roughness),
+                    visible=bool(visual.visible),
+                ),
+            ))
+        return PreviewManifestView(
+            revision=self._revision,
+            meshes=meshes,
+            mode=str(mode),
+        )
+
+    def material_stl(
+        self,
+        material_id: int,
+        revision: int,
+        mode: str = "solid",
+    ) -> bytes:
+        """按模型修订输出材料的二进制 STL（与 /api/preview/stl 语义一致）。"""
+        self._ensure_model()
+        if int(revision) != self._revision:
+            raise ProcessCadError(
+                f"STL 修订过期：请求 {revision}，当前 {self._revision}",
+                code="stale_revision",
+                suggestion="重新获取 manifest 后再请求 STL。",
+            )
+        assert self._model is not None
+        surfaces = self._model.get_material_surfaces(
+            face_limit=40000,
+            material_filter=int(material_id),
+        )
+        if not surfaces:
+            raise ProcessCadError(
+                f"材料 {material_id} 没有可导出的网格",
+                code="unknown_material_mesh",
+            )
+        triangles = np.asarray(surfaces[0][1])
+        return _triangles_to_binary_stl(triangles)
 
     def occupied_voxels(self) -> int:
         self._ensure_model()

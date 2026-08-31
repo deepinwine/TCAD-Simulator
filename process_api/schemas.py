@@ -193,6 +193,69 @@ class TimelineRestoreView:
 
 
 @dataclass(frozen=True)
+class MaterialVisualView:
+    materialId: int
+    displayName: str
+    color: Tuple[float, float, float]
+    opacity: float
+    metallic: float
+    roughness: float
+    visible: bool
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "materialId": self.materialId,
+            "displayName": self.displayName,
+            "color": list(self.color),
+            "opacity": self.opacity,
+            "metallic": self.metallic,
+            "roughness": self.roughness,
+            "visible": self.visible,
+        }
+
+
+@dataclass(frozen=True)
+class BoundingBoxView:
+    min: Tuple[float, float, float]
+    max: Tuple[float, float, float]
+
+    def to_json(self) -> Dict[str, Any]:
+        return {"min": list(self.min), "max": list(self.max)}
+
+
+@dataclass(frozen=True)
+class PreviewMeshView:
+    materialId: int
+    name: str
+    triangleCount: int
+    boundingBox: BoundingBoxView
+    visual: MaterialVisualView
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "materialId": self.materialId,
+            "name": self.name,
+            "triangleCount": self.triangleCount,
+            "boundingBox": self.boundingBox.to_json(),
+            "visual": self.visual.to_json(),
+        }
+
+
+@dataclass(frozen=True)
+class PreviewManifestView:
+    revision: int
+    meshes: Sequence[PreviewMeshView]
+    mode: Optional[str] = None
+
+    def to_json(self) -> Dict[str, Any]:
+        return _compact({
+            "revision": self.revision,
+            "meshes": [mesh.to_json() for mesh in self.meshes],
+            "mode": self.mode,
+        })
+
+
+@dataclass(frozen=True)
 class SetStepView:
     step: StepView
     statuses: Sequence[RuntimeStatus]

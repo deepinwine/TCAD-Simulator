@@ -322,5 +322,74 @@ class FacadeTimelineTests(unittest.TestCase):
         self.assertFalse(all(item.snapshotValid for item in timeline.items))
 
 
+import struct  # noqa: E402
+
+
+class FacadeGeometryTests(unittest.TestCase):
+    def test_manifest_shape_and_revision_semantics(self) -> None:
+        facade = make_facade()
+        before = facade.preview_manifest()
+        self.assertEqual(before.revision, facade.model_revision())
+        # 与服务端会话契约一致：新会话即含衬底（Initialized substrate）
+        substrate = [m for m in before.meshes if m.name == "Silicon"]
+        self.assertEqual(len(substrate), 1)
+
+        facade.run_all()
+        manifest = facade.preview_manifest()
+        self.assertEqual(manifest.revision, facade.model_revision())
+        self.assertGreaterEqual(len(manifest.meshes), 1)
+        silicon = [m for m in manifest.meshes if m.name == "Silicon"]
+        self.assertEqual(len(silicon), 1)
+        mesh = silicon[0]
+        self.assertGreater(mesh.materialId, 0)
+        self.assertGreater(mesh.triangleCount, 0)
+        for axis in range(3):
+            self.assertLessEqual(mesh.boundingBox.min[axis], mesh.boundingBox.max[axis])
+        visual = mesh.visual
+        self.assertEqual(visual.displayName, "Silicon")
+        self.assertEqual(len(visual.color), 3)
+        self.assertTrue(0.0 <= visual.opacity <= 1.0)
+        self.assertTrue(0.0 <= visual.metallic <= 1.0)
+        self.assertTrue(0.0 <= visual.roughness <= 1.0)
+        self.assertTrue(visual.visible)
+
+        payload = to_json(manifest)
+        self.assertEqual(set(payload.keys()), {"revision", "mode", "meshes"})
+        mesh_payload = payload["meshes"][0]
+        self.assertEqual(
+            set(mesh_payload.keys()),
+            {"materialId", "name", "triangleCount", "boundingBox", "visual"},
+        )
+        self.assertEqual(
+            set(mesh_payload["boundingBox"].keys()), {"min", "max"},
+        )
+        self.assertEqual(
+            set(mesh_payload["visual"].keys()),
+            {
+                "materialId", "displayName", "color", "opacity",
+                "metallic", "roughness", "visible",
+            },
+        )
+
+    def test_material_stl_binary_matches_manifest(self) -> None:
+        facade = make_facade()
+        facade.run_all()
+        manifest = facade.preview_manifest()
+        mesh = manifest.meshes[0]
+
+        data = facade.material_stl(mesh.materialId, manifest.revision)
+        self.assertGreater(len(data), 84)
+        count = struct.unpack("<I", data[80:84])[0]
+        self.assertEqual(count, mesh.triangleCount)
+        self.assertEqual(len(data), 84 + 50 * count)
+
+    def test_material_stl_stale_revision_rejected(self) -> None:
+        facade = make_facade()
+        facade.run_all()
+        with self.assertRaises(ProcessCadError) as ctx:
+            facade.material_stl(1, facade.model_revision() - 1)
+        self.assertEqual(ctx.exception.code, "stale_revision")
+
+
 if __name__ == "__main__":
     unittest.main()
