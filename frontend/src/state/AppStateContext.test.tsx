@@ -151,6 +151,47 @@ describe('AppStateProvider bootstrap', () => {
 });
 
 describe('AppStateProvider mutation gate 与顺序', () => {
+  it('历史视图中的真实运行开始立即退出，运行失败也不恢复历史标识', async () => {
+    const run = deferred<RunView>();
+    const api = apiStub({runAll: vi.fn(() => run.promise)});
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(captured?.state.historicalStepIndex).toBe(0);
+
+    let operation!: Promise<void>;
+    act(() => {
+      operation = captured!.actions.runAll();
+    });
+    expect(api.runAll).toHaveBeenCalledTimes(1);
+    expect(captured?.state.historicalStepIndex).toBeNull();
+
+    await act(async () => run.reject(new TcadApiError('运行失败', {status: 500})));
+    await operation;
+    expect(captured?.state.historicalStepIndex).toBeNull();
+  });
+
+  it('历史视图中的运行被 draft gate 拒绝时保留历史标识', async () => {
+    const api = apiStub();
+    mount(api);
+    await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(captured?.state.historicalStepIndex).toBe(0);
+
+    act(() => {
+      captured!.actions.updateDraft(0, 'dose', -1, {
+        status: 'invalid',
+        message: '必须为正数',
+      });
+    });
+    await act(async () => captured!.actions.runAll());
+
+    expect(api.runAll).not.toHaveBeenCalled();
+    expect(captured?.state.historicalStepIndex).toBe(0);
+  });
+
   it('任意未清除 draft 会阻止 run 与 restore，保存成功清除后才允许运行', async () => {
     const api = apiStub();
     mount(api);
@@ -194,6 +235,9 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     const api = apiStub({runAll: vi.fn(() => run.promise)});
     mount(api);
     await waitUntilReady();
+    await act(async () => captured!.actions.loadTimeline());
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(captured?.state.historicalStepIndex).toBe(0);
 
     let first!: Promise<void>;
     await act(async () => {
@@ -206,6 +250,7 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     expect(api.runAll).toHaveBeenCalledTimes(1);
     expect(api.setStep).not.toHaveBeenCalled();
     expect(captured?.state.activeMutation).toBe('all');
+    expect(captured?.state.historicalStepIndex).toBeNull();
 
     await act(async () => run.resolve({modelRevision: 4}));
     await first;
@@ -385,6 +430,8 @@ describe('AppStateProvider mutation gate 与顺序', () => {
     mount(api);
     await waitUntilReady();
     await act(async () => captured!.actions.loadTimeline());
+    await act(async () => captured!.actions.restoreTimeline(0));
+    expect(captured?.state.historicalStepIndex).toBe(0);
 
     act(() => captured!.actions.updateDraft(0, 'dose', 130, {status: 'valid'}));
     const save = captured!.actions.saveParameter(0, 'dose');
@@ -395,7 +442,8 @@ describe('AppStateProvider mutation gate 与顺序', () => {
       await captured!.actions.restoreTimeline(0);
     });
     expect(api.runAll).not.toHaveBeenCalled();
-    expect(api.restoreTimeline).not.toHaveBeenCalled();
+    expect(api.restoreTimeline).toHaveBeenCalledTimes(1);
+    expect(captured?.state.historicalStepIndex).toBe(0);
 
     await act(async () => pendingSave.resolve({
       step: step(0, {params: {dose: 130}}),

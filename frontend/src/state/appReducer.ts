@@ -258,6 +258,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         phase: 'running',
         activeMutation: action.operation,
+        historicalStepIndex: null,
         globalError: null,
       };
     case 'run/succeeded': {

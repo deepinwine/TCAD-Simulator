@@ -370,6 +370,19 @@ describe('appReducer 参数序号', () => {
 });
 
 describe('appReducer 执行与 Timeline', () => {
+  it('运行请求开始即退出历史视图，随后失败也不恢复历史标识', () => {
+    const historical = {...readyState(), historicalStepIndex: 1};
+    const running = appReducer(historical, {type: 'run/started', operation: 'step'});
+    const failed = appReducer(running, {
+      type: 'run/failed',
+      index: 1,
+      error: new TcadApiError('运行失败', {status: 400, rolledBack: false}),
+    });
+
+    expect(running.historicalStepIndex).toBeNull();
+    expect(failed.historicalStepIndex).toBeNull();
+  });
+
   it('mutation gate 标记运行中，并在成功时只采用真实 revision 与目标状态', () => {
     const running = appReducer({...readyState(), historicalStepIndex: 0}, {
       type: 'run/started',
