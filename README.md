@@ -540,6 +540,38 @@ npm run build
 # 访问 http://127.0.0.1:8765/studio/
 ```
 
+### Python API Facade (M4)
+
+`process_api/` wraps the same runtime (`Recipe -> PROCESS_STEP_FACTORIES ->
+ProcessStep.execute(model) -> ProcessModel`) behind typed, session-scoped Python
+APIs whose serialized shapes match the frozen M2 Compatibility API (camelCase
+JSON keys). It adds no process physics and leaves the legacy HTTP API untouched.
+
+`process_api/` 以类型化的会话级 Python API 包装同一运行时，序列化形状与冻结的
+M2 Compatibility API（camelCase JSON 键名）一致；不引入新的工艺物理，旧 HTTP API
+零改动。
+
+```python
+from process_api import ProcessCadFacade
+
+facade = ProcessCadFacade(grid=128)
+facade.load_demo("Basic Trench")
+facade.run_all()
+print(facade.present_material_names())
+manifest = facade.preview_manifest()          # typed 几何清单
+facade.material_stl(1, manifest.revision)     # 二进制 STL
+```
+
+Optional FastAPI service (read-only `/api/v2`, additive; requires `fastapi` +
+`uvicorn`, not part of the core runtime):
+
+可选 FastAPI 服务（只读 `/api/v2`，纯增量；需 `pip install fastapi uvicorn`）：
+
+```bash
+python -m uvicorn process_api.http:app --host 127.0.0.1 --port 8799
+# GET /api/v2/health | /api/v2/init | /api/v2/preview/manifest | /api/v2/preview/stl
+```
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):

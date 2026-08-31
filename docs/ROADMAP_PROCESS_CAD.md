@@ -59,10 +59,16 @@ server-authoritative timeline and forces a viewer geometry refresh (closes the
 M2 known limitation observed during acceptance). All M3 capabilities issue zero
 API requests.
 
-## M4 — Python API Facade
+## M4 — Python API Facade ✅（已交付）
 
 Typed facade over the existing runtime: recipe, step, run, snapshot, geometry, materials.
-It wraps the frozen M2 Compatibility API semantics with typed schemas and then
+Delivered on `codex/m4-api-facade`: `process_api/` package (typed dataclass schemas with
+camelCase JSON identical to the frozen contract; session facade with load/init/set_step/
+run_step/run_to/run_all/get_timeline/restore_timeline/preview_manifest/material_stl;
+structured ProcessCadError), runtime-parity tests (facade vs direct runtime identical
+voxels/materials), and an optional read-only FastAPI `/api/v2` adapter with error
+envelopes matching contract semantics. It wraps the frozen M2 Compatibility API
+semantics with typed schemas and then
 standardizes toward FastAPI + Pydantic (ADR-013). Deprecations happen only behind the
 versioned facade — the frozen surface stays intact until React parity (M5). New
 API-layer modules target Python 3.12+ while the existing runtime keeps 3.10+
@@ -113,7 +119,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-31, M3 merged to backup/main)
+## Current Branch State (2026-08-31, M4 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -121,11 +127,12 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `d4c3414` | **M3 已由所有者授权快进合并**（M2 `8b2d4c0` + M3 7 提交，2026-08-31） |
 | 本地 `main` | `d4c3414` | 与 `backup/main` 一致 |
 | `codex/m3-viewer` | `d4c3414` | M3 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m4-api-facade` | M4 交付分支（计划 + 5 个功能提交 + 本文档提交） | 线性领先 `backup/main`（`31ce391`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ 063838a ⊂ d293d34 ⊂ 546b70f ⊂ 8b2d4c0 ⊂ …M3 7 提交… ⊂ d4c3414`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M4 Python API Facade（冻结契约语义之上的类型化 facade，向 FastAPI +
-  Pydantic 演进）。
+- Next: M4 经所有者审查后合并 `backup/main` → 开始 M5 React Parity（React 补齐旧
+  WebUI 剩余能力并过回归后，才允许弃用旧 UI）。

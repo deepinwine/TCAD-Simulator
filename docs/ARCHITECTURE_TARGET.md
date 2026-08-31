@@ -166,8 +166,12 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
    toggle, X/Y/Z clipping planes, material visibility/opacity control, mesh picking
    with hit info, two-point distance measurement, and run network-failure
    reconciliation (one-click resync to server-authoritative timeline).
-4. **M4** Stable Python API facade around the existing runtime; then standardize toward
-   FastAPI + Pydantic (compatibility API first, strangler-style).
+4. **M4** Python API facade around the existing runtime — delivered: `process_api/`
+   package with typed schemas (camelCase JSON identical to the frozen contract),
+   session facade (load/init/set_step/run_step/run_to/run_all/timeline/snapshots/
+   manifest/STL) validated by runtime-parity tests, plus an optional read-only
+   FastAPI `/api/v2` adapter (`process_api/http.py`). FastAPI+Pydantic remains the
+   standardization target (ADR-013); the frozen `/api` surface is untouched.
 5. **M5** React reaches parity → legacy WebUI deprecated (not before).
 6. **M6** `LayoutAdapter` + optional KLayout; gdstk kept.
 7. **M7** `ProcessBackend` interface; wrap `ProcessModel` as `VoxelBackend` with behavior

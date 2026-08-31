@@ -1,7 +1,7 @@
 # M4 Python API Facade 设计说明
 
 - 日期：2026-08-31
-- 状态：已批准开工（所有者指令「合并并开始」）
+- 状态：已实现（M4 交付于 `codex/m4-api-facade`，详见 `docs/ROADMAP_PROCESS_CAD.md`）
 - 目标里程碑：M4 — Python API Facade
 - 基线提交：`31ce391`（backup/main，M3 已合并）
 
