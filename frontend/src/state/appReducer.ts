@@ -91,6 +91,7 @@ export type AppAction =
   | {type: 'timeline/loadFailed'; error: TcadApiError}
   | {type: 'timeline/restoreSucceeded'; payload: TimelineRestoreView}
   | {type: 'timeline/restoreFailed'; error: TcadApiError}
+  | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
 export const initialAppState: AppState = {
@@ -375,6 +376,19 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'timeline/restoreFailed':
       return {...state, globalError: action.error};
+    case 'reconcile/succeeded': {
+      const timeline = canonicalizeTimeline(action.payload);
+      return {
+        ...state,
+        recipe: applyTimelineStatuses(state.recipe, timeline),
+        timeline,
+        timelineStatus: 'ready',
+        timelineError: null,
+        globalError: null,
+        // 服务端可能已完成运行（M2 验收实测）：强制 Viewer 重拉 manifest/STL
+        previewGeneration: state.previewGeneration + 1,
+      };
+    }
     case 'mutation/finished':
       return state.phase === 'fatal'
         ? {...state, activeMutation: null}

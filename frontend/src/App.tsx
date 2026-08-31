@@ -64,8 +64,14 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
             title="操作失败"
             message={state.globalError.message}
             parameterPath={state.globalError.parameterPath}
-            suggestion={state.globalError.suggestion}
+            suggestion={state.globalError.code === 'network_error'
+              ? '服务端可能仍在执行（长工艺无响应期间连接可能被断开）。点击重新同步以服务端状态为准。'
+              : state.globalError.suggestion}
             rolledBack={state.globalError.rolledBack}
+            actionLabel={state.globalError.code === 'network_error' ? '重新同步' : undefined}
+            onAction={state.globalError.code === 'network_error'
+              ? () => void actions.reconcile()
+              : undefined}
           />
         </div>
       )}

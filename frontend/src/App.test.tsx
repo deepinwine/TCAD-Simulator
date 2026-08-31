@@ -144,4 +144,42 @@ describe('App shell', () => {
     view.rerender(<App api={api} />);
     await waitFor(() => expect(api.init).toHaveBeenCalledTimes(1));
   });
+
+  it('run 网络失败后可重新同步服务端权威状态', async () => {
+    const api = apiStub({
+      runAll: vi.fn(async () => {
+        throw new TcadApiError('无法连接 TCAD 服务。', {
+          status: 0,
+          code: 'network_error',
+        });
+      }),
+    });
+    const stubViewerRuntime = () => ({
+      backend: 'WebGL2',
+      mount: () => {},
+      setStandardView: () => {},
+      setProjection: () => {},
+      setClipping: () => {},
+      setMaterialDisplay: () => {},
+      pickAt: () => null,
+      setMeasureMarkers: () => {},
+      fit: () => {},
+      loadMeshes: async () => ({warnings: [], materials: []}),
+      dispose: () => {},
+    });
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('region', {name: 'Process Flow'});
+    const getTimelineCallsBefore = (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', {name: '运行全部'}));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('无法连接 TCAD 服务');
+
+    fireEvent.click(screen.getByRole('button', {name: '重新同步'}));
+    await waitFor(() => {
+      expect((api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length)
+        .toBeGreaterThan(getTimelineCallsBefore);
+    });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
 });

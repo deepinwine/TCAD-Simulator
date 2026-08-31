@@ -38,6 +38,7 @@ export interface AppStateActions {
   runAll(): Promise<void>;
   loadTimeline(): Promise<void>;
   restoreTimeline(index: number): Promise<void>;
+  reconcile(): Promise<void>;
 }
 
 export interface AppStateContextValue {
@@ -412,6 +413,35 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     }
   }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
+  /**
+   * run 网络失败后的状态对账：以服务端 timeline 为权威重建 UI 状态，
+   * 并触发 Viewer 重拉几何（服务端可能已完成运行，本地却以为失败）。
+   */
+  const reconcile = useCallback(async (): Promise<void> => {
+    if (!mountedRef.current || mutationGateRef.current !== null) return;
+    const generation = ++timelineGenerationRef.current;
+    const controller = createController();
+    try {
+      const timeline = await api.getTimeline(controller.signal);
+      if (
+        !mountedRef.current
+        || controller.signal.aborted
+        || generation !== timelineGenerationRef.current
+      ) return;
+      timelineErrorRef.current = null;
+      dispatch({type: 'reconcile/succeeded', payload: timeline});
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      if (generation !== timelineGenerationRef.current) return;
+      const normalized = normalizeError(error);
+      timelineErrorRef.current = normalized;
+      dispatch({type: 'timeline/loadFailed', error: normalized});
+    } finally {
+      releaseController(controller);
+    }
+  }, [api, createController, dispatch, releaseController]);
+
   useEffect(() => {
     const lifecycleGeneration = ++lifecycleGenerationRef.current;
     mountedRef.current = true;
@@ -443,9 +473,11 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     runAll,
     loadTimeline,
     restoreTimeline,
+    reconcile,
   }), [
     bootstrap,
     loadTimeline,
+    reconcile,
     restoreTimeline,
     runAll,
     runStep,
