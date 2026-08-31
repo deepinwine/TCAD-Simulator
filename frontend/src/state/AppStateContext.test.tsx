@@ -70,6 +70,8 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     runStep: vi.fn(async () => ({})),
     runTo: vi.fn(async () => ({})),
     runAll: vi.fn(async () => ({})),
+    undo: vi.fn(async () => ({applied: false, log: []})),
+    redo: vi.fn(async () => ({applied: false, log: []})),
     getTimeline: vi.fn(async () => timeline),
     restoreTimeline: vi.fn(async index => ({
       timeline: {...timeline, current: index},
@@ -113,6 +115,84 @@ function mount(api: TcadApi, events?: string[]) {
 async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
+
+describe('AppStateProvider undo/redo', () => {
+  it('undo 成功后重拉 timeline 并刷新 Viewer 几何', async () => {
+    const api = apiStub({
+      undo: vi.fn(async () => ({
+        applied: true,
+        model: initView.model,
+        log: ['undo'],
+      })),
+    });
+    mount(api);
+    await waitUntilReady();
+    const generationBefore = captured!.state.previewGeneration;
+    const timelineCalls = (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await captured!.actions.undo();
+
+    expect(api.undo).toHaveBeenCalledTimes(1);
+    expect(
+      (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThan(timelineCalls);
+    await waitFor(() => {
+      expect(captured!.state.previewGeneration).toBe(generationBefore + 1);
+    });
+  });
+
+  it('undo 无可撤销时静默 no-op（不重拉、不刷新）', async () => {
+    const api = apiStub({undo: vi.fn(async () => ({applied: false, log: []}))});
+    mount(api);
+    await waitUntilReady();
+    const generationBefore = captured!.state.previewGeneration;
+    const timelineCalls = (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await captured!.actions.undo();
+
+    expect(api.undo).toHaveBeenCalledTimes(1);
+    expect(
+      (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBe(timelineCalls);
+    expect(captured!.state.previewGeneration).toBe(generationBefore);
+  });
+
+  it('运行中 undo 被变更 gate 拦截', async () => {
+    const pending = deferred<RunView>();
+    const api = apiStub({runStep: vi.fn(() => pending.promise)});
+    mount(api);
+    await waitUntilReady();
+    void captured!.actions.runStep(0);
+    await waitFor(() => expect(captured!.state.activeMutation).toBe('step'));
+
+    await captured!.actions.undo();
+    expect(api.undo).not.toHaveBeenCalled();
+
+    pending.resolve({});
+    await waitFor(() => expect(captured!.state.activeMutation).toBeNull());
+  });
+
+  it('undo 失败显示结构化错误且几何不刷新', async () => {
+    const api = apiStub({
+      undo: vi.fn(async () => {
+        throw new TcadApiError('撤销失败：历史不可用', {
+          status: 409,
+          code: 'undo_unavailable',
+        });
+      }),
+    });
+    mount(api);
+    await waitUntilReady();
+    const generationBefore = captured!.state.previewGeneration;
+
+    await captured!.actions.undo();
+
+    await waitFor(() => {
+      expect(captured!.state.globalError?.message).toBe('撤销失败：历史不可用');
+    });
+    expect(captured!.state.previewGeneration).toBe(generationBefore);
+  });
+});
 
 describe('AppStateProvider bootstrap', () => {
   it('StrictMode effect 重放也只请求一次 init', async () => {

@@ -1,5 +1,6 @@
 import type {
   BoundingBoxView,
+  HistoryView,
   InitView,
   MaterialView,
   MaterialVisualView,
@@ -293,6 +294,20 @@ export function parseSetStepEnvelope(payload: unknown, index: number): SetStepVi
     warnings: envelope.warnings === undefined
       ? []
       : parseStringArray(envelope.warnings, 'warnings'),
+  };
+}
+
+export function parseHistoryEnvelope(
+  payload: unknown,
+  appliedField: 'undone' | 'redone',
+): HistoryView {
+  const result = requireOkResult(payload);
+  return {
+    applied: requireBoolean(result[appliedField], `result.${appliedField}`),
+    ...(result.model === undefined ? {} : {model: parseModel(result.model, 'result.model')}),
+    log: result.log === undefined
+      ? []
+      : parseStringArray(result.log, 'result.log'),
   };
 }
 

@@ -1,5 +1,6 @@
 import {
   ApiContractError,
+  parseHistoryEnvelope,
   parseInitEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
@@ -8,6 +9,7 @@ import {
   parseTimelineRestoreEnvelope,
 } from './schemas';
 import type {
+  HistoryView,
   InitView,
   PreviewManifestRequest,
   PreviewManifestView,
@@ -282,6 +284,22 @@ export function createTcadApi(): TcadApi {
     },
     runAll(signal?: AbortSignal): Promise<RunView> {
       return apiPostJson('/api/run/all', {}, parseRunEnvelope, signal);
+    },
+    undo(signal?: AbortSignal): Promise<HistoryView> {
+      return apiPostJson(
+        '/api/undo',
+        {},
+        (payload: unknown) => parseHistoryEnvelope(payload, 'undone'),
+        signal,
+      );
+    },
+    redo(signal?: AbortSignal): Promise<HistoryView> {
+      return apiPostJson(
+        '/api/redo',
+        {},
+        (payload: unknown) => parseHistoryEnvelope(payload, 'redone'),
+        signal,
+      );
     },
     getTimeline(signal?: AbortSignal): Promise<TimelineView> {
       return apiPostJson('/api/timeline/get', {}, parseTimelineEnvelope, signal);

@@ -12,7 +12,7 @@ import type {
 } from '../api/types';
 
 export type AppPhase = 'booting' | 'ready' | 'running' | 'fatal';
-export type ActiveMutation = 'step' | 'to' | 'all' | 'timeline' | null;
+export type ActiveMutation = 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | null;
 export type TimelineStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ParameterValidation {
@@ -91,6 +91,7 @@ export type AppAction =
   | {type: 'timeline/loadFailed'; error: TcadApiError}
   | {type: 'timeline/restoreSucceeded'; payload: TimelineRestoreView}
   | {type: 'timeline/restoreFailed'; error: TcadApiError}
+  | {type: 'history/applied'; model?: ModelSummaryView}
   | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
@@ -376,6 +377,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'timeline/restoreFailed':
       return {...state, globalError: action.error};
+    case 'history/applied':
+      // undo/redo 有意使步骤缓存失效（ADR-008）：几何权威是 manifest.rev，
+      // 这里只 bump previewGeneration 让 Viewer 重拉。
+      return {
+        ...state,
+        model: action.model ?? state.model,
+        historicalStepIndex: null,
+        globalError: null,
+        previewGeneration: state.previewGeneration + 1,
+      };
     case 'reconcile/succeeded': {
       const timeline = canonicalizeTimeline(action.payload);
       return {

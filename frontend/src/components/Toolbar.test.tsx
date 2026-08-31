@@ -70,6 +70,8 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     runStep: vi.fn(async () => ({})),
     runTo: vi.fn(async () => ({})),
     runAll: vi.fn(async () => ({})),
+    undo: vi.fn(async () => ({applied: false, log: []})),
+    redo: vi.fn(async () => ({applied: false, log: []})),
     getTimeline: vi.fn(async () => initialTimeline),
     restoreTimeline: vi.fn(async index => ({
       timeline: {...initialTimeline, current: index},
@@ -119,6 +121,29 @@ function recordingViewerRuntime() {
     }),
   };
 }
+
+describe('Toolbar undo/redo', () => {
+  it('撤销与重做按钮触发对应 API 调用', async () => {
+    const api = apiStub();
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '运行全部'});
+
+    fireEvent.click(screen.getByRole('button', {name: '撤销'}));
+    await waitFor(() => expect(api.undo).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', {name: '重做'}));
+    await waitFor(() => expect(api.redo).toHaveBeenCalledTimes(1));
+  });
+
+  it('运行中撤销/重做禁用', async () => {
+    const pending = new Promise<never>(() => undefined);
+    const api = apiStub({runAll: vi.fn(() => pending)});
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '运行全部'});
+    fireEvent.click(screen.getByRole('button', {name: '运行全部'}));
+    await waitFor(() => expect(screen.getByRole('button', {name: '撤销'})).toBeDisabled());
+    expect(screen.getByRole('button', {name: '重做'})).toBeDisabled();
+  });
+});
 
 describe('Toolbar 执行操作', () => {
   it('三个运行按钮分别调用选中步骤、运行至步骤和运行全部', async () => {

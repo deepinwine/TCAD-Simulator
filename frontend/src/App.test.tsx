@@ -40,6 +40,8 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     runStep: vi.fn(async () => ({})),
     runTo: vi.fn(async () => ({})),
     runAll: vi.fn(async () => ({})),
+    undo: vi.fn(async () => ({applied: false, log: []})),
+    redo: vi.fn(async () => ({applied: false, log: []})),
     getTimeline: vi.fn(async () => ({items: [], current: -1})),
     restoreTimeline: vi.fn(async () => ({
       timeline: {items: [], current: -1},

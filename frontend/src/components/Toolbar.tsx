@@ -13,6 +13,8 @@ const operationLabels: Record<Exclude<ActiveMutation, null>, string> = {
   to: '运行至选中步骤',
   all: '运行全部',
   timeline: '回看历史快照',
+  undo: '撤销',
+  redo: '重做',
 };
 
 export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {
@@ -69,6 +71,22 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
           onClick={() => void actions.runAll()}
         >
           运行全部
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={allRunsDisabled}
+          onClick={() => void actions.undo()}
+        >
+          撤销
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={allRunsDisabled}
+          onClick={() => void actions.redo()}
+        >
+          重做
         </button>
         {draftBlocked && (
           <span id={draftGuidanceId} className="toolbar-gate-copy" role="status">

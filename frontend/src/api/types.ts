@@ -94,6 +94,12 @@ export interface TimelineView {
   current: number;
 }
 
+export interface HistoryView {
+  applied: boolean;
+  model?: ModelSummaryView;
+  log: string[];
+}
+
 export interface TimelineRestoreView {
   timeline: TimelineView;
   model: ModelSummaryView;
@@ -147,6 +153,8 @@ export interface TcadApi {
   runStep(index: number, signal?: AbortSignal): Promise<RunView>;
   runTo(index: number, signal?: AbortSignal): Promise<RunView>;
   runAll(signal?: AbortSignal): Promise<RunView>;
+  undo(signal?: AbortSignal): Promise<HistoryView>;
+  redo(signal?: AbortSignal): Promise<HistoryView>;
   getTimeline(signal?: AbortSignal): Promise<TimelineView>;
   restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView>;
   getPreviewManifest(
