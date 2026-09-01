@@ -22,10 +22,18 @@ class LayoutAdapter:
     """版图适配器（每实例一个引擎选择）。"""
 
     def __init__(self, backend: str = "gdstk") -> None:
+        if backend == "klayout":
+            from .klayout_backend import KLayoutAdapter
+
+            self._delegate = KLayoutAdapter()
+            self._gdstk = None
+            self._backend = "klayout"
+            return
         if backend != "gdstk":
             raise ValueError(f"未知或未安装的版图后端：{backend!r}")
         import gdstk  # 延迟导入：无 gdstk 的环境仍可用 geometry 纯函数
 
+        self._delegate = None
         self._gdstk = gdstk
         self._backend = backend
 
@@ -53,6 +61,8 @@ class LayoutAdapter:
     # ---- 读写 -----------------------------------------------------------
 
     def read(self, path) -> LayoutGeometry:
+        if self._delegate is not None:
+            return self._delegate.read(path)
         source = Path(path)
         suffix = source.suffix.lower()
         gdstk = self._gdstk
@@ -73,6 +83,8 @@ class LayoutAdapter:
         return LayoutGeometry.from_polygons(polygons)
 
     def write(self, geometry: LayoutGeometry, path, *, name: str = "MASK") -> None:
+        if self._delegate is not None:
+            return self._delegate.write(geometry, path, name=name)
         gdstk = self._gdstk
         library = gdstk.Library(unit=GDS_UNIT_M, precision=GDS_PRECISION_M)
         cell = library.new_cell(name)
@@ -101,6 +113,8 @@ class LayoutAdapter:
     ) -> LayoutGeometry:
         if op not in {"and", "or", "not", "sub", "xor"}:
             raise ValueError(f"未知布尔操作：{op!r}")
+        if self._delegate is not None:
+            return self._delegate.boolean(a, b, op, layer=layer, datatype=datatype)
         gdstk = self._gdstk
         polys_a = [gdstk.Polygon(p.points / _NM_PER_UNIT, layer=p.layer, datatype=p.datatype) for p in a.polygons]
         polys_b = [gdstk.Polygon(p.points / _NM_PER_UNIT, layer=p.layer, datatype=p.datatype) for p in b.polygons]

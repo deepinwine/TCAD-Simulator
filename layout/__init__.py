@@ -6,9 +6,11 @@
 """
 from .adapter import LayoutAdapter
 from .geometry import LayoutGeometry, MaskPolygon, crop_roi
+from .klayout_backend import KLayoutAdapter
 from .litho import configure_exposure_step, mask_from_layout, write_mask_npy
 
 __all__ = [
+    "KLayoutAdapter",
     "LayoutAdapter",
     "LayoutGeometry",
     "MaskPolygon",

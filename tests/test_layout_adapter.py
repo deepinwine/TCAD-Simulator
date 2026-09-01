@@ -254,3 +254,42 @@ class LithoBridgeTests(unittest.TestCase):
             self.assertGreater(int(resist[:, 32:].sum()), 0)
         finally:
             model.parallel.shutdown()
+
+
+@unittest.skipUnless(
+    __import__("layout.klayout_backend", fromlist=["_klayout_available"])._klayout_available(),
+    "klayout 未安装（可选后端）",
+)
+class KLayoutBackendTests(unittest.TestCase):
+    """与 gdstk 后端同语义的回归（需真实 KLayout 环境）。"""
+
+    def setUp(self) -> None:
+        from layout import KLayoutAdapter
+
+        self.adapter = KLayoutAdapter()
+        self.tmp = Path(tempfile.mkdtemp(prefix="tcad-m6-kl-"))
+
+    def test_round_trip_and_boolean(self) -> None:
+        geo = geometry_of(rect(0, 0, 1000, 500, layer=1))
+        path = self.tmp / "rt.gds"
+        self.adapter.write(geo, path)
+        loaded = self.adapter.read(path)
+        self.assertEqual(loaded.layers(), {(1, 0)})
+        self.assertAlmostEqual(geometry_area(loaded), 1000 * 500, delta=1.0)
+
+        b = geometry_of(rect(500, 0, 1500, 500))
+        sub = self.adapter.boolean(geo, b, "sub")
+        self.assertAlmostEqual(geometry_area(sub), 500 * 500, delta=1.0)
+
+
+class KLayoutAbsenceTests(unittest.TestCase):
+    def test_unavailable_backend_raises_clearly(self) -> None:
+        from layout.klayout_backend import _klayout_available
+
+        if _klayout_available():
+            self.skipTest("klayout 已安装")
+        from layout import KLayoutAdapter
+
+        with self.assertRaises(ValueError) as ctx:
+            KLayoutAdapter()
+        self.assertIn("klayout", str(ctx.exception))

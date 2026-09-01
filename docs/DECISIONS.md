@@ -86,6 +86,13 @@ Reason: GDS/OASIS hierarchy, booleans, ROI extraction beyond gdstk.
 Constraints: gdstk support stays; lithography receives normalized mask geometry, never
 KLayout objects; KLayout never becomes a process engine.
 
+ADR-020 — KLayout 后端已实现但未在真实 KLayout 环境验证（2026-09-01）。
+Reason: 本环境（macOS/arm64）klayout wheel 镜像 403，无法安装。
+Constraints: `layout/klayout_backend.py` 与 gdstk 后端同语义（归一化进出），
+测试以 skipUnless 保护；能力探测（`LayoutAdapter.probe`）在 klayout 存在时自动
+启用。待具备 KLayout 的环境（Linux CI 或本机安装成功）跑通
+`KLayoutBackendTests` 后在本文件勾销。
+
 ADR-017 — Agent roles: GLM implements, Codex reviews.
 Reason: mutual review beats single-agent drift; the reviewer must not compete with the
 implementer.
