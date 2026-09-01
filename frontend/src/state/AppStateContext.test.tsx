@@ -90,6 +90,11 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     duplicateStep: vi.fn(async () => initView.recipe),
     moveStep: vi.fn(async () => initView.recipe),
     renameStep: vi.fn(async index => step(Math.trunc(Number(index)))),
+    uploadMask: vi.fn(async () => ({
+      step: step(0),
+      statuses: ['ready', 'ready'] as RuntimeStatus[],
+      warnings: [],
+    })),
     exportRecipe: vi.fn(async () => new Blob(['{}'], {type: 'application/json'})),
     loadRecipe: vi.fn(async () => ({
       model: initView.model,
@@ -140,6 +145,56 @@ function mount(api: TcadApi, events?: string[]) {
 async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
+
+describe('AppStateProvider 掩膜上传', () => {
+  it('uploadMask 调用端点并应用嵌套 set_step 结果', async () => {
+    const updated = step(0, {
+      params: {mask_mode: 'Custom', mask_name: 'my-mask'},
+    });
+    const api = apiStub({
+      uploadMask: vi.fn(async () => ({
+        step: updated,
+        statuses: ['done', 'dirty'] as RuntimeStatus[],
+        warnings: [],
+      })),
+    });
+    mount(api);
+    await waitUntilReady();
+    const file = new File([new Uint8Array([1, 2, 3])], 'my-mask.png', {type: 'image/png'});
+
+    await captured!.actions.uploadMask(file);
+
+    expect(api.uploadMask).toHaveBeenCalledWith(file, 0, expect.any(AbortSignal));
+    await waitFor(() => {
+      expect(captured!.state.recipe[0]?.params.mask_name).toBe('my-mask');
+    });
+    await waitFor(() => {
+      expect(
+        captured!.state.recipe.map(item => item.runtimeStatus),
+      ).toEqual(['done', 'dirty']);
+    });
+  });
+
+  it('uploadMask 失败显示结构化错误', async () => {
+    const api = apiStub({
+      uploadMask: vi.fn(async () => {
+        throw new TcadApiError('掩膜上传失败：不支持的格式', {
+          status: 400,
+          code: 'invalid_mask',
+        });
+      }),
+    });
+    mount(api);
+    await waitUntilReady();
+    const file = new File([new Uint8Array([1])], 'x.bin');
+
+    await captured!.actions.uploadMask(file);
+
+    await waitFor(() => {
+      expect(captured!.state.globalError?.message).toBe('掩膜上传失败：不支持的格式');
+    });
+  });
+});
 
 describe('AppStateProvider 步骤结构编辑', () => {
   it('moveStep 调用端点并以服务端列表替换配方', async () => {

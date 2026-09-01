@@ -4,6 +4,7 @@ import {
   parseInitEnvelope,
   parseRecipeLoadEnvelope,
   parseSavedEnvelope,
+  parseMaskUploadEnvelope,
   parseStepEnvelope,
   parseStepListEnvelope,
   parsePreviewManifestEnvelope,
@@ -393,6 +394,20 @@ export function createTcadApi(): TcadApi {
         (payload: unknown) => parseStepEnvelope(payload, validated),
         signal,
       );
+    },
+    async uploadMask(file: File, stepIndex: number, signal?: AbortSignal): Promise<SetStepView> {
+      const validated = requireRequestInteger(stepIndex, 'request.step_index', 0);
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetchSafely(
+        `/api/upload/mask?step_index=${validated}`,
+        {method: 'POST', body: form, credentials: 'same-origin', signal},
+      );
+      const payload: unknown = await readJsonSafely(response);
+      if (!response.ok || !isSuccessfulEnvelope(payload)) {
+        throw toApiError(response.status, payload);
+      }
+      return parseMaskUploadEnvelope(payload, validated);
     },
     getTimeline(signal?: AbortSignal): Promise<TimelineView> {
       return apiPostJson('/api/timeline/get', {}, parseTimelineEnvelope, signal);

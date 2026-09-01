@@ -52,6 +52,7 @@ export interface AppStateActions {
   duplicateStep(): Promise<void>;
   moveStep(direction: 'up' | 'down'): Promise<void>;
   renameStep(instanceName: string): Promise<void>;
+  uploadMask(file: File): Promise<void>;
 }
 
 export interface AppStateContextValue {
@@ -430,6 +431,25 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
    * run 网络失败后的状态对账：以服务端 timeline 为权威重建 UI 状态，
    * 并触发 Viewer 重拉几何（服务端可能已完成运行，本地却以为失败）。
    */
+  const uploadMaskAction = useCallback(async (file: File): Promise<void> => {
+    const index = stateRef.current.selectedStepIndex;
+    if (index === null) return;
+    if (!beginMutation('mask')) return;
+    const controller = createController();
+    try {
+      const payload = await api.uploadMask(file, index, controller.signal);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      dispatch({type: 'mask/uploaded', payload});
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+      finishMutation('mask');
+    }
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
+
   /**
    * 步骤结构编辑（增删/复制/移动）：以服务端返回的步骤列表替换本地配方，
    * 状态以服务端为准；随后重拉 timeline 同步运行状态。
@@ -716,6 +736,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     duplicateStep: duplicateStepAction,
     moveStep: moveStepAction,
     renameStep: renameStepAction,
+    uploadMask: uploadMaskAction,
   }), [
     addStepAction,
     bootstrap,
@@ -729,6 +750,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     redo,
     removeStepAction,
     renameStepAction,
+    uploadMaskAction,
     restoreTimeline,
     runAll,
     runStep,

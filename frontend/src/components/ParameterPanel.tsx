@@ -3,6 +3,7 @@ import type {TcadApiError} from '../api/client';
 import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/types';
 import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
+import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
@@ -366,6 +367,13 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
                 );
               })}
             </form>
+          )}
+          {Object.hasOwn(step.params, 'mask_mode') && (
+            <MaskControl
+              stepIndex={step.index}
+              maskName={typeof step.params.mask_name === 'string' ? step.params.mask_name : undefined}
+              disabled={disabled}
+            />
           )}
         </div>
       )}

@@ -70,6 +70,11 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     duplicateStep: vi.fn(async () => initView().recipe),
     moveStep: vi.fn(async () => initView().recipe),
     renameStep: vi.fn(async index => step(Math.trunc(Number(index)))),
+    uploadMask: vi.fn(async () => ({
+      step: {} as never,
+      statuses: [],
+      warnings: [],
+    })),
     getTimeline: vi.fn(async () => ({items: [], current: -1})),
     restoreTimeline: vi.fn(async () => ({
       timeline: {items: [], current: -1},

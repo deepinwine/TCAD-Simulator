@@ -1,4 +1,4 @@
-import {act, fireEvent, render, screen} from '@testing-library/react';
+import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {StrictMode, useMemo} from 'react';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TcadApiError} from '../api/client';
@@ -71,6 +71,11 @@ function apiStub(initial: InitView, overrides: Partial<TcadApi> = {}): TcadApi {
     duplicateStep: vi.fn(async () => []),
     moveStep: vi.fn(async () => []),
     renameStep: vi.fn(async () => { throw new Error('unused'); }),
+    uploadMask: vi.fn(async () => ({
+      step: {} as never,
+      statuses: [],
+      warnings: [],
+    })),
     exportRecipe: vi.fn(async () => new Blob(['{}'])),
     loadRecipe: vi.fn(async () => ({model: {gridShape: [8, 8, 8] as [number, number, number], voxelSizeNm: 10}, recipe: [], currentRecipe: {name: '', id: ''}, log: []})),
     getTimeline: vi.fn(async () => ({items: [], current: -1})),
@@ -122,6 +127,49 @@ async function mount(initial: InitView, api = apiStub(initial), strict = false) 
 afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
+});
+
+const maskInitView = (): InitView => ({
+  recipe: [step(0), step(1), step(2)],
+  model: {gridShape: [8, 8, 8], voxelSizeNm: 10},
+  factories: [],
+  materials: [],
+  uiState: {},
+});
+
+describe('ParameterPanel 掩膜控件', () => {
+  it('含 mask_mode 的步骤显示掩膜控件并触发上传', async () => {
+    const exposure = step(2, {
+      name: 'Mask Exposure',
+      params: {mask_mode: 'Custom', mask_name: 'lines'},
+    });
+    const api = apiStub(maskInitView());
+    render(
+      <AppStateProvider api={api}>
+        <ParameterPanel step={exposure} collapsed={false} />
+      </AppStateProvider>,
+    );
+    const uploadButton = await screen.findByRole('button', {name: '上传掩膜'});
+    expect(screen.getByText('lines')).toBeVisible();
+    const img = document.querySelector('img.mask-preview') as HTMLImageElement;
+    expect(img.getAttribute('src')).toContain('/api/mask/preview_step?step_index=2');
+
+    const input = screen.getByLabelText('掩膜文件') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: {files: [new File([new Uint8Array([1, 2])], 'lines.png', {type: 'image/png'})]},
+    });
+    await waitFor(() => expect(api.uploadMask).toHaveBeenCalledTimes(1));
+  });
+
+  it('无掩膜参数的步骤不渲染掩膜控件', async () => {
+    render(
+      <AppStateProvider api={apiStub(maskInitView())}>
+        <ParameterPanel step={step(0, {name: 'Etch'})} collapsed={false} />
+      </AppStateProvider>,
+    );
+    await screen.findByRole('region', {name: 'Parameters'});
+    expect(screen.queryByRole('button', {name: '上传掩膜'})).toBeNull();
+  });
 });
 
 describe('ParameterPanel', () => {

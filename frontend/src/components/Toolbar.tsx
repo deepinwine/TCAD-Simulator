@@ -17,6 +17,7 @@ const operationLabels: Record<Exclude<ActiveMutation, null>, string> = {
   undo: '撤销',
   redo: '重做',
   recipe: '切换配方',
+  mask: '上传掩膜',
 };
 
 export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {

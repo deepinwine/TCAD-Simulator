@@ -334,6 +334,15 @@ function parseCurrentRecipe(value: unknown): {name: string; id: string} {
   };
 }
 
+export function parseMaskUploadEnvelope(payload: unknown, index: number): SetStepView {
+  // 外层 {ok, path, result:<set_step 封套>}；嵌套 result 才是步骤更新载荷
+  const envelope = requireRecord(payload, '$');
+  if (envelope.ok !== true) {
+    throw new ApiContractError('ok', 'true');
+  }
+  return parseSetStepEnvelope(envelope.result, index);
+}
+
 export function parseStepListEnvelope(payload: unknown): StepView[] {
   // 结构编辑端点的 result 本身就是步骤数组（不是对象），不能走 requireOkResult
   const envelope = requireRecord(payload, '$');

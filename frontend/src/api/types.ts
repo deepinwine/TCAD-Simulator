@@ -183,6 +183,7 @@ export interface TcadApi {
   duplicateStep(index: number, signal?: AbortSignal): Promise<StepView[]>;
   moveStep(index: number, direction: 'up' | 'down', signal?: AbortSignal): Promise<StepView[]>;
   renameStep(index: number, instanceName: string, signal?: AbortSignal): Promise<StepView>;
+  uploadMask(file: File, stepIndex: number, signal?: AbortSignal): Promise<SetStepView>;
   getTimeline(signal?: AbortSignal): Promise<TimelineView>;
   restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView>;
   getPreviewManifest(

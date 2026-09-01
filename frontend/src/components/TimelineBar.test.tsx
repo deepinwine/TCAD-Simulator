@@ -85,6 +85,11 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     duplicateStep: vi.fn(async () => []),
     moveStep: vi.fn(async () => []),
     renameStep: vi.fn(async () => { throw new Error('unused'); }),
+    uploadMask: vi.fn(async () => ({
+      step: {} as never,
+      statuses: [],
+      warnings: [],
+    })),
     exportRecipe: vi.fn(async () => new Blob(['{}'])),
     loadRecipe: vi.fn(async () => ({model: {gridShape: [8, 8, 8] as [number, number, number], voxelSizeNm: 10}, recipe: [], currentRecipe: {name: '', id: ''}, log: []})),
     getTimeline: vi.fn(async () => timeline),

@@ -14,7 +14,7 @@ import type {
 
 export type AppPhase = 'booting' | 'ready' | 'running' | 'fatal';
 export type ActiveMutation =
-  | 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | 'recipe' | null;
+  | 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | 'recipe' | 'mask' | null;
 export type TimelineStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ParameterValidation {
@@ -98,6 +98,7 @@ export type AppAction =
   | {type: 'recipe/replaced'; recipe: StepView[]; model?: ModelSummaryView}
   | {type: 'recipe/stepsReplaced'; recipe: StepView[]}
   | {type: 'step/renamed'; index: number; step: StepView}
+  | {type: 'mask/uploaded'; payload: SetStepView}
   | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
@@ -422,6 +423,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         recipe: state.recipe.map(item => item.index === action.index ? action.step : item),
+        globalError: null,
+      };
+    case 'mask/uploaded':
+      return {
+        ...state,
+        recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         globalError: null,
       };
     case 'history/applied':
