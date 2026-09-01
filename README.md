@@ -602,6 +602,26 @@ grid = mask_from_layout("mask.gds", shape=(128, 128))
 write_mask_npy(grid, "mask.npy")           # 喂给 Exposure 步骤的 mask_file
 ```
 
+### Process Backend (M7)
+
+`process_backend/` defines the `ProcessBackend` interface and `VoxelBackend` — a
+behavior-unchanged wrapper over the existing `ProcessModel` (parity-tested:
+identical voxel grids and meshes vs direct execution). This is the seam where
+M8/M9 will add the ViennaPS accurate engine.
+
+`process_backend/` 定义 `ProcessBackend` 接口与 `VoxelBackend`——现有
+`ProcessModel` 的行为不变包装（parity 测试保证逐体素一致）。这是 M8/M9
+接入 ViennaPS 精确引擎的接缝。
+
+```python
+from process_backend import create_backend
+
+backend = create_backend("voxel", grid=128)
+outcome = backend.execute_step(step)      # 仍走 ProcessStep.execute(model)
+meshes = backend.material_surfaces(20000)
+backend.shutdown()
+```
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):

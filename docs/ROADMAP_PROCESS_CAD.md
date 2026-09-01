@@ -99,11 +99,19 @@ leaves resist only on the unexposed half), and an optional KLayout backend with
 same semantics (implemented; real-environment verification pending per ADR-020
 since the local wheel mirror 403s).
 
-## M7 — ProcessBackend Interface
+## M7 — ProcessBackend Interface ✅（已交付）
 
 ```text
 ProcessBackend -> VoxelBackend -> ProcessModel   (behavior unchanged)
 ```
+
+Delivered on `codex/m7-backend`: `process_backend/` package — the `ProcessBackend`
+ABC (info/summary/execute_step/snapshot/restore/material_surfaces/grid/shutdown,
+structured `ProcessBackendError`), `VoxelBackend` as a behavior-unchanged wrapper
+over `ProcessModel` (parity test: identical voxel grids and surface meshes vs
+direct `step.execute(model)` execution), and a registry (`create_backend('voxel')`)
+where M8's viennaps sandbox will later register 'viennaps'. The capability model
+with explicit fallbacks arrives with M9 as planned.
 
 ## M8 — ViennaPS Sandbox
 
@@ -134,7 +142,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M6 merged to backup/main)
+## Current Branch State (2026-09-01, M7 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -142,11 +150,13 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `2820cf7` | **M6 已由所有者授权快进合并**（M5 `0d31acd` + M6 5 提交，2026-09-01） |
 | 本地 `main` | `2820cf7` | 与 `backup/main` 一致 |
 | `codex/m6-layout` | `2820cf7` | M6 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m7-backend` | M7 交付分支（计划 + 功能提交 + 本文档提交） | 线性领先 `backup/main`（`9ec81fb`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M7 ProcessBackend 接口（`ProcessBackend -> VoxelBackend ->
-  ProcessModel`，行为不变）；旧 WebUI 弃用决定仍留待所有者单独评审（ADR-012）。
+- Next: M7 经所有者审查后合并 `backup/main` → 开始 M8 ViennaPS 沙盒
+  （仅 `experiments/viennaps`，ADR-014）；旧 WebUI 弃用决定仍留待所有者单独
+  评审（ADR-012）。

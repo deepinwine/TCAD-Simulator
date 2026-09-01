@@ -180,8 +180,9 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
    reach lithography), GDS/OASIS read/write, hierarchy flattening, booleans, ROI,
    rasterization, and an end-to-end GDS→exposure bridge; KLayout backend
    implemented with verification pending (ADR-020).
-7. **M7** `ProcessBackend` interface; wrap `ProcessModel` as `VoxelBackend` with behavior
-   unchanged.
+7. **M7** `ProcessBackend` interface — delivered: `process_backend/` with the ABC,
+   structured errors, a registry, and `VoxelBackend` wrapping `ProcessModel`
+   behavior-unchanged (voxel-parity verified).
 8. **M8** ViennaPS prototype sandboxed under `experiments/viennaps` only.
 9. **M9** `ViennaPSBackend` behind the interface.
 10. **M10** `GeometryScene` / VTK bridge unifying voxel and ViennaPS output for the viewer.
