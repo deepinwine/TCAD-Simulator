@@ -11,6 +11,7 @@ from .base import (
     ProcessBackendError,
     StepOutcome,
 )
+from .viennaps_backend import ViennaPSBackend, engine_available
 from .voxel import VoxelBackend, available_backends, create_backend
 
 __all__ = [
@@ -19,7 +20,9 @@ __all__ = [
     "ProcessBackend",
     "ProcessBackendError",
     "StepOutcome",
+    "ViennaPSBackend",
     "VoxelBackend",
+    "engine_available",
     "available_backends",
     "create_backend",
 ]

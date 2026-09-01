@@ -123,9 +123,18 @@ ViennaPS 4.7.0 from source (libomp, pybind11 3.0.x, Python 3.13) — steps recor
 0.64µm field, 8nm grid, 30s process) runs end-to-end and emits a VTK surface mesh;
 guard tests green; the backend registry still only contains 'voxel' (ADR-014/021).
 
-## M9 — ViennaPSBackend
+## M9 — ViennaPSBackend ✅（首切片已交付）
 
 Accurate Mode behind the backend interface; capability model with explicit fallbacks.
+Delivered on `codex/m9-viennaps-backend`: `process_backend/viennaps_backend.py` —
+`ViennaPSBackend` (`precision='geometry'`) registered as `'viennaps'`; supports
+Initialize Wafer (flat Si substrate) and Etch(Dry→SF6O2, default fluxes);
+`unsupported_step` raises with an explicit fallback suggestion to the voxel backend
+(never silent substitution); snapshot/restore via level-set deepCopy; surface meshes
+via in-memory `getSurfaceMesh`. First dual-engine calibration recorded (Basic-Trench
+etch: voxel ≈300 nm vs geometry ≈6 nm at default fluxes — parameter mapping is the
+next calibration step). Multi-material stacks / masked etch / more step types are the
+M9 follow-up slices.
 
 ## M10 — GeometryScene / VTK Bridge
 
@@ -148,7 +157,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M8 merged to backup/main)
+## Current Branch State (2026-09-01, M9 first slice complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -156,12 +165,13 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `f3cb504` | **M8 已由所有者授权快进合并**（M7 `35cc424` + M8 1 提交，2026-09-01） |
 | 本地 `main` | `f3cb504` | 与 `backup/main` 一致 |
 | `codex/m8-viennaps` | `f3cb504` | M8 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m9-viennaps-backend` | M9 首切片（ViennaPSBackend + 能力回退 + 标定 + 文档） | 线性领先 `backup/main`（`f0d6005`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M9 ViennaPSBackend（注册 'viennaps'、precision='geometry'、
-  能力模型与显式回退，标定参考 M8 实验）；旧 WebUI 弃用决定仍留待所有者
-  单独评审（ADR-012）。
+- Next: M9 首切片经所有者审查后合并 → 补齐 ViennaPS 能力（掩膜刻蚀、多材料
+  堆叠、参数映射标定）或开始 M10 GeometryScene/VTK 桥；旧 WebUI 弃用决定仍
+  留待所有者单独评审（ADR-012）。

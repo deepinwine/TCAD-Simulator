@@ -634,6 +634,18 @@ out of the backend registry until M9.
 参考实验（掩膜 SF6O2 沟槽刻蚀 → VTK 网格，本机源码构建 ViennaPS 4.7.0），
 以及解决 PyPI wheel ABI 不匹配的完整构建记录。M9 之前不接入后端注册表。
 
+### ViennaPS Backend (M9, first slice)
+
+`create_backend("viennaps")` returns the geometry-precision backend over the
+validated engine: flat-substrate Initialize + SF6O2 dry etch, snapshot/restore via
+level-set deep copy, in-memory surface meshes, and an explicit capability model —
+unsupported steps raise with a fallback suggestion to the voxel backend. First
+dual-engine calibration numbers are recorded in the ROADMAP.
+
+`create_backend("viennaps")` 返回几何精度后端（基于已验证引擎）：平衬底初始化、
+SF6O2 干法刻蚀、level-set 快照恢复、内存表面网格；能力集之外的步骤显式报错并
+建议回退体素后端。双引擎首批标定数据记录于 ROADMAP。
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):

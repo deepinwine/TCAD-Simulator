@@ -66,10 +66,15 @@ class SandboxStructureTests(unittest.TestCase):
         self.assertIn(result.returncode, {3, 4})
         self.assertIn("ViennaPS", result.stderr)
 
-    def test_sandbox_is_not_registered_in_backend_registry(self) -> None:
+    def test_registration_comes_from_process_backend_not_sandbox(self) -> None:
+        """M9 起 'viennaps' 由生产模块 process_backend 注册；沙盒自身不得注册。"""
         from process_backend import available_backends
 
-        self.assertNotIn("viennaps", available_backends())
+        self.assertIn("viennaps", available_backends())
+        for script in SANDBOX.glob("*.py"):
+            content = script.read_text(encoding="utf-8")
+            self.assertNotIn("_BACKEND_FACTORIES", content, script.name)
+            self.assertNotIn("register", content.lower(), script.name)
 
 
 @unittest.skipUnless(_engine_available(), "viennaps 未安装（沙盒，ADR-021）")

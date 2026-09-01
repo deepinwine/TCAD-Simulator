@@ -14,11 +14,12 @@ import numpy as np
 
 
 class ProcessBackendError(Exception):
-    """后端选择/执行失败的结构化错误。"""
+    """后端选择/执行失败的结构化错误（suggestion 给出回退指引）。"""
 
-    def __init__(self, message: str, *, code: str) -> None:
+    def __init__(self, message: str, *, code: str, suggestion: str | None = None) -> None:
         super().__init__(message)
         self.code = str(code)
+        self.suggestion = suggestion
 
 
 @dataclass(frozen=True)

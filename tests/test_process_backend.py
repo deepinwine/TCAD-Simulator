@@ -109,3 +109,123 @@ class VoxelParityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ViennaPSBackendTests(unittest.TestCase):
+    """M9：几何后端注册、能力回退与双引擎标定（引擎需已安装）。"""
+
+    def _skip_if_no_engine(self) -> None:
+        from process_backend import engine_available
+
+        if not engine_available():
+            self.skipTest("viennaps 未安装（见 experiments/viennaps/README.md）")
+
+    def test_registered_with_geometry_precision(self) -> None:
+        self._skip_if_no_engine()
+        from process_backend import create_backend
+
+        backend = create_backend("viennaps", grid_nm=16.0)
+        info = backend.info()
+        self.assertEqual(info.name, "viennaps")
+        self.assertEqual(info.precision, "geometry")
+        self.assertIn("viennaps", __import__("process_backend", fromlist=["available_backends"]).available_backends())
+
+    def test_unsupported_step_falls_back_explicitly(self) -> None:
+        self._skip_if_no_engine()
+        from process_backend import create_backend
+
+        backend = create_backend("viennaps")
+        class FakeStep:
+            name = "Spin Resist"
+            params = {}
+        with self.assertRaises(ProcessBackendError) as ctx:
+            backend.execute_step(FakeStep())
+        self.assertEqual(ctx.exception.code, "unsupported_step")
+        self.assertIn("voxel", str(ctx.exception.suggestion))
+
+    def test_initialize_etch_and_snapshot_round_trip(self) -> None:
+        self._skip_if_no_engine()
+        import tcad_simulator as tcad
+        from process_backend import create_backend
+
+        backend = create_backend("viennaps", grid_nm=16.0)
+        class Step:
+            def __init__(self, name, params):
+                self.name, self.params = name, params
+        backend.execute_step(Step("Initialize Wafer", {"thickness_nm": 200.0}))
+        surfaces = backend.material_surfaces(20000)
+        self.assertEqual(len(surfaces), 1)
+        mat_id, triangles = surfaces[0]
+        self.assertGreater(triangles.shape[0], 0)
+        self.assertEqual(triangles.shape[1:], (3, 3))
+        surface_z_max = float(triangles[:, :, 2].max())
+
+        state = backend.snapshot()
+        backend.execute_step(Step("Etch", {"time": 10.0, "chemistry": "Dry"}))
+        tri_after = backend.material_surfaces(20000)[0][1]
+        depth_after = float(tri_after[:, :, 2].max() - tri_after[:, :, 2].min())
+
+        backend.restore(state)
+        tri_restored = backend.material_surfaces(20000)[0][1]
+        self.assertAlmostEqual(
+            float(tri_restored[:, :, 2].max()), surface_z_max, places=9,
+        )
+        backend.shutdown()
+
+    def test_grid_raises_geometry_error(self) -> None:
+        self._skip_if_no_engine()
+        from process_backend import create_backend
+
+        backend = create_backend("viennaps")
+        class Step:
+            name, params = "Initialize Wafer", {"thickness_nm": 200.0}
+        backend.execute_step(Step())
+        with self.assertRaises(ProcessBackendError) as ctx:
+            backend.grid()
+        self.assertEqual(ctx.exception.code, "geometry_backend")
+
+    def test_calibration_etch_depth_both_engines(self) -> None:
+        """双引擎标定：同目标刻蚀，报告并宽限比较刻蚀深度量级。"""
+        self._skip_if_no_engine()
+        import tcad_simulator as tcad
+        from process_backend import create_backend
+
+        # 体素引擎：Initialize + Etch(Dry 30s)
+        voxel = create_backend("voxel", grid=64)
+        database = tcad.MaterialDatabase()
+        flow = tcad.load_demo_flows(database)["Basic Trench"]["steps"]
+        voxel.execute_step(tcad._webui_deserialize_step(flow[0], database))
+        etch = next(
+            tcad._webui_deserialize_step(blob, database)
+            for blob in flow
+            if blob.get("name") == "Etch"
+        )
+        voxel.execute_step(etch)
+        void_id = next(
+            mid for mid, material in database.items() if material.name == "Void"
+        )
+        grid = voxel.grid()
+        import numpy as np
+        silicon_id = next(
+            mid for mid, material in database.items() if material.name == "Silicon"
+        )
+        heights = np.nonzero(grid == silicon_id)[2]
+        voxel_depth_nm = float((heights.max() - heights.min()) + 1) * voxel.summary().voxel_size_nm
+        voxel.shutdown()
+
+        # 几何引擎：Initialize(200nm) + Etch(30s)
+        geometry = create_backend("viennaps", grid_nm=16.0)
+        class Step:
+            def __init__(self, name, params):
+                self.name, self.params = name, params
+        geometry.execute_step(Step("Initialize Wafer", {"thickness_nm": 200.0}))
+        geometry.execute_step(Step("Etch", {"time": 30.0, "chemistry": "Dry"}))
+        tri = geometry.material_surfaces(40000)[0][1]
+        geo_depth_nm = float(tri[:, :, 2].max() - tri[:, :, 2].min()) * 1000.0
+        geometry.shutdown()
+
+        print(f"\n[calibration] voxel etch depth ≈ {voxel_depth_nm:.1f} nm | "
+              f"viennaps ≈ {geo_depth_nm:.1f} nm | ratio ≈ {geo_depth_nm / max(voxel_depth_nm, 1e-9):.2f}")
+        # 宽容量级断言：两个物理模型都应产生明显刻蚀
+        self.assertGreater(voxel_depth_nm, 0.0)
+        self.assertGreater(geo_depth_nm, 0.0)

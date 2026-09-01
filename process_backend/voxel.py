@@ -88,8 +88,15 @@ class VoxelBackend(ProcessBackend):
             pass
 
 
+def _viennaps_factory(**kwargs):
+    from .viennaps_backend import ViennaPSBackend
+
+    return ViennaPSBackend(**kwargs)
+
+
 _BACKEND_FACTORIES = {
     "voxel": VoxelBackend,
+    "viennaps": _viennaps_factory,
 }
 
 
