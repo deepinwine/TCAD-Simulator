@@ -126,20 +126,19 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M5 implementation complete)
+## Current Branch State (2026-09-01, M5 merged to backup/main)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
-| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1–M4 实现 |
-| `backup/main`（deepinwine） | `3f7faba` | **M4 已由所有者授权快进合并**（M3 `31ce391` + M4 7 提交，2026-08-31） |
-| 本地 `main` | `3f7faba` | 与 `backup/main` 一致 |
-| `codex/m4-api-facade` | `3f7faba` | M4 交付分支，已全部包含于 `main`（保留作历史） |
-| `codex/m5-parity` | M5 交付分支（计划 + 4 个功能提交 + 本文档提交） | 线性领先 `backup/main`（`f61e069`），可快进合并 |
+| `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1–M5 实现 |
+| `backup/main`（deepinwine） | `fc609e7` | **M5 已由所有者授权快进合并**（M4 `f61e069` + M5 6 提交，2026-09-01） |
+| 本地 `main` | `fc609e7` | 与 `backup/main` 一致 |
+| `codex/m5-parity` | `fc609e7` | M5 交付分支，已全部包含于 `main`（保留作历史） |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: M5 经所有者审查后合并 `backup/main` → 旧 WebUI 弃用决定（ADR-012：需所有者
-  单独评审）→ 开始 M6 KLayout LayoutAdapter 或按 Backlog 补 History/Domain 抽屉。
+- Next: 开始 M6 KLayout LayoutAdapter（gdstk + 可选 KLayout 的 GDS/OASIS 适配）；
+  旧 WebUI 弃用决定仍留待所有者单独评审（ADR-012）。
