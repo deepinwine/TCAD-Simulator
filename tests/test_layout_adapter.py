@@ -171,3 +171,86 @@ class AdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from layout import configure_exposure_step, mask_from_layout, write_mask_npy  # noqa: E402
+
+
+@unittest.skipUnless(HAS_GDSTK, "gdstk 未安装")
+class LithoBridgeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="tcad-m6-t2-"))
+        self.adapter = LayoutAdapter()
+
+    def test_mask_from_gds_left_half(self) -> None:
+        geo = geometry_of(rect(0, 0, 500, 1000, layer=1))
+        gds = self.tmp / "half.gds"
+        self.adapter.write(geo, gds)
+        grid = mask_from_layout(gds, shape=(10, 10), bounds=(0.0, 0.0, 1000.0, 1000.0))
+        self.assertEqual(grid.shape, (10, 10))
+        self.assertTrue(bool(grid[:, :5].all()))
+        self.assertFalse(bool(grid[:, 5:].any()))
+
+    def test_mask_layers_and_roi(self) -> None:
+        geo = geometry_of(
+            rect(0, 0, 500, 1000, layer=1),
+            rect(500, 0, 1000, 1000, layer=2),
+        )
+        only2 = mask_from_layout(geo, shape=(10, 10), layers=[(2, 0)], bounds=(0.0, 0.0, 1000.0, 1000.0))
+        self.assertFalse(bool(only2[:, :5].any()))
+        self.assertTrue(bool(only2[:, 5:].all()))
+        roi = mask_from_layout(geo, shape=(10, 10), roi=(250, 0, 750, 1000), bounds=(0.0, 0.0, 1000.0, 1000.0))
+        self.assertFalse(bool(roi[:, :3].any()))
+        self.assertTrue(bool(roi[:, 3:7].all()))
+
+    def test_npy_round_trip_through_runtime_loader(self) -> None:
+        import tcad_simulator as tcad
+
+        grid = mask_from_layout(
+            geometry_of(rect(0, 0, 400, 1000, layer=1)),
+            shape=(8, 8),
+        )
+        path = write_mask_npy(grid, self.tmp / "mask.npy")
+        loaded = tcad.load_mask_from_file(str(path))
+        np.testing.assert_array_equal(loaded, grid)
+
+    def test_end_to_end_gds_exposure_develop(self) -> None:
+        import tcad_simulator as tcad
+
+        # GDS：左半开口掩膜
+        geo = geometry_of(rect(0, 0, 320, 640, layer=1))
+        gds = self.tmp / "flow.gds"
+        self.adapter.write(geo, gds)
+        grid = mask_from_layout(gds, shape=(64, 64), bounds=(0.0, 0.0, 640.0, 640.0))
+        mask_path = write_mask_npy(grid, self.tmp / "flow-mask.npy")
+
+        database = tcad.MaterialDatabase()
+        model = tcad.ProcessModel(
+            database,
+            grid_shape=(64, 64, 64),
+            voxel_size_nm=640.0 / 64,
+            max_workers=1,
+        )
+        try:
+            tcad.InitializeWaferStep(database).execute(model)
+            tcad.SpinResistStep(database).execute(model)
+
+            exposure = tcad.ExposureStep(database)
+            configure_exposure_step(exposure, mask_path, "gds-left-half")
+            exposure.execute(model)
+            tcad.DevelopStep(database).execute(model)
+
+            resist_id = next(
+                mid for mid, material in database.items()
+                if material.name == "Photoresist"
+            )
+            resist = model.grid == resist_id
+            self.assertGreater(int(resist.sum()), 0)
+            # 左半曝光显影后应无光刻胶，右半保留
+            self.assertEqual(int(resist[:, :32].sum()), 0)
+            self.assertGreater(int(resist[:, 32:].sum()), 0)
+        finally:
+            model.parallel.shutdown()
