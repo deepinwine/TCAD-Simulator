@@ -113,9 +113,15 @@ direct `step.execute(model)` execution), and a registry (`create_backend('voxel'
 where M8's viennaps sandbox will later register 'viennaps'. The capability model
 with explicit fallbacks arrives with M9 as planned.
 
-## M8 — ViennaPS Sandbox
+## M8 — ViennaPS Sandbox ✅（已验证）
 
 Prototype only under `experiments/viennaps`; standalone validation (ADR-014).
+Delivered and **validated on this machine**: the PyPI wheels' cross-module pybind11
+ABI mismatch (import-time SIGSEGV) was diagnosed and resolved by building ViennaLS +
+ViennaPS 4.7.0 from source (libomp, pybind11 3.0.x, Python 3.13) — steps recorded in
+`experiments/viennaps/README.md`. The reference experiment (masked SF6O2 trench etch,
+0.64µm field, 8nm grid, 30s process) runs end-to-end and emits a VTK surface mesh;
+guard tests green; the backend registry still only contains 'voxel' (ADR-014/021).
 
 ## M9 — ViennaPSBackend
 
@@ -142,7 +148,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M7 merged to backup/main)
+## Current Branch State (2026-09-01, M8 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -150,11 +156,13 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `ef40f8d` | **M7 已由所有者授权快进合并**（M6 `9ec81fb` + M7 3 提交，2026-09-01） |
 | 本地 `main` | `ef40f8d` | 与 `backup/main` 一致 |
 | `codex/m7-backend` | `ef40f8d` | M7 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m8-viennaps` | M8 交付分支（沙盒 + 探测 + 参考实验 + 文档） | 线性领先 `backup/main`（`35cc424`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M8 ViennaPS 沙盒（仅 `experiments/viennaps`，ADR-014）；
-  旧 WebUI 弃用决定仍留待所有者单独评审（ADR-012）。
+- Next: M8 经所有者审查后合并 `backup/main` → 开始 M9 ViennaPSBackend
+  （注册 'viennaps'、precision='geometry'、能力模型与显式回退，标定参考
+  M8 沟槽实验）；旧 WebUI 弃用决定仍留待所有者单独评审（ADR-012）。

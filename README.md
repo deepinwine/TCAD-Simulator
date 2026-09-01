@@ -622,6 +622,18 @@ meshes = backend.material_surfaces(20000)
 backend.shutdown()
 ```
 
+### ViennaPS Sandbox (M8)
+
+`experiments/viennaps/` hosts the accurate-engine sandbox (ADR-014): a capability
+probe, a validated reference experiment (masked SF6O2 trench etch → VTK mesh,
+verified end-to-end on this machine with ViennaPS 4.7.0 built from source), and
+the build recipe that resolves the PyPI wheels' ABI mismatch. The sandbox stays
+out of the backend registry until M9.
+
+`experiments/viennaps/` 是精确引擎沙盒（ADR-014）：能力探测、已真机验证的
+参考实验（掩膜 SF6O2 沟槽刻蚀 → VTK 网格，本机源码构建 ViennaPS 4.7.0），
+以及解决 PyPI wheel ABI 不匹配的完整构建记录。M9 之前不接入后端注册表。
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):

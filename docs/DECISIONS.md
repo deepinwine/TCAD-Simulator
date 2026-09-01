@@ -93,6 +93,15 @@ Constraints: `layout/klayout_backend.py` 与 gdstk 后端同语义（归一化�
 启用。待具备 KLayout 的环境（Linux CI 或本机安装成功）跑通
 `KLayoutBackendTests` 后在本文件勾销。
 
+ADR-021 — ViennaPS 沙盒已在本环境真机验证（2026-09-01 完成）。
+Reason: PyPI 的 ViennaLS/ViennaPS 预编译 wheel 存在跨模块 pybind11 ABI 不匹配
+（导入即 SIGSEGV）；按官方仓库（ViennaTools/ViennaPS）源码构建（libomp +
+pybind11 3.0.x + Python 3.13 定向）后稳定。
+Constraints: 引擎仅用于 `experiments/viennaps` 沙盒（ADR-014）；参考实验
+（SF6O2 沟槽刻蚀，0.64µm 视场）完整执行并产出 VTK 网格；`process_backend`
+注册表仍只有 'voxel'，ViennaPSBackend 与能力模型留待 M9。构建步骤记录于
+`experiments/viennaps/README.md`。
+
 ADR-017 — Agent roles: GLM implements, Codex reviews.
 Reason: mutual review beats single-agent drift; the reviewer must not compete with the
 implementer.
