@@ -1,7 +1,7 @@
 # M6 LayoutAdapter 设计说明
 
 - 日期：2026-09-01
-- 状态：已批准开工（所有者指令「合并 并继续」）
+- 状态：已实现（M6 交付于 `codex/m6-layout`；KLayout 真机验证待 ADR-020 勾销）
 - 目标里程碑：M6 — KLayout LayoutAdapter
 - 基线提交：`0d31acd`（backup/main，M5 已合并）
 

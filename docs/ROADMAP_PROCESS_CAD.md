@@ -86,10 +86,18 @@ Remaining legacy-only areas (History/Domain Settings/AI Agent drawers) are Backl
 secondary workflow tools, not core process editing. Legacy-WebUI deprecation decision
 stays with the owner (ADR-012: only after parity + regression green).
 
-## M6 — KLayout LayoutAdapter
+## M6 — KLayout LayoutAdapter ✅（已交付）
 
 `LayoutAdapter` abstraction; gdstk + optional KLayout for GDS/OASIS, hierarchy, booleans,
-ROI; normalized mask geometry to lithography (ADR-016).
+ROI; normalized mask geometry to lithography (ADR-016). Delivered on
+`codex/m6-layout`: `layout/` package — normalized geometry types (nm polygons +
+layer/datatype, pure ROI crop), gdstk-backed LayoutAdapter (GDS/OASIS read-write
+round trips, hierarchy flattening, and/or/not/sub/xor booleans, even-odd
+rasterization), the lithography bridge (`mask_from_layout` → boolean grid → .npy
+→ ExposureStep params, verified end-to-end: GDS left-half mask → expose → develop
+leaves resist only on the unexposed half), and an optional KLayout backend with
+same semantics (implemented; real-environment verification pending per ADR-020
+since the local wheel mirror 403s).
 
 ## M7 — ProcessBackend Interface
 
@@ -126,7 +134,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M5 merged to backup/main)
+## Current Branch State (2026-09-01, M6 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -134,11 +142,13 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `fc609e7` | **M5 已由所有者授权快进合并**（M4 `f61e069` + M5 6 提交，2026-09-01） |
 | 本地 `main` | `fc609e7` | 与 `backup/main` 一致 |
 | `codex/m5-parity` | `fc609e7` | M5 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m6-layout` | M6 交付分支（计划 + 3 个功能提交 + 本文档提交） | 线性领先 `backup/main`（`0d31acd`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M6 KLayout LayoutAdapter（gdstk + 可选 KLayout 的 GDS/OASIS 适配）；
+- Next: M6 经所有者审查后合并 `backup/main` → 开始 M7 ProcessBackend 接口
+  （`ProcessBackend -> VoxelBackend -> ProcessModel`，行为不变）；
   旧 WebUI 弃用决定仍留待所有者单独评审（ADR-012）。

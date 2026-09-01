@@ -175,7 +175,11 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
 5. **M5** React reaches parity — delivered: undo/redo, recipe management (demo/new/
    save/export/import), step structure editing, mask upload + preview, all via the frozen
    contract. Legacy WebUI deprecation is the owner's separate decision (ADR-012).
-6. **M6** `LayoutAdapter` + optional KLayout; gdstk kept.
+6. **M6** `LayoutAdapter` + optional KLayout; gdstk kept — delivered: `layout/`
+   package with normalized mask geometry (ADR-016 boundary: engine objects never
+   reach lithography), GDS/OASIS read/write, hierarchy flattening, booleans, ROI,
+   rasterization, and an end-to-end GDS→exposure bridge; KLayout backend
+   implemented with verification pending (ADR-020).
 7. **M7** `ProcessBackend` interface; wrap `ProcessModel` as `VoxelBackend` with behavior
    unchanged.
 8. **M8** ViennaPS prototype sandboxed under `experiments/viennaps` only.

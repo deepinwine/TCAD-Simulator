@@ -581,6 +581,27 @@ python -m uvicorn process_api.http:app --host 127.0.0.1 --port 8799
 # GET /api/v2/health | /api/v2/init | /api/v2/preview/manifest | /api/v2/preview/stl
 ```
 
+### Layout Adapter (M6)
+
+`layout/` provides the `LayoutAdapter` (gdstk-backed; optional KLayout backend with
+the same semantics): GDS/OASIS read/write with hierarchy flattening, boolean ops
+(and/or/not/sub/xor), ROI cropping, and rasterization of **normalized mask
+geometry** (nm polygons + layer/datatype) into boolean grids. The lithography
+bridge turns a layout file into a runnable exposure mask — verified end-to-end.
+
+`layout/` 提供 `LayoutAdapter`（gdstk 为必备引擎，KLayout 为可选同语义后端）：
+GDS/OASIS 读写（层级展平）、布尔运算、ROI 裁剪，并把**归一化掩膜几何**栅格化
+为布尔网格；`mask_from_layout` 可直接产出曝光步骤可用的 .npy 掩膜。
+
+```python
+from layout import LayoutAdapter, mask_from_layout, write_mask_npy
+
+adapter = LayoutAdapter()                  # backend="klayout" 需已安装 klayout
+geometry = adapter.read("mask.gds")        # 归一化多边形（nm 坐标）
+grid = mask_from_layout("mask.gds", shape=(128, 128))
+write_mask_npy(grid, "mask.npy")           # 喂给 Exposure 步骤的 mask_file
+```
+
 ## Documentation
 
 Formal source-focused documentation lives in [`docs/`](docs/):
