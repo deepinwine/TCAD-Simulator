@@ -85,6 +85,11 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
       log: [],
     })),
     saveRecipe: vi.fn(async () => ({saved: true})),
+    addStep: vi.fn(async () => initView.recipe),
+    removeStep: vi.fn(async () => initView.recipe),
+    duplicateStep: vi.fn(async () => initView.recipe),
+    moveStep: vi.fn(async () => initView.recipe),
+    renameStep: vi.fn(async index => step(Math.trunc(Number(index)))),
     exportRecipe: vi.fn(async () => new Blob(['{}'], {type: 'application/json'})),
     loadRecipe: vi.fn(async () => ({
       model: initView.model,
@@ -135,6 +140,81 @@ function mount(api: TcadApi, events?: string[]) {
 async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
+
+describe('AppStateProvider 步骤结构编辑', () => {
+  it('moveStep 调用端点并以服务端列表替换配方', async () => {
+    const moved = [step(0, {instanceName: 'B'}), step(1, {instanceName: 'A'})];
+    const api = apiStub({
+      moveStep: vi.fn(async () => moved),
+    });
+    mount(api);
+    await waitUntilReady();
+    void captured!.actions.selectStep(1);
+    await waitFor(() => expect(captured!.state.selectedStepIndex).toBe(1));
+
+    await captured!.actions.moveStep('up');
+
+    expect(api.moveStep).toHaveBeenCalledWith(1, 'up', expect.any(AbortSignal));
+    await waitFor(() => {
+      expect(captured!.state.recipe.map(item => item.instanceName)).toEqual(['B', 'A']);
+    });
+  });
+
+  it('removeStep 后选中索引失效时回落到首步', async () => {
+    const removed = [step(0)];
+    const api = apiStub({removeStep: vi.fn(async () => removed)});
+    mount(api);
+    await waitUntilReady();
+    void captured!.actions.selectStep(1);
+    await waitFor(() => expect(captured!.state.selectedStepIndex).toBe(1));
+
+    await captured!.actions.removeStep();
+
+    expect(api.removeStep).toHaveBeenCalledWith(1, expect.any(AbortSignal));
+    await waitFor(() => {
+      expect(captured!.state.selectedStepIndex).toBe(0);
+      expect(captured!.state.recipe).toHaveLength(1);
+    });
+  });
+
+  it('renameStep 原位更新步骤名', async () => {
+    const renamed = step(0, {instanceName: ' renamed step '});
+    const api = apiStub({renameStep: vi.fn(async () => renamed)});
+    mount(api);
+    await waitUntilReady();
+
+    await captured!.actions.renameStep('New Name');
+
+    expect(api.renameStep).toHaveBeenCalledWith(0, 'New Name', expect.any(AbortSignal));
+    await waitFor(() => {
+      expect(captured!.state.recipe[0]?.instanceName).toBe(' renamed step ');
+    });
+  });
+
+  it('addStep 以工厂名调用并替换配方，运行中被 gate 拦截', async () => {
+    const api = apiStub({
+      addStep: vi.fn(async () => [step(0), step(1, {name: 'deposit'})]),
+    });
+    mount(api);
+    await waitUntilReady();
+
+    await captured!.actions.addStep('deposit');
+    expect(api.addStep).toHaveBeenCalledWith('deposit', expect.any(AbortSignal));
+    await waitFor(() => {
+      expect(captured!.state.recipe).toHaveLength(2);
+    });
+
+    const pending = deferred<RunView>();
+    const busy = apiStub({runStep: vi.fn(() => pending.promise)});
+    mount(busy);
+    await waitUntilReady();
+    void captured!.actions.runStep(0);
+    await waitFor(() => expect(captured!.state.activeMutation).toBe('step'));
+    await captured!.actions.addStep('deposit');
+    expect(busy.addStep).not.toHaveBeenCalled();
+    pending.resolve({});
+  });
+});
 
 describe('AppStateProvider recipe management', () => {
   it('importRecipe 成功后替换配方、重置时间线并刷新几何', async () => {

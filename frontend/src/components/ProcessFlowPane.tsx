@@ -1,4 +1,4 @@
-import {useLayoutEffect, useRef, useState, type KeyboardEvent} from 'react';
+import {useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
 import type {StepView} from '../api/types';
 import {StatusBadge} from './StatusBadge';
 
@@ -6,6 +6,7 @@ interface ProcessFlowPaneProps {
   recipe: StepView[];
   selectedStepIndex: number | null;
   onSelect(index: number): void;
+  children?: ReactNode;
 }
 
 function compactText(value: string, limit = 28): string {
@@ -43,7 +44,7 @@ export function summarizeParams(params: Record<string, unknown>): string {
   return compactText(`${summary}${suffix}`, 92);
 }
 
-export function ProcessFlowPane({recipe, selectedStepIndex, onSelect}: ProcessFlowPaneProps) {
+export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}: ProcessFlowPaneProps) {
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
   const pendingFocusRef = useRef<number | null>(null);
   const [activeStepIndex, setActiveStepIndex] = useState<number | null>(() => {
@@ -141,6 +142,7 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect}: ProcessFl
           ))}
         </div>
       )}
+      {children}
     </section>
   );
 }

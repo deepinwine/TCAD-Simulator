@@ -96,6 +96,8 @@ export type AppAction =
   | {type: 'timeline/restoreFailed'; error: TcadApiError}
   | {type: 'history/applied'; model?: ModelSummaryView}
   | {type: 'recipe/replaced'; recipe: StepView[]; model?: ModelSummaryView}
+  | {type: 'recipe/stepsReplaced'; recipe: StepView[]}
+  | {type: 'step/renamed'; index: number; step: StepView}
   | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
@@ -399,6 +401,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         activeMutation: null,
         globalError: null,
         previewGeneration: state.previewGeneration + 1,
+      };
+    case 'recipe/stepsReplaced': {
+      const selectedExists = action.recipe.some(
+        item => item.index === state.selectedStepIndex,
+      );
+      return {
+        ...state,
+        recipe: action.recipe,
+        selectedStepIndex: selectedExists
+          ? state.selectedStepIndex
+          : action.recipe[0]?.index ?? null,
+        drafts: {},
+        parameterErrors: {},
+        stepErrors: {},
+        globalError: null,
+      };
+    }
+    case 'step/renamed':
+      return {
+        ...state,
+        recipe: state.recipe.map(item => item.index === action.index ? action.step : item),
+        globalError: null,
       };
     case 'history/applied':
       // undo/redo 有意使步骤缓存失效（ADR-008）：几何权威是 manifest.rev，

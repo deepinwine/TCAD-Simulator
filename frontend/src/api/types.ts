@@ -178,6 +178,11 @@ export interface TcadApi {
   saveRecipe(name: string, signal?: AbortSignal): Promise<{saved: boolean}>;
   exportRecipe(scope?: string, signal?: AbortSignal): Promise<Blob>;
   loadRecipe(id: string, signal?: AbortSignal): Promise<RecipeLoadView>;
+  addStep(name: string, signal?: AbortSignal): Promise<StepView[]>;
+  removeStep(index: number, signal?: AbortSignal): Promise<StepView[]>;
+  duplicateStep(index: number, signal?: AbortSignal): Promise<StepView[]>;
+  moveStep(index: number, direction: 'up' | 'down', signal?: AbortSignal): Promise<StepView[]>;
+  renameStep(index: number, instanceName: string, signal?: AbortSignal): Promise<StepView>;
   getTimeline(signal?: AbortSignal): Promise<TimelineView>;
   restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView>;
   getPreviewManifest(

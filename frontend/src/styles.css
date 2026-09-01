@@ -1012,3 +1012,42 @@ button:focus-visible,
   font-size: 11px;
   white-space: nowrap;
 }
+
+.step-structure-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid #1e2a3a;
+  background: #0f1722;
+}
+
+.step-structure-bar select,
+.step-structure-bar input[type='text'] {
+  background: #0b121c;
+  color: #d7e3f0;
+  border: 1px solid #24344a;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.step-structure-bar input[type='text'] {
+  flex: 1;
+  min-width: 90px;
+}
+
+.step-structure-bar button {
+  background: #14202e;
+  color: #aebfd2;
+  border: 1px solid #24344a;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.step-structure-bar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

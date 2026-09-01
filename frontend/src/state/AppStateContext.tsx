@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {TcadApiError} from '../api/client';
 import type {
+  StepView,
   RecipeLoadView,RunView, TcadApi} from '../api/types';
 import {
   type ActiveMutation,
@@ -46,6 +47,11 @@ export interface AppStateActions {
   newRecipe(name: string): Promise<void>;
   saveRecipe(name: string): Promise<void>;
   exportRecipe(): Promise<void>;
+  addStep(name: string): Promise<void>;
+  removeStep(): Promise<void>;
+  duplicateStep(): Promise<void>;
+  moveStep(direction: 'up' | 'down'): Promise<void>;
+  renameStep(instanceName: string): Promise<void>;
 }
 
 export interface AppStateContextValue {
@@ -425,6 +431,86 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
    * 并触发 Viewer 重拉几何（服务端可能已完成运行，本地却以为失败）。
    */
   /**
+   * 步骤结构编辑（增删/复制/移动）：以服务端返回的步骤列表替换本地配方，
+   * 状态以服务端为准；随后重拉 timeline 同步运行状态。
+   */
+  const structureMutation = useCallback(async (
+    operation: (signal: AbortSignal) => Promise<StepView[]>,
+  ): Promise<void> => {
+    if (!beginMutation('recipe')) return;
+    const controller = createController();
+    try {
+      const recipe = await operation(controller.signal);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      dispatch({type: 'recipe/stepsReplaced', recipe});
+      const generation = ++timelineGenerationRef.current;
+      try {
+        const timeline = await api.getTimeline(controller.signal);
+        if (
+          !mountedRef.current
+          || controller.signal.aborted
+          || generation !== timelineGenerationRef.current
+        ) return;
+        timelineErrorRef.current = null;
+        dispatch({type: 'timeline/loaded', payload: timeline});
+      } catch (timelineError) {
+        if (!mountedRef.current) return;
+        if (isAbortError(timelineError, controller.signal)) return;
+        if (generation !== timelineGenerationRef.current) return;
+        dispatch({type: 'timeline/loadFailed', error: normalizeError(timelineError)});
+      }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+      finishMutation('recipe');
+    }
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
+
+  const selectedStepIndexForOps = () => stateRef.current.selectedStepIndex;
+
+  const addStepAction = useCallback((name: string) => (
+    structureMutation(signal => api.addStep(name, signal))
+  ), [api, structureMutation]);
+
+  const removeStepAction = useCallback(() => {
+    const index = selectedStepIndexForOps();
+    if (index === null) return Promise.resolve();
+    return structureMutation(signal => api.removeStep(index, signal));
+  }, [api, structureMutation]);
+
+  const duplicateStepAction = useCallback(() => {
+    const index = selectedStepIndexForOps();
+    if (index === null) return Promise.resolve();
+    return structureMutation(signal => api.duplicateStep(index, signal));
+  }, [api, structureMutation]);
+
+  const moveStepAction = useCallback((direction: 'up' | 'down') => {
+    const index = selectedStepIndexForOps();
+    if (index === null) return Promise.resolve();
+    return structureMutation(signal => api.moveStep(index, direction, signal));
+  }, [api, structureMutation]);
+
+  const renameStepAction = useCallback(async (instanceName: string): Promise<void> => {
+    const index = selectedStepIndexForOps();
+    if (index === null) return;
+    const controller = createController();
+    try {
+      const step = await api.renameStep(index, instanceName, controller.signal);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      dispatch({type: 'step/renamed', index, step});
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+    }
+  }, [api, createController, dispatch, releaseController]);
+
+  /**
    * 配方替换（导入/新建）：服务端已重置历史，客户端整体替换并重拉 timeline。
    */
   const replaceRecipe = useCallback(async (
@@ -625,14 +711,24 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     newRecipe: newRecipeAction,
     saveRecipe: saveRecipeAction,
     exportRecipe: exportRecipeAction,
+    addStep: addStepAction,
+    removeStep: removeStepAction,
+    duplicateStep: duplicateStepAction,
+    moveStep: moveStepAction,
+    renameStep: renameStepAction,
   }), [
+    addStepAction,
     bootstrap,
+    duplicateStepAction,
     exportRecipeAction,
     importRecipe,
     loadTimeline,
+    moveStepAction,
     newRecipeAction,
     reconcile,
     redo,
+    removeStepAction,
+    renameStepAction,
     restoreTimeline,
     runAll,
     runStep,

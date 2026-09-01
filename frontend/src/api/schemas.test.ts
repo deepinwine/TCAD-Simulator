@@ -3,6 +3,7 @@ import {describe, expect, it} from 'vitest';
 import {
   ApiContractError,
   parseInitEnvelope,
+  parseStepListEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
   parseSetStepEnvelope,
@@ -254,5 +255,31 @@ describe('parsePreviewManifestEnvelope', () => {
       expect(error).toBeInstanceOf(ApiContractError);
       expect((error as ApiContractError).path).toBe('result.meshes');
     }
+  });
+});
+
+describe('parseStepListEnvelope（结构编辑端点）', () => {
+  it('result 为步骤数组时正常解析（回归：requireOkResult 拒绝数组）', () => {
+    const payload = {
+      ok: true,
+      result: [{
+        name: 'Spin Resist',
+        instance_name: 'Spin Resist',
+        group: 'Lithography',
+        loop: '',
+        enabled: true,
+        params: {thickness_nm: 120},
+        parameter_specs: [],
+        runtime_status: 'dirty',
+      }],
+    };
+    const steps = parseStepListEnvelope(payload);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].name).toBe('Spin Resist');
+    expect(steps[0].runtimeStatus).toBe('dirty');
+  });
+
+  it('ok 非真时抛契约错误', () => {
+    expect(() => parseStepListEnvelope({ok: false, error: 'x'})).toThrow();
   });
 });

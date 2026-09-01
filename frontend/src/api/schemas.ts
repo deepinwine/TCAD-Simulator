@@ -334,6 +334,20 @@ function parseCurrentRecipe(value: unknown): {name: string; id: string} {
   };
 }
 
+export function parseStepListEnvelope(payload: unknown): StepView[] {
+  // 结构编辑端点的 result 本身就是步骤数组（不是对象），不能走 requireOkResult
+  const envelope = requireRecord(payload, '$');
+  if (envelope.ok !== true) {
+    throw new ApiContractError('ok', 'true');
+  }
+  return parseRecipe(envelope.result, 'result');
+}
+
+export function parseStepEnvelope(payload: unknown, index: number): StepView {
+  const result = requireOkResult(payload);
+  return parseStep(result, 'result', index);
+}
+
 export function parseSavedEnvelope(payload: unknown): {saved: boolean} {
   const result = requireOkResult(payload);
   return {

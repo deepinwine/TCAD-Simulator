@@ -4,6 +4,8 @@ import {
   parseInitEnvelope,
   parseRecipeLoadEnvelope,
   parseSavedEnvelope,
+  parseStepEnvelope,
+  parseStepListEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
   parseSetStepEnvelope,
@@ -19,6 +21,7 @@ import type {
   PreviewStlRequest,
   RunView,
   SetStepRequest,
+  StepView,
   SetStepView,
   TcadApi,
   TimelineRestoreView,
@@ -344,6 +347,50 @@ export function createTcadApi(): TcadApi {
         '/api/recipe/load',
         {id},
         (payload: unknown) => parseRecipeLoadEnvelope(payload, 'loaded'),
+        signal,
+      );
+    },
+    addStep(name: string, signal?: AbortSignal): Promise<StepView[]> {
+      return apiPostJson(
+        '/api/recipe/add',
+        {name},
+        parseStepListEnvelope,
+        signal,
+      );
+    },
+    removeStep(index: number, signal?: AbortSignal): Promise<StepView[]> {
+      const validated = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson(
+        '/api/recipe/remove',
+        {index: validated},
+        parseStepListEnvelope,
+        signal,
+      );
+    },
+    duplicateStep(index: number, signal?: AbortSignal): Promise<StepView[]> {
+      const validated = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson(
+        '/api/recipe/duplicate',
+        {index: validated},
+        parseStepListEnvelope,
+        signal,
+      );
+    },
+    moveStep(index: number, direction: 'up' | 'down', signal?: AbortSignal): Promise<StepView[]> {
+      const validated = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson(
+        '/api/recipe/move',
+        {index: validated, direction},
+        parseStepListEnvelope,
+        signal,
+      );
+    },
+    renameStep(index: number, instanceName: string, signal?: AbortSignal): Promise<StepView> {
+      const validated = requireRequestInteger(index, 'request.index', 0);
+      return apiPostJson(
+        '/api/recipe/rename-step',
+        {index: validated, instance_name: instanceName},
+        (payload: unknown) => parseStepEnvelope(payload, validated),
         signal,
       );
     },

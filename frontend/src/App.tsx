@@ -4,6 +4,7 @@ import type {TcadApi} from './api/types';
 import {ErrorNotice} from './components/ErrorNotice';
 import {ParameterPanel} from './components/ParameterPanel';
 import {ProcessFlowPane} from './components/ProcessFlowPane';
+import {StepStructureBar} from './components/StepStructureBar';
 import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
 import {AppStateProvider, useAppState} from './state/AppStateContext';
@@ -80,7 +81,9 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
           recipe={state.recipe}
           selectedStepIndex={state.selectedStepIndex}
           onSelect={actions.selectStep}
-        />
+        >
+          <StepStructureBar />
+        </ProcessFlowPane>
         <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} />
         <ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />
       </div>
