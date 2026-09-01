@@ -2,6 +2,7 @@ import type {
   BoundingBoxView,
   HistoryView,
   InitView,
+  RecipeLoadView,
   MaterialView,
   MaterialVisualView,
   ModelSummaryView,
@@ -272,7 +273,7 @@ function parseStringArray(value: unknown, path: string): string[] {
 
 export function parseInitEnvelope(payload: unknown): InitView {
   const result = requireOkResult(payload);
-  return {
+  const view: InitView = {
     recipe: parseRecipe(result.recipe, 'result.recipe'),
     model: parseModel(result.model, 'result.model'),
     factories: parseStringArray(result.recipe_factories, 'result.recipe_factories'),
@@ -281,6 +282,18 @@ export function parseInitEnvelope(payload: unknown): InitView {
     ),
     uiState: requireRecord(result.ui_state, 'result.ui_state'),
   };
+  if (result.demo_recipes !== undefined) {
+    const source = requireRecord(result.demo_recipes, 'result.demo_recipes');
+    const demos: Record<string, import('./types').DemoRecipeView> = {};
+    for (const [key, value] of Object.entries(source)) {
+      demos[key] = requireRecord(value, `result.demo_recipes.${key}`) as never;
+    }
+    view.demoRecipes = demos;
+  }
+  if (result.current_recipe !== undefined) {
+    view.currentRecipe = parseCurrentRecipe(result.current_recipe);
+  }
+  return view;
 }
 
 export function parseSetStepEnvelope(payload: unknown, index: number): SetStepView {
@@ -294,6 +307,37 @@ export function parseSetStepEnvelope(payload: unknown, index: number): SetStepVi
     warnings: envelope.warnings === undefined
       ? []
       : parseStringArray(envelope.warnings, 'warnings'),
+  };
+}
+
+export function parseRecipeLoadEnvelope(
+  payload: unknown,
+  flagField: 'imported' | 'loaded' | null,
+): RecipeLoadView {
+  const result = requireOkResult(payload);
+  if (flagField !== null && result[flagField] !== undefined) {
+    requireBoolean(result[flagField], `result.${flagField}`);
+  }
+  return {
+    model: parseModel(result.model, 'result.model'),
+    recipe: parseRecipe(result.recipe, 'result.recipe'),
+    currentRecipe: parseCurrentRecipe(result.current_recipe),
+    log: result.log === undefined ? [] : parseStringArray(result.log, 'result.log'),
+  };
+}
+
+function parseCurrentRecipe(value: unknown): {name: string; id: string} {
+  const source = requireRecord(value, 'result.current_recipe');
+  return {
+    name: requireString(source.name, 'result.current_recipe.name'),
+    id: requireString(source.id ?? '', 'result.current_recipe.id'),
+  };
+}
+
+export function parseSavedEnvelope(payload: unknown): {saved: boolean} {
+  const result = requireOkResult(payload);
+  return {
+    saved: result.saved === undefined ? true : requireBoolean(result.saved, 'result.saved'),
   };
 }
 

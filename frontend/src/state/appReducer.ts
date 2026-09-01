@@ -1,6 +1,7 @@
 import {TcadApiError} from '../api/client';
 import type {
   InitView,
+  DemoRecipeView,
   MaterialView,
   ModelSummaryView,
   RunView,
@@ -12,7 +13,8 @@ import type {
 } from '../api/types';
 
 export type AppPhase = 'booting' | 'ready' | 'running' | 'fatal';
-export type ActiveMutation = 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | null;
+export type ActiveMutation =
+  | 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | 'recipe' | null;
 export type TimelineStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ParameterValidation {
@@ -52,6 +54,7 @@ export interface AppState {
   factories: string[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
+  demoRecipes: Record<string, DemoRecipeView>;
 }
 
 export type AppAction =
@@ -92,6 +95,7 @@ export type AppAction =
   | {type: 'timeline/restoreSucceeded'; payload: TimelineRestoreView}
   | {type: 'timeline/restoreFailed'; error: TcadApiError}
   | {type: 'history/applied'; model?: ModelSummaryView}
+  | {type: 'recipe/replaced'; recipe: StepView[]; model?: ModelSummaryView}
   | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
@@ -115,6 +119,7 @@ export const initialAppState: AppState = {
   factories: [],
   materials: [],
   uiState: {},
+  demoRecipes: {},
 };
 
 export function parameterDraftKey(index: number, key: string): string {
@@ -224,6 +229,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         factories: action.payload.factories,
         materials: action.payload.materials,
         uiState: action.payload.uiState,
+        demoRecipes: action.payload.demoRecipes ?? {},
       };
     case 'bootstrap/failed':
       return {...state, phase: 'fatal', activeMutation: null, globalError: action.error};
@@ -377,6 +383,23 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'timeline/restoreFailed':
       return {...state, globalError: action.error};
+    case 'recipe/replaced':
+      return {
+        ...state,
+        recipe: action.recipe,
+        selectedStepIndex: action.recipe[0]?.index ?? null,
+        model: action.model ?? state.model,
+        timeline: null,
+        timelineStatus: 'idle',
+        timelineError: null,
+        historicalStepIndex: null,
+        drafts: {},
+        parameterErrors: {},
+        stepErrors: {},
+        activeMutation: null,
+        globalError: null,
+        previewGeneration: state.previewGeneration + 1,
+      };
     case 'history/applied':
       // undo/redo 有意使步骤缓存失效（ADR-008）：几何权威是 manifest.rev，
       // 这里只 bump previewGeneration 让 Viewer 重拉。

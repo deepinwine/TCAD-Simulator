@@ -52,6 +52,8 @@ export interface InitView {
   factories: string[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
+  demoRecipes?: Record<string, DemoRecipeView>;
+  currentRecipe?: {name: string; id: string};
 }
 
 export interface SetStepRequest {
@@ -92,6 +94,19 @@ export interface TimelineItemView {
 export interface TimelineView {
   items: TimelineItemView[];
   current: number;
+}
+
+export interface DemoRecipeView {
+  description?: string;
+  steps?: unknown[];
+  [key: string]: unknown;
+}
+
+export interface RecipeLoadView {
+  model: ModelSummaryView;
+  recipe: StepView[];
+  currentRecipe: {name: string; id: string};
+  log: string[];
 }
 
 export interface HistoryView {
@@ -155,6 +170,14 @@ export interface TcadApi {
   runAll(signal?: AbortSignal): Promise<RunView>;
   undo(signal?: AbortSignal): Promise<HistoryView>;
   redo(signal?: AbortSignal): Promise<HistoryView>;
+  importRecipe(
+    request: {recipe: unknown; autosaveCurrent?: boolean; currentName?: string},
+    signal?: AbortSignal,
+  ): Promise<RecipeLoadView>;
+  newRecipe(name: string, signal?: AbortSignal): Promise<RecipeLoadView>;
+  saveRecipe(name: string, signal?: AbortSignal): Promise<{saved: boolean}>;
+  exportRecipe(scope?: string, signal?: AbortSignal): Promise<Blob>;
+  loadRecipe(id: string, signal?: AbortSignal): Promise<RecipeLoadView>;
   getTimeline(signal?: AbortSignal): Promise<TimelineView>;
   restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView>;
   getPreviewManifest(

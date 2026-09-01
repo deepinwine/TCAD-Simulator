@@ -72,6 +72,26 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     runAll: vi.fn(async () => ({})),
     undo: vi.fn(async () => ({applied: false, log: []})),
     redo: vi.fn(async () => ({applied: false, log: []})),
+    importRecipe: vi.fn(async () => ({
+      model: initView().model,
+      recipe: initView().recipe,
+      currentRecipe: {name: 'Basic Trench', id: ''},
+      log: [],
+    })),
+    newRecipe: vi.fn(async () => ({
+      model: initView().model,
+      recipe: initView().recipe,
+      currentRecipe: {name: 'New', id: ''},
+      log: [],
+    })),
+    saveRecipe: vi.fn(async () => ({saved: true})),
+    exportRecipe: vi.fn(async () => new Blob(['{}'], {type: 'application/json'})),
+    loadRecipe: vi.fn(async () => ({
+      model: initView().model,
+      recipe: initView().recipe,
+      currentRecipe: {name: 'Loaded', id: 'h1'},
+      log: [],
+    })),
     getTimeline: vi.fn(async () => initialTimeline),
     restoreTimeline: vi.fn(async index => ({
       timeline: {...initialTimeline, current: index},
@@ -121,6 +141,64 @@ function recordingViewerRuntime() {
     }),
   };
 }
+
+describe('Toolbar 配方管理', () => {
+  it('Demo 列表来自 init，选择后加载触发 importRecipe', async () => {
+    const api = apiStub({
+      init: vi.fn(async () => ({
+        ...initView(),
+        demoRecipes: {
+          'Basic Trench': {description: '基础沟槽', steps: []},
+          'Spacer Formation': {steps: []},
+        },
+      })),
+    });
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    const select = await screen.findByRole('combobox', {name: 'Demo 配方'});
+    expect(select).toHaveDisplayValue('-- 选择 Demo 配方 --');
+    const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent);
+    expect(options).toContain('Basic Trench — 基础沟槽');
+    expect(options).toContain('Spacer Formation');
+
+    fireEvent.change(select, {target: {value: 'Basic Trench'}});
+    fireEvent.click(screen.getByRole('button', {name: '加载 Demo'}));
+    await waitFor(() => expect(api.importRecipe).toHaveBeenCalledTimes(1));
+  });
+
+  it('保存与导出触发对应调用', async () => {
+    const api = apiStub();
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '保存配方'});
+    fireEvent.change(screen.getByRole('textbox', {name: '配方名称'}), {
+      target: {value: 'My Recipe'},
+    });
+    fireEvent.click(screen.getByRole('button', {name: '保存配方'}));
+    await waitFor(() => expect(api.saveRecipe).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', {name: '导出配方'}));
+    await waitFor(() => expect(api.exportRecipe).toHaveBeenCalledTimes(1));
+  });
+
+  it('导入读取本地 JSON 文件并触发 importRecipe', async () => {
+    const api = apiStub();
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '导入配方'});
+    const input = screen.getByLabelText('导入配方文件') as HTMLInputElement;
+    const file = new File([JSON.stringify({steps: []})], 'recipe.json', {
+      type: 'application/json',
+    });
+    fireEvent.change(input, {target: {files: [file]}});
+    await waitFor(() => expect(api.importRecipe).toHaveBeenCalledTimes(1));
+  });
+
+  it('新建配方以输入名调用 newRecipe', async () => {
+    const api = apiStub();
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    const nameInput = await screen.findByRole('textbox', {name: '配方名称'});
+    fireEvent.change(nameInput, {target: {value: 'My Process'}});
+    fireEvent.click(screen.getByRole('button', {name: '新建配方'}));
+    await waitFor(() => expect(api.newRecipe).toHaveBeenCalledWith('My Process'));
+  });
+});
 
 describe('Toolbar undo/redo', () => {
   it('撤销与重做按钮触发对应 API 调用', async () => {

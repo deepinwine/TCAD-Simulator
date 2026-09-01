@@ -10,7 +10,8 @@ import {
   useRef,
 } from 'react';
 import {TcadApiError} from '../api/client';
-import type {RunView, TcadApi} from '../api/types';
+import type {
+  RecipeLoadView,RunView, TcadApi} from '../api/types';
 import {
   type ActiveMutation,
   type AppAction,
@@ -41,6 +42,10 @@ export interface AppStateActions {
   reconcile(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
+  importRecipe(request: {recipe: unknown; name?: string}): Promise<void>;
+  newRecipe(name: string): Promise<void>;
+  saveRecipe(name: string): Promise<void>;
+  exportRecipe(): Promise<void>;
 }
 
 export interface AppStateContextValue {
@@ -420,6 +425,94 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
    * 并触发 Viewer 重拉几何（服务端可能已完成运行，本地却以为失败）。
    */
   /**
+   * 配方替换（导入/新建）：服务端已重置历史，客户端整体替换并重拉 timeline。
+   */
+  const replaceRecipe = useCallback(async (
+    operation: () => Promise<RecipeLoadView>,
+  ): Promise<void> => {
+    if (!beginMutation('recipe')) return;
+    const controller = createController();
+    try {
+      const view = await operation();
+      if (!mountedRef.current || controller.signal.aborted) return;
+      dispatch({
+        type: 'recipe/replaced',
+        recipe: view.recipe,
+        ...(view.model !== undefined ? {model: view.model} : {}),
+      });
+      const generation = ++timelineGenerationRef.current;
+      try {
+        const timeline = await api.getTimeline(controller.signal);
+        if (
+          !mountedRef.current
+          || controller.signal.aborted
+          || generation !== timelineGenerationRef.current
+        ) return;
+        timelineErrorRef.current = null;
+        dispatch({type: 'timeline/loaded', payload: timeline});
+      } catch (timelineError) {
+        if (!mountedRef.current) return;
+        if (isAbortError(timelineError, controller.signal)) return;
+        if (generation !== timelineGenerationRef.current) return;
+        const normalized = normalizeError(timelineError);
+        timelineErrorRef.current = normalized;
+        dispatch({type: 'timeline/loadFailed', error: normalized});
+      }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+      finishMutation('recipe');
+    }
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
+
+  const importRecipe = useCallback((request: {recipe: unknown; name?: string}) => (
+    replaceRecipe(() => api.importRecipe({
+      recipe: request.recipe,
+      autosaveCurrent: true,
+      ...(request.name === undefined ? {} : {currentName: request.name}),
+    }))
+  ), [api, replaceRecipe]);
+
+  const newRecipeAction = useCallback((name: string) => (
+    replaceRecipe(() => api.newRecipe(name))
+  ), [api, replaceRecipe]);
+
+  const saveRecipeAction = useCallback(async (name: string): Promise<void> => {
+    const controller = createController();
+    try {
+      await api.saveRecipe(name, controller.signal);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+    }
+  }, [api, createController, dispatch, releaseController]);
+
+  const exportRecipeAction = useCallback(async (): Promise<void> => {
+    const controller = createController();
+    try {
+      const blob = await api.exportRecipe('current', controller.signal);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'recipe.json';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (isAbortError(error, controller.signal)) return;
+      dispatch({type: 'run/failed', error: normalizeError(error)});
+    } finally {
+      releaseController(controller);
+    }
+  }, [api, createController, dispatch, releaseController]);
+
+  /**
    * 撤销/重做：applied 时 bump previewGeneration（几何权威是 manifest.rev，
    * ADR-008 步骤缓存有意失效）并重拉 timeline 同步运行状态；无可撤销时静默 no-op。
    */
@@ -528,9 +621,16 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     reconcile,
     undo,
     redo,
+    importRecipe,
+    newRecipe: newRecipeAction,
+    saveRecipe: saveRecipeAction,
+    exportRecipe: exportRecipeAction,
   }), [
     bootstrap,
+    exportRecipeAction,
+    importRecipe,
     loadTimeline,
+    newRecipeAction,
     reconcile,
     redo,
     restoreTimeline,

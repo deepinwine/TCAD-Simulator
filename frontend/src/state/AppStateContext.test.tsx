@@ -72,6 +72,26 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
     runAll: vi.fn(async () => ({})),
     undo: vi.fn(async () => ({applied: false, log: []})),
     redo: vi.fn(async () => ({applied: false, log: []})),
+    importRecipe: vi.fn(async () => ({
+      model: initView.model,
+      recipe: initView.recipe,
+      currentRecipe: {name: 'Imported', id: ''},
+      log: [],
+    })),
+    newRecipe: vi.fn(async () => ({
+      model: initView.model,
+      recipe: initView.recipe,
+      currentRecipe: {name: 'New', id: ''},
+      log: [],
+    })),
+    saveRecipe: vi.fn(async () => ({saved: true})),
+    exportRecipe: vi.fn(async () => new Blob(['{}'], {type: 'application/json'})),
+    loadRecipe: vi.fn(async () => ({
+      model: initView.model,
+      recipe: initView.recipe,
+      currentRecipe: {name: 'Loaded', id: 'h1'},
+      log: [],
+    })),
     getTimeline: vi.fn(async () => timeline),
     restoreTimeline: vi.fn(async index => ({
       timeline: {...timeline, current: index},
@@ -115,6 +135,89 @@ function mount(api: TcadApi, events?: string[]) {
 async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
+
+describe('AppStateProvider recipe management', () => {
+  it('importRecipe 成功后替换配方、重置时间线并刷新几何', async () => {
+    const replaced = [step(0, {instanceName: 'Imported Step'})];
+    const api = apiStub({
+      importRecipe: vi.fn(async () => ({
+        model: initView.model,
+        recipe: replaced,
+        currentRecipe: {name: 'Basic Trench', id: ''},
+        log: [],
+      })),
+    });
+    mount(api);
+    await waitUntilReady();
+    const generationBefore = captured!.state.previewGeneration;
+
+    await captured!.actions.importRecipe({name: 'Basic Trench', recipe: {steps: []}});
+
+    expect(api.importRecipe).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(
+        captured!.state.recipe.map(item => item.instanceName),
+      ).toEqual(['Imported Step']);
+    });
+    // 替换后时间线被重置并立即重拉（服务端已清历史）
+    await waitFor(() => expect(captured!.state.timelineStatus).toBe('ready'));
+    expect(captured!.state.selectedStepIndex).toBe(0);
+    await waitFor(() => {
+      expect(captured!.state.previewGeneration).toBe(generationBefore + 1);
+    });
+  });
+
+  it('importRecipe 失败显示结构化错误且配方不变', async () => {
+    const api = apiStub({
+      importRecipe: vi.fn(async () => {
+        throw new TcadApiError('配方导入失败：JSON 无 steps', {
+          status: 400,
+          code: 'invalid_recipe',
+        });
+      }),
+    });
+    mount(api);
+    await waitUntilReady();
+    const recipeBefore = captured!.state.recipe;
+
+    await captured!.actions.importRecipe({recipe: {}});
+
+    await waitFor(() => {
+      expect(captured!.state.globalError?.message).toBe('配方导入失败：JSON 无 steps');
+    });
+    expect(captured!.state.recipe).toEqual(recipeBefore);
+  });
+
+  it('运行中 importRecipe 被变更 gate 拦截', async () => {
+    const pending = deferred<RunView>();
+    const api = apiStub({runStep: vi.fn(() => pending.promise)});
+    mount(api);
+    await waitUntilReady();
+    void captured!.actions.runStep(0);
+    await waitFor(() => expect(captured!.state.activeMutation).toBe('step'));
+
+    await captured!.actions.importRecipe({recipe: {}});
+    expect(api.importRecipe).not.toHaveBeenCalled();
+
+    pending.resolve({});
+    await waitFor(() => expect(captured!.state.activeMutation).toBeNull());
+  });
+
+  it('newRecipe 与 saveRecipe 分别调用对应端点', async () => {
+    const api = apiStub();
+    mount(api);
+    await waitUntilReady();
+
+    await captured!.actions.newRecipe('My Recipe');
+    expect(api.newRecipe).toHaveBeenCalledWith('My Recipe');
+
+    await captured!.actions.saveRecipe('My Recipe');
+    expect(api.saveRecipe).toHaveBeenCalledWith(
+      'My Recipe',
+      expect.any(AbortSignal),
+    );
+  });
+});
 
 describe('AppStateProvider undo/redo', () => {
   it('undo 成功后重拉 timeline 并刷新 Viewer 几何', async () => {

@@ -2,6 +2,8 @@ import {
   ApiContractError,
   parseHistoryEnvelope,
   parseInitEnvelope,
+  parseRecipeLoadEnvelope,
+  parseSavedEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
   parseSetStepEnvelope,
@@ -11,6 +13,7 @@ import {
 import type {
   HistoryView,
   InitView,
+  RecipeLoadView,
   PreviewManifestRequest,
   PreviewManifestView,
   PreviewStlRequest,
@@ -298,6 +301,49 @@ export function createTcadApi(): TcadApi {
         '/api/redo',
         {},
         (payload: unknown) => parseHistoryEnvelope(payload, 'redone'),
+        signal,
+      );
+    },
+    importRecipe(
+      request: {recipe: unknown; autosaveCurrent?: boolean; currentName?: string},
+      signal?: AbortSignal,
+    ): Promise<RecipeLoadView> {
+      return apiPostJson(
+        '/api/recipe/import',
+        {
+          recipe: request.recipe,
+          ...(request.autosaveCurrent === undefined ? {} : {autosave_current: request.autosaveCurrent}),
+          ...(request.currentName === undefined ? {} : {current_name: request.currentName}),
+        },
+        (payload: unknown) => parseRecipeLoadEnvelope(payload, 'imported'),
+        signal,
+      );
+    },
+    newRecipe(name: string, signal?: AbortSignal): Promise<RecipeLoadView> {
+      return apiPostJson(
+        '/api/recipe/new',
+        {name},
+        (payload: unknown) => parseRecipeLoadEnvelope(payload, null),
+        signal,
+      );
+    },
+    saveRecipe(name: string, signal?: AbortSignal): Promise<{saved: boolean}> {
+      return apiPostJson(
+        '/api/recipe/save',
+        {name},
+        parseSavedEnvelope,
+        signal,
+      );
+    },
+    exportRecipe(scope: string = 'current', signal?: AbortSignal): Promise<Blob> {
+      return apiBinary(`/api/recipe/export?scope=${encodeURIComponent(scope)}`, signal)
+        .then(buffer => new Blob([buffer], {type: 'application/json'}));
+    },
+    loadRecipe(id: string, signal?: AbortSignal): Promise<RecipeLoadView> {
+      return apiPostJson(
+        '/api/recipe/load',
+        {id},
+        (payload: unknown) => parseRecipeLoadEnvelope(payload, 'loaded'),
         signal,
       );
     },

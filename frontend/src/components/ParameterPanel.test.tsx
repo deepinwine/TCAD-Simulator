@@ -63,6 +63,11 @@ function apiStub(initial: InitView, overrides: Partial<TcadApi> = {}): TcadApi {
     runAll: vi.fn(async () => ({})),
     undo: vi.fn(async () => ({applied: false, log: []})),
     redo: vi.fn(async () => ({applied: false, log: []})),
+    importRecipe: vi.fn(async () => ({model: {gridShape: [8, 8, 8] as [number, number, number], voxelSizeNm: 10}, recipe: [], currentRecipe: {name: '', id: ''}, log: []})),
+    newRecipe: vi.fn(async () => ({model: {gridShape: [8, 8, 8] as [number, number, number], voxelSizeNm: 10}, recipe: [], currentRecipe: {name: '', id: ''}, log: []})),
+    saveRecipe: vi.fn(async () => ({saved: true})),
+    exportRecipe: vi.fn(async () => new Blob(['{}'])),
+    loadRecipe: vi.fn(async () => ({model: {gridShape: [8, 8, 8] as [number, number, number], voxelSizeNm: 10}, recipe: [], currentRecipe: {name: '', id: ''}, log: []})),
     getTimeline: vi.fn(async () => ({items: [], current: -1})),
     restoreTimeline: vi.fn(async () => ({
       timeline: {items: [], current: -1},
