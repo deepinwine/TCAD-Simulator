@@ -1,7 +1,7 @@
 # M5 React Parity 设计说明
 
 - 日期：2026-08-31
-- 状态：已批准开工（所有者指令「合并 并 M5」）
+- 状态：已实现（M5 核心工艺流交付于 `codex/m5-parity`；History/Domain/AI 抽屉记为 Backlog）
 - 目标里程碑：M5 — React Parity
 - 基线提交：`f61e069`（backup/main，M4 已合并）
 

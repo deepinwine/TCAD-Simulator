@@ -172,7 +172,9 @@ Preferred sequence (details and status in `docs/ROADMAP_PROCESS_CAD.md`):
    manifest/STL) validated by runtime-parity tests, plus an optional read-only
    FastAPI `/api/v2` adapter (`process_api/http.py`). FastAPI+Pydantic remains the
    standardization target (ADR-013); the frozen `/api` surface is untouched.
-5. **M5** React reaches parity → legacy WebUI deprecated (not before).
+5. **M5** React reaches parity — delivered: undo/redo, recipe management (demo/new/
+   save/export/import), step structure editing, mask upload + preview, all via the frozen
+   contract. Legacy WebUI deprecation is the owner's separate decision (ADR-012).
 6. **M6** `LayoutAdapter` + optional KLayout; gdstk kept.
 7. **M7** `ProcessBackend` interface; wrap `ProcessModel` as `VoxelBackend` with behavior
    unchanged.

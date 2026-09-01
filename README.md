@@ -509,6 +509,11 @@ The React + TypeScript + Vite client lives in `frontend/` and talks to the same
 WebUI backend through the frozen M2 Compatibility API. The legacy WebUI at `/` is
 unchanged; the React client is served same-origin at `/studio/`.
 
+M5 closed the core editing parity gap: undo/redo (geometry+timeline resync), recipe
+management (demo load/new/save/export-download/import), step structure editing
+(add/remove/duplicate/move/rename), and mask upload + preview for Exposure steps —
+all through frozen-contract endpoints.
+
 The 3D viewer (M3) supports perspective/orthographic projection toggle, X/Y/Z
 clipping planes with per-axis sliders, per-material visibility/opacity control,
 mesh picking with hit info, and two-point distance measurement — all
@@ -518,6 +523,10 @@ with the server-authoritative timeline (the server may have finished the run).
 
 React + TypeScript + Vite 客户端位于 `frontend/`，通过冻结的 M2 Compatibility API
 访问同一个 WebUI 后端。旧 WebUI（`/`）保持不变；React 客户端在同源路径 `/studio/` 提供。
+
+M5 补齐了核心工艺编辑对等能力：撤销/重做（几何与时间线联动重同步）、配方管理
+（Demo 加载/新建/保存/导出下载/导入）、步骤结构编辑（添加/删除/复制/移动/重命名）、
+Exposure 步骤的掩膜上传与预览——全部通过冻结契约端点实现。
 
 3D 查看器（M3）支持透视/正交投影切换、X/Y/Z 独立裁剪平面（逐轴滑杆）、材料级
 可见性/透明度控制、网格点选信息与两点距离测量——全部为浏览器本地能力（相机、

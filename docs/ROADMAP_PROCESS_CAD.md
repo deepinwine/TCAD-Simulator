@@ -74,10 +74,17 @@ versioned facade — the frozen surface stays intact until React parity (M5). Ne
 API-layer modules target Python 3.12+ while the existing runtime keeps 3.10+
 compatibility.
 
-## M5 — React Parity
+## M5 — React Parity ✅（核心工艺流已交付）
 
 React reaches legacy-WebUI feature parity with regression tests green → legacy WebUI
-deprecated (not deleted before).
+deprecated (not deleted before). Delivered on `codex/m5-parity`: undo/redo (with
+geometry/timeline resync), recipe management (demo load/new/save/export-download/
+import via the frozen contract), step structure editing (add/remove/duplicate/move/
+rename with server-side status cascade), and mask upload + preview for Exposure steps
+(multipart upload with nested set_step application + server-rendered preview image).
+Remaining legacy-only areas (History/Domain Settings/AI Agent drawers) are Backlog —
+secondary workflow tools, not core process editing. Legacy-WebUI deprecation decision
+stays with the owner (ADR-012: only after parity + regression green).
 
 ## M6 — KLayout LayoutAdapter
 
@@ -119,7 +126,7 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-08-31, M4 merged to backup/main)
+## Current Branch State (2026-09-01, M5 implementation complete)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
@@ -127,10 +134,12 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 | `backup/main`（deepinwine） | `3f7faba` | **M4 已由所有者授权快进合并**（M3 `31ce391` + M4 7 提交，2026-08-31） |
 | 本地 `main` | `3f7faba` | 与 `backup/main` 一致 |
 | `codex/m4-api-facade` | `3f7faba` | M4 交付分支，已全部包含于 `main`（保留作历史） |
+| `codex/m5-parity` | M5 交付分支（计划 + 4 个功能提交 + 本文档提交） | 线性领先 `backup/main`（`f61e069`），可快进合并 |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: 开始 M5 React Parity（React 补齐旧 WebUI 剩余能力并过回归后，才允许弃用旧 UI）。
+- Next: M5 经所有者审查后合并 `backup/main` → 旧 WebUI 弃用决定（ADR-012：需所有者
+  单独评审）→ 开始 M6 KLayout LayoutAdapter 或按 Backlog 补 History/Domain 抽屉。
