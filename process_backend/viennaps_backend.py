@@ -165,6 +165,9 @@ class ViennaPSBackend(ProcessBackend):
         self._require_domain()
         duration = float(params.get("time", 30.0))
         model_params = ps.SF6O2Etching.defaultParameters()
+        # 参数映射（M9 后续切片，标定待续）：通量项实测非速率杠杆（300 vs
+        # 默认无明显差异）；速率由 Ions.meanEnergy/A_ie 等项主导。此映射缝
+        # 保留给后续按体素基准逐项标定。
         model = ps.SF6O2Etching(model_params)
         process = ps.Process(self._domain, model)
         process.setProcessDuration(duration)

@@ -134,7 +134,12 @@ Initialize Wafer (flat Si substrate) and Etch(Dry→SF6O2, default fluxes);
 via in-memory `getSurfaceMesh`. First dual-engine calibration recorded (Basic-Trench
 etch: voxel ≈300 nm vs geometry ≈6 nm at default fluxes — parameter mapping is the
 next calibration step). Multi-material stacks / masked etch / more step types are the
-M9 follow-up slices.
+M9 follow-up slices. Follow-up progress (2026-09-02): the calibration MEASUREMENT was
+corrected (top-surface descent, not mesh z-range); flux-term mapping was tested and
+found NOT to be the rate lever (300 vs default ≈ identical ≈5nm/30s — rate is
+dominated by Ions.meanEnergy / A_ie terms); the ineffective override was reverted and
+the mapping seam documented in-code. Remaining: per-term calibration against the
+voxel baseline, masked etch via M6 vector masks, multi-material stacks.
 
 ## M10 — GeometryScene / VTK Bridge
 
