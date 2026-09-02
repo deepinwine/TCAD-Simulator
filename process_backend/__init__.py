@@ -12,9 +12,14 @@ from .base import (
     StepOutcome,
 )
 from .viennaps_backend import ViennaPSBackend, engine_available
+from .hybrid import ACCURATE, FAST, HybridBackend, ModeSelector
 from .voxel import VoxelBackend, available_backends, create_backend
 
 __all__ = [
+    "ACCURATE",
+    "FAST",
+    "HybridBackend",
+    "ModeSelector",
     "BackendInfo",
     "BackendModelSummary",
     "ProcessBackend",
