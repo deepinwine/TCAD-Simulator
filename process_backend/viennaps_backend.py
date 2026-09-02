@@ -19,7 +19,14 @@ from .base import (
     StepOutcome,
 )
 
-SUPPORTED_STEPS = frozenset({"Initialize Wafer", "Etch"})
+SUPPORTED_STEPS = frozenset({
+    "Initialize Wafer",
+    "Etch",
+    "Wet Etch",
+    "Resist Develop",
+    "Deposition",
+    "Selective Epitaxy",
+})
 PHYSICAL_EXTENT_NM = 640.0
 
 
@@ -76,6 +83,20 @@ class ViennaPSBackend(ProcessBackend):
     def capabilities(self) -> Dict[str, Any]:
         return {
             "supported_steps": sorted(SUPPORTED_STEPS),
+            "accurate_support": {
+                "Initialize Wafer": True,
+                "Etch (Dry)": True,
+                "Wet Etch (isotropic)": True,
+                "Resist Develop (isotropic)": True,
+                "Deposition (conformal)": True,
+                "Selective Epitaxy": "experimental",
+                "CMP": False,
+                "Implant": False,
+                "Anneal": False,
+                "Wafer Flip": False,
+                "Bonding": False,
+                "Thinning": False,
+            },
             "fallback": "voxel",
         }
 
@@ -86,12 +107,18 @@ class ViennaPSBackend(ProcessBackend):
             return self._initialize(params)
         if name == "Etch":
             chemistry = str(params.get("chemistry", "Dry"))
-            if chemistry.lower() != "dry":
-                raise ProcessBackendError(
-                    f"Etch chemistry={chemistry!r} 暂无 ViennaPS 模型映射",
-                    code="unsupported_step",
-                )
-            return self._etch(params)
+            if chemistry.lower() == "dry":
+                return self._etch_dry(params)
+            if chemistry.lower() in ("wet", "isotropic"):
+                return self._etch_isotropic(params)
+            raise ProcessBackendError(
+                f"Etch chemistry={chemistry!r} 暂无 ViennaPS 模型映射",
+                code="unsupported_step",
+            )
+        if name in ("Wet Etch", "Resist Develop"):
+            return self._etch_isotropic(params)
+        if name in ("Deposition", "Selective Epitaxy"):
+            return self._deposit_conformal(params, name)
         raise ProcessBackendError(
             f"步骤 {name!r} 不在 ViennaPS 能力集内（支持：{sorted(SUPPORTED_STEPS)}）",
             code="unsupported_step",
@@ -160,7 +187,7 @@ class ViennaPSBackend(ProcessBackend):
         ).apply()
         return StepOutcome(message=f"ViennaPS 平衬底（{thickness_nm:.0f} nm Si）")
 
-    def _etch(self, params: Dict[str, Any]) -> StepOutcome:
+    def _etch_dry(self, params: Dict[str, Any]) -> StepOutcome:
         ps = self._ps
         self._require_domain()
         duration = float(params.get("time", 30.0))
@@ -179,5 +206,62 @@ class ViennaPSBackend(ProcessBackend):
         process.setParameters(cov)
         process.apply()
         return StepOutcome(
-            message=f"ViennaPS SF6O2 干法刻蚀 {duration:.0f}s（默认通量参数）",
+            message=f"ViennaPS SF6O2 干法刻蚀 {duration:.0f}s（flux=100 标定）",
         )
+
+    def _etch_isotropic(self, params: Dict[str, Any]) -> StepOutcome:
+        """P1 各向同性刻蚀（wet etch / undercut / sacrificial release）。"""
+        ps = self._ps
+        self._require_domain()
+        duration = float(params.get("time", 30.0))
+        rate = float(params.get("rate", 10.0))  # nm/s
+        model = ps.IsotropicProcess(rate=rate / 1000.0)  # µm/s
+        process = ps.Process(self._domain, model)
+        process.setProcessDuration(duration)
+        process.apply()
+        return StepOutcome(
+            message=f"ViennaPS 各向同性刻蚀 {duration:.0f}s @ {rate:.0f} nm/s",
+        )
+
+    def _deposit_conformal(
+        self, params: Dict[str, Any], step_name: str,
+    ) -> StepOutcome:
+        """P4 共形沉积（liner / dielectric / barrier）。"""
+        ps = self._ps
+        self._require_domain()
+        import viennals as vls
+
+        duration = float(params.get("time", 30.0))
+        rate = float(params.get("thickness_nm", params.get("rate", 10.0))) / 30.0  # nm/s ≈ thickness/30s
+        thickness_nm = float(params.get("thickness_nm", rate * duration))
+
+        # 在顶层 level-set 上做球形膨胀 = conformal deposition
+        top_ls = vls.Domain(self._domain.getLevelSets()[-1])
+        vls.GeometricAdvect(
+            top_ls, vls.SphereDistribution(thickness_nm / 1000.0),
+        ).apply()
+        # 作为新材料层插入
+        material_name = str(params.get("material", "SiO2"))
+        ps_material = self._material_from_name(material_name)
+        self._domain.insertNextLevelSetAsMaterial(top_ls, ps_material, False)
+
+        return StepOutcome(
+            message=f"ViennaPS 共形沉积 {material_name} {thickness_nm:.0f} nm",
+        )
+
+    def _material_from_name(self, name: str) -> Any:
+        ps = self._ps
+        mapping = {
+            "sio2": ps.Material.SiO2,
+            "silicon dioxide": ps.Material.SiO2,
+            "sin": ps.Material.Si3N4,
+            "si3n4": ps.Material.Si3N4,
+            "silicon nitride": ps.Material.Si3N4,
+            "poly": ps.Material.PolySi,
+            "polysilicon": ps.Material.PolySi,
+        }
+        key = str(name).strip().lower()
+        for pattern, material in mapping.items():
+            if pattern in key:
+                return material
+        return ps.Material.SiO2  # 默认
