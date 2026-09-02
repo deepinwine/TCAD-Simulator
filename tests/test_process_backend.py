@@ -219,9 +219,10 @@ class ViennaPSBackendTests(unittest.TestCase):
             def __init__(self, name, params):
                 self.name, self.params = name, params
         geometry.execute_step(Step("Initialize Wafer", {"thickness_nm": 200.0}))
+        top_before = float(geometry.material_surfaces(40000)[0][1][:, :, 2].max())
         geometry.execute_step(Step("Etch", {"time": 30.0, "chemistry": "Dry"}))
-        tri = geometry.material_surfaces(40000)[0][1]
-        geo_depth_nm = float(tri[:, :, 2].max() - tri[:, :, 2].min()) * 1000.0
+        top_after = float(geometry.material_surfaces(40000)[0][1][:, :, 2].max())
+        geo_depth_nm = (top_before - top_after) * 1000.0
         geometry.shutdown()
 
         print(f"\n[calibration] voxel etch depth ≈ {voxel_depth_nm:.1f} nm | "
@@ -229,3 +230,5 @@ class ViennaPSBackendTests(unittest.TestCase):
         # 宽容量级断言：两个物理模型都应产生明显刻蚀
         self.assertGreater(voxel_depth_nm, 0.0)
         self.assertGreater(geo_depth_nm, 0.0)
+        ratio = geo_depth_nm / max(voxel_depth_nm, 1e-9)
+        self.assertTrue(0.2 <= ratio <= 3.0, f"标定漂移：ratio={ratio:.2f}")

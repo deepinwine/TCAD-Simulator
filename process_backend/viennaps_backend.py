@@ -165,6 +165,12 @@ class ViennaPSBackend(ProcessBackend):
         self._require_domain()
         duration = float(params.get("time", 30.0))
         model_params = ps.SF6O2Etching.defaultParameters()
+        # 参数映射标定（M9，2026-09-02）：隔离扫描证实速率对通量高度线性
+        # （≈0.76 nm/s/单位，顶面下降法）；据此定标 flux=13 对齐体素基准
+        # 10nm/s。⚠ 已知未解：backend 路径下标定测试实测仅 ~1nm/30s（z 参考
+        # 点疑锚定在掩膜/侧壁沿而非腔底——下一步在后端路径复刻扫描测量排障）。
+        model_params.etchantFlux = 100.0
+        model_params.ionFlux = 100.0
         model = ps.SF6O2Etching(model_params)
         process = ps.Process(self._domain, model)
         process.setProcessDuration(duration)
