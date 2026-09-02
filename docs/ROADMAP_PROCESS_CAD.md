@@ -157,15 +157,14 @@ macOS / Windows application packaging (license review for Qt/PyQt5 implications 
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-01, M9 first slice complete)
+## Current Branch State (2026-09-02, M9 first slice merged)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
 | `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1–M5 实现 |
-| `backup/main`（deepinwine） | `f3cb504` | **M8 已由所有者授权快进合并**（M7 `35cc424` + M8 1 提交，2026-09-01） |
-| 本地 `main` | `f3cb504` | 与 `backup/main` 一致 |
-| `codex/m8-viennaps` | `f3cb504` | M8 交付分支，已全部包含于 `main`（保留作历史） |
-| `codex/m9-viennaps-backend` | M9 首切片（ViennaPSBackend + 能力回退 + 标定 + 文档） | 线性领先 `backup/main`（`f0d6005`），可快进合并 |
+| `backup/main`（deepinwine） | `fc72adf` | **M9 首切片已由所有者授权快进合并**（M8 `f0d6005` + M9 1 提交，2026-09-02） |
+| 本地 `main` | `fc72adf` | 与 `backup/main` 一致 |
+| `codex/m9-viennaps` | `fc72adf` | M9 交付分支（后续切片继续在此分支推进） |
 
 祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
