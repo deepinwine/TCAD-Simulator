@@ -74278,6 +74278,26 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(self._capacity_payload(), status=503)
             return
 
+        if path == "/api/recipe/parse":
+            # M16/M17: 自然语言 → 结构化候选 Recipe（规则式，无需 LLM）
+            payload = self._read_json()
+            parse_text = str(payload.get("text", "") or "").strip()
+            if not parse_text:
+                self._send_json({"ok": False, "error": "text is required"}, status=400)
+                return
+            try:
+                from recipe_planner import RecipeValidator, parse_natural_language
+                draft = parse_natural_language(parse_text)
+                validation = RecipeValidator().validate(draft)
+                self._send_json({
+                    "ok": True,
+                    "draft": draft.to_dict(),
+                    "validation": validation,
+                })
+            except Exception as exc:
+                self._send_json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+            return
+
         if path == "/api/step/set":
             payload = self._read_json()
             resp = sess.rpc("set_step", payload)

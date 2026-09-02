@@ -50,7 +50,7 @@ export function RecipeAssistant() {
     setError(null);
     setDraft(null);
     setValidation(null);
-    const endpoints = ['/api/v2/recipe/parse', 'http://127.0.0.1:8799/api/v2/recipe/parse'];
+    const endpoints = ['/api/recipe/parse', '/api/v2/recipe/parse'];
     let payload: unknown = null;
     for (const url of endpoints) {
       try {
