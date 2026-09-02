@@ -102,6 +102,12 @@ Constraints: 引擎仅用于 `experiments/viennaps` 沙盒（ADR-014）；参考
 注册表仍只有 'voxel'，ViennaPSBackend 与能力模型留待 M9。构建步骤记录于
 `experiments/viennaps/README.md`。
 
+ADR-022 — 桌面打包走无 Qt 路线：无头服务器 + 系统浏览器（2026-09-02）。
+Reason: PyQt5 为 GPL v3，与项目 MIT 许可冲突；React + WebUIServerManager 已可
+完全替代 Qt GUI（TCAD_SKIP_QT=1），桌面打包无需引入 Qt。
+Constraints: PyInstaller spec（tcad_studio.spec）排除全部 Qt/PySide/tkinter；
+React 前端以静态文件嵌入；许可保持 MIT。
+
 ADR-017 — Agent roles: GLM implements, Codex reviews.
 Reason: mutual review beats single-agent drift; the reviewer must not compete with the
 implementer.

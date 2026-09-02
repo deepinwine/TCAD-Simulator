@@ -150,9 +150,13 @@ Unified voxel + ViennaPS output → GeometryScene → VTK → Three.js (ADR-015)
 Per-process mode selection (e.g. Deposit FAST, HAR Etch ACCURATE, ALD ACCURATE,
 Fill/CMP/Bonding FAST).
 
-## M12 — Desktop Packaging
+## M12 — Desktop Packaging ✅（无 Qt 路线已交付）
 
 macOS / Windows application packaging (license review for Qt/PyQt5 implications first).
+License review completed (ADR-022): PyQt5 GPL conflicts with MIT → the packaging goes
+**headless** (`tcad_studio.py` launcher + `WebUIServerManager` + React frontend +
+system browser). PyInstaller spec (`tcad_studio.spec`) excludes all Qt/PySide/tkinter;
+React build output embedded as static data. No Qt dependency in the packaged binary.
 
 ## Backlog (owner slots these into the sequence)
 
