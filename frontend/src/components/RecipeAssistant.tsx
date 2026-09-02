@@ -50,30 +50,35 @@ export function RecipeAssistant() {
     setError(null);
     setDraft(null);
     setValidation(null);
-    try {
-      const response = await fetch('/api/v2/recipe/parse', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        credentials: 'same-origin',
-        body: JSON.stringify({text}),
-      });
-      const payload: unknown = await response.json();
-      if (typeof payload === 'object' && payload !== null && 'ok' in payload) {
-        const data = payload as {ok: boolean; draft?: DraftView; validation?: ValidationView; error?: string};
-        if (data.ok && data.draft && data.validation) {
-          setDraft(data.draft);
-          setValidation(data.validation);
-        } else {
-          setError(data.error ?? '解析失败');
+    const endpoints = ['/api/v2/recipe/parse', 'http://127.0.0.1:8799/api/v2/recipe/parse'];
+    let payload: unknown = null;
+    for (const url of endpoints) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({text}),
+        });
+        if (response.ok) {
+          payload = await response.json();
+          break;
         }
-      } else {
-        setError('服务返回了无效响应');
+      } catch {
+        // 尝试下一个端点
       }
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(false);
     }
+    if (payload !== null && typeof payload === 'object' && payload !== null && 'ok' in payload) {
+      const data = payload as {ok: boolean; draft?: DraftView; validation?: ValidationView; error?: string};
+      if (data.ok && data.draft && data.validation) {
+        setDraft(data.draft);
+        setValidation(data.validation);
+      } else {
+        setError(data.error ?? '解析失败');
+      }
+    } else {
+      setError('Recipe 解析服务不可用（需启动 FastAPI /api/v2）');
+    }
+    setBusy(false);
   }, [input, busy]);
 
   const apply = useCallback(() => {

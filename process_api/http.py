@@ -42,6 +42,15 @@ def create_app(
     title: str = "TCAD Process API (v2)",
 ) -> FastAPI:
     app = FastAPI(title=title, version="2", docs_url="/api/v2/docs")
+
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     state: Dict[str, Any] = {"facade": None, "demo": None}
 
     def facade(demo_name: str | None = None) -> ProcessCadFacade:
