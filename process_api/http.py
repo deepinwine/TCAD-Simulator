@@ -92,6 +92,21 @@ def create_app(
             return error_response(error)  # type: ignore[return-value]
         return Response(content=data, media_type="application/octet-stream")
 
+    @app.post("/api/v2/recipe/parse")
+    def parse_recipe(request: Dict[str, Any]) -> Dict[str, Any]:
+        """M16：自然语言 → 结构化候选 Recipe + 校验结果。"""
+        from recipe_planner import RecipeValidator, parse_natural_language
+
+        text = str(request.get("text", "")).strip()
+        if not text:
+            return {"ok": False, "error": "text is required"}
+        try:
+            draft = parse_natural_language(text)
+            validation = RecipeValidator().validate(draft)
+            return {"ok": True, "draft": draft.to_dict(), "validation": validation}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     return app
 
 

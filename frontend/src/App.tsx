@@ -4,6 +4,7 @@ import type {TcadApi} from './api/types';
 import {ErrorNotice} from './components/ErrorNotice';
 import {ParameterPanel} from './components/ParameterPanel';
 import {ProcessFlowPane} from './components/ProcessFlowPane';
+import {RecipeAssistant} from './components/RecipeAssistant';
 import {StepStructureBar} from './components/StepStructureBar';
 import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
@@ -77,6 +78,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
         </div>
       )}
       <div className={workspaceClass}>
+        <RecipeAssistant />
         <ProcessFlowPane
           recipe={state.recipe}
           selectedStepIndex={state.selectedStepIndex}

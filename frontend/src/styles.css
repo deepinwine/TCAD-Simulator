@@ -1099,3 +1099,138 @@ button:focus-visible,
   color: #8fa3b8;
   font-size: 11px;
 }
+
+.recipe-assistant {
+  padding: 8px 10px;
+  border-bottom: 1px solid #1e2a3a;
+  background: #0f1722;
+}
+
+.recipe-assistant textarea {
+  width: 100%;
+  min-height: 80px;
+  background: #0b121c;
+  color: #d7e3f0;
+  border: 1px solid #24344a;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.recipe-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.recipe-error {
+  color: #e06c75;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.recipe-draft h3 {
+  font-size: 13px;
+  color: #aebfd2;
+  margin: 10px 0 6px;
+}
+
+.recipe-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.recipe-step {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #14202e;
+}
+
+.recipe-step .step-number {
+  color: #5b7183;
+  font-size: 11px;
+  min-width: 24px;
+}
+
+.recipe-step .step-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.recipe-step strong {
+  color: #d7e3f0;
+  font-size: 12px;
+}
+
+.recipe-step .step-params {
+  color: #7b8fa3;
+  font-size: 11px;
+}
+
+.recipe-step.is-default {
+  opacity: 0.7;
+}
+
+.default-badge {
+  color: #e5c07b;
+  font-size: 10px;
+  font-style: italic;
+}
+
+.low-confidence {
+  color: #e06c75;
+  font-size: 10px;
+}
+
+.step-warning {
+  color: #e5c07b;
+  font-size: 10px;
+}
+
+.recipe-ambiguities {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid #4a3c1a;
+  border-radius: 4px;
+  background: rgba(30,25,10,0.5);
+}
+
+.recipe-ambiguities h4 {
+  color: #e5c07b;
+  font-size: 11px;
+  margin: 0 0 4px;
+}
+
+.recipe-ambiguities ul {
+  padding-left: 16px;
+  margin: 0;
+  color: #c9b87a;
+  font-size: 11px;
+}
+
+.mode-recommendations {
+  margin-top: 8px;
+}
+
+.mode-recommendations h4 {
+  color: #61afef;
+  font-size: 11px;
+  margin: 0 0 4px;
+}
+
+.mode-recommendations ul {
+  padding-left: 16px;
+  margin: 0;
+  color: #7b8fa3;
+  font-size: 11px;
+}
+
+.mode-reason {
+  color: #5b7183;
+  font-style: italic;
+}
