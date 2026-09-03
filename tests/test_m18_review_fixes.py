@@ -96,9 +96,22 @@ class ExecutionIsolationTests(unittest.TestCase):
             return original_fast_execute(step)
         backend._fast.execute_step = counting_fast
 
-        # ViennaPS will fail (no domain initialized for this test)
+        # M25: bridge may now succeed (load_geometry_scene works).
+        # Force ViennaPS execution to fail to test fallback path.
+        accurate = backend._get_accurate()
+        original_acc_execute = accurate.execute_step
+        def failing_acc(step):
+            raise ProcessBackendError("forced failure", code="step_failed")
+        accurate.execute_step = failing_acc
+
         outcome = backend.execute_step(steps["Etch"])
-        self.assertEqual(fast_calls[0], 1)  # fallback executed exactly once
+
+        # If bridge succeeded → accurate failed → fallback to fast (1 call)
+        # If bridge failed → stayed on fast (1 call from direct execution)
+        self.assertEqual(fast_calls[0], 1)
+
+        # Restore
+        accurate.execute_step = original_acc_execute
         backend.shutdown()
 
 

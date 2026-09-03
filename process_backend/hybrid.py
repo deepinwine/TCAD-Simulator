@@ -117,19 +117,20 @@ class HybridBackend(ProcessBackend):
     # ---- BLOCK-002 fix: atomic bridge with explicit result ----
 
     def _bridge_to_accurate(self) -> bool:
-        """Transfer canonical scene to ViennaPS. Returns True if target is ready."""
+        """M25: Transfer canonical scene to ViennaPS Domain via load_geometry_scene."""
         target = self._get_accurate()
         if self._canonical_scene is None:
-            # No state to transfer — target will initialize on first step
+            return True  # target will initialize from first step
+        try:
+            target.load_geometry_scene(self._canonical_scene)
             return True
-        from geometry_scene.bridge import can_convert_to_viennaps
-        ok, reason = can_convert_to_viennaps(self._canonical_scene)
-        if not ok:
-            logger.info("bridge to ViennaPS rejected: %s", reason)
+        except ProcessBackendError as exc:
+            logger.info("bridge to ViennaPS rejected: %s", exc)
+            self._routing_log.append({
+                "step": "(bridge)", "mode": FAST,
+                "reason": f"geometry import failed: {exc.code}: {exc}",
+            })
             return False
-        # First version: if target has no domain, it will initialize from the step
-        # (bridge construction deferred to M19 multi-material)
-        return True
 
     def _bridge_to_fast(self) -> bool:
         """Transfer canonical scene to VoxelBackend, rebuilding derived state."""
@@ -158,16 +159,28 @@ class HybridBackend(ProcessBackend):
 
     @staticmethod
     def _rebuild_voxel_derived(model) -> None:
-        """Rebuild VoxelBackend derived caches after grid replacement."""
+        """Rebuild VoxelBackend derived caches after grid replacement.
+
+        ISSUE-002 fix: height_map is the top-Z index per (x,y) column.
+        Must reverse along Z (axis=2), not X (axis=0).
+        """
         try:
             if hasattr(model, 'height_map') and model.height_map is not None:
                 import numpy as np
                 void_id = 0
-                mask = model.grid != void_id
+                occupied = model.grid != void_id  # (nx, ny, nz)
+                # For each (x,y) column, find the highest z with material
+                # occupied.any(axis=2) → has any material in this column
+                # occupied[:, :, ::-1] → reverse Z axis (top first)
+                # argmax finds first True from top → index in reversed array
+                # Convert back to original z index: nz - 1 - reversed_idx
+                nz = occupied.shape[2]
+                reversed_argmax = np.argmax(occupied[:, :, ::-1], axis=2)
+                has_material = occupied.any(axis=2)
                 model.height_map = np.where(
-                    mask.any(axis=2),
-                    mask.shape[2] - np.argmax(mask[::-1], axis=2) - 1,
-                    -1,
+                    has_material,
+                    nz - 1 - reversed_argmax,  # convert reversed→original index
+                    -1,  # no material
                 ).astype(model.height_map.dtype if hasattr(model.height_map, 'dtype') else int)
             if hasattr(model, '_ensure_material_z_cache'):
                 model._ensure_material_z_cache()

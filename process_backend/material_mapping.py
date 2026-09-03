@@ -10,7 +10,11 @@ from typing import Any, Dict, Optional, Tuple
 
 
 def build_mapping(database) -> Dict[int, Any]:
-    """MaterialDatabase → {mat_id: viennaps.Material}。惰性构建。"""
+    """MaterialDatabase → {mat_id: viennaps.Material}。
+
+    ISSUE-003 fix: only exact mappings. No silent approximation
+    (TiN→Si, W→Si, HfO2→SiO2 are NOT allowed).
+    """
     import viennaps as ps
 
     # ViennaPS Material name → MaterialDatabase name 的标准对应
@@ -19,26 +23,20 @@ def build_mapping(database) -> Dict[int, Any]:
         "SiO2": "Silicon Dioxide",
         "Si3N4": "Silicon Nitride",
         "PolySi": "Polysilicon",
-        "Mask": "Photoresist",  # 近似
+        "Mask": "Photoresist",
         "Air": "Void",
     }
-    # 额外的 MaterialDatabase name → ViennaPS Material（名称不完全一致时）
-    _EXTRA_MAP = {
-        "SiGe": getattr(ps.Material, "SiGe", ps.Material.Si),
-        "HfO2": getattr(ps.Material, "HfO2", ps.Material.SiO2),
-        "TiN": getattr(ps.Material, "TiN", ps.Material.Si),
-        "TaN": getattr(ps.Material, "TaN", ps.Material.Si),
-        "SiC": getattr(ps.Material, "SiC", ps.Material.Si),
-        "Tungsten": getattr(ps.Material, "W", ps.Material.Si),
-        "Copper": getattr(ps.Material, "Cu", ps.Material.Si),
-        "Aluminum": getattr(ps.Material, "Al", ps.Material.Si),
-    }
+    # ISSUE-003: no getattr fallback — only materials ViennaPS actually has
+    _EXTRA_NAMES = ["SiGe", "HfO2", "TiN", "TaN", "SiC", "W", "Cu", "Al",
+                    "Ru", "Co", "Al2O3", "Ti", "TiO2", "ZnO", "GaAs", "GaN"]
 
-    # 反转 name map: DB name → ViennaPS Material
     _db_to_ps: Dict[str, Any] = {}
     for ps_name, db_name in _NAME_MAP.items():
         _db_to_ps[db_name] = getattr(ps.Material, ps_name, None)
-    _db_to_ps.update(_EXTRA_MAP)
+    for extra in _EXTRA_NAMES:
+        ps_mat = getattr(ps.Material, extra, None)
+        if ps_mat is not None:
+            _db_to_ps[extra] = ps_mat
 
     mapping: Dict[int, Any] = {}
     for mat_id, material in database.items():

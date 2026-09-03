@@ -134,6 +134,84 @@ class ViennaPSBackend(ProcessBackend):
             suggestion="请使用体素后端（create_backend('voxel')）运行完整配方",
         )
 
+    def load_geometry_scene(self, scene) -> None:
+        """M25: Import canonical GeometryScene into ViennaPS Domain.
+
+        Supports stacked layers via MakeTrench.MaterialLayer (bottom→top).
+        Limited to: substrate + stacked conformal layers + mask.
+        Patterned features (trench/hole) in lateral dimension are NOT preserved
+        in v1 — this is a documented limitation.
+
+        Raises ProcessBackendError if topology is unsupported.
+        """
+        from geometry_scene.bridge import scene_to_viennaps_layers, can_convert_to_viennaps
+        from .material_mapping import name_to_ps_material
+
+        ok, reason = can_convert_to_viennaps(scene)
+        if not ok:
+            raise ProcessBackendError(
+                f"GeometryScene cannot be imported: {reason}",
+                code="unsupported_geometry",
+            )
+
+        layers = scene_to_viennaps_layers(scene)
+        if not layers:
+            raise ProcessBackendError(
+                "GeometryScene has no importable layers",
+                code="unsupported_geometry",
+            )
+
+        ps = self._ps
+        # Build domain using MakeTrench constructor 2 (sets up grid + substrate)
+        # then add additional layers via insertNextLevelSetAsMaterial
+        first_mat_ps = None
+        first_thickness_um = 0.0
+        layer_data = []
+        for z_min, mat_id, thickness_nm, is_mask in layers:
+            import tcad_simulator as tcad
+            db = tcad.MaterialDatabase()
+            mat_name = next(
+                (m.name for m_id, m in db.items() if m_id == mat_id),
+                None,
+            )
+            if mat_name is None:
+                raise ProcessBackendError(
+                    f"Unknown material ID {mat_id}",
+                    code="unsupported_material",
+                )
+            ps_material = name_to_ps_material(mat_name)
+            if ps_material is None:
+                raise ProcessBackendError(
+                    f"Material '{mat_name}' (ID {mat_id}) not in ViennaPS",
+                    code="unsupported_material",
+                )
+            if first_mat_ps is None:
+                first_mat_ps = ps_material
+                first_thickness_um = thickness_nm / 1000.0
+            else:
+                layer_data.append((ps_material, thickness_nm / 1000.0))
+
+        # Substrate via MakeTrench constructor 2 (reliable domain setup)
+        self._domain = ps.Domain()
+        ps.MakeTrench(
+            self._domain,
+            gridDelta=self._grid_nm / 1000.0,
+            xExtent=self._extent_um,
+            yExtent=self._extent_um,
+            trenchWidth=self._extent_um * 2.0,
+            trenchDepth=first_thickness_um,
+            material=first_mat_ps,
+        ).apply()
+
+        # Additional stacked layers: conformal growth from top surface
+        import viennals as vls
+        for ps_material, thickness_um in layer_data:
+            top_ls = vls.Domain(self._domain.getLevelSets()[-1])
+            vls.GeometricAdvect(
+                top_ls, vls.SphereDistribution(thickness_um),
+            ).apply()
+            self._domain.insertNextLevelSetAsMaterial(top_ls, ps_material, False)
+
     def snapshot(self) -> Any:
         self._require_domain()
         copy = self._ps.Domain()
