@@ -137,23 +137,72 @@ class ViennaPSBackend(ProcessBackend):
     def material_surfaces(
         self, face_limit: int = 20000
     ) -> List[Tuple[int, np.ndarray]]:
+        """M19 BUG-002 fix: per-material surfaces from ViennaPS Domain.
+
+        Uses each level-set in the Domain to produce separate material meshes.
+        """
         self._require_domain()
         import tcad_simulator as tcad
+        from .material_mapping import ps_to_mat_id
 
         database = tcad.MaterialDatabase()
-        silicon_id = next(
-            mid for mid, material in database.items() if material.name == "Silicon"
-        )
-        mesh = self._domain.getSurfaceMesh()
-        nodes = np.asarray(mesh.getNodes(), dtype=float)
-        cells = np.asarray(mesh.getTriangles(), dtype=np.int64)
-        if nodes.size == 0 or cells.size == 0:
+        surfaces: List[Tuple[int, np.ndarray]] = []
+
+        # Try to get per-level-set meshes (BUG-002: was returning all as Silicon)
+        level_sets = self._domain.getLevelSets()
+        if not level_sets:
             return []
-        triangles = nodes[cells.reshape(-1, 3)][:, :, :3]
-        if len(triangles) > int(face_limit):
-            stride = max(1, len(triangles) // int(face_limit))
-            triangles = triangles[::stride]
-        return [(silicon_id, triangles)]
+
+        ps = self._ps
+        for i, level_set in enumerate(level_sets):
+            # Get material for this level set
+            try:
+                material = self._domain.getMaterialForLevelSet(i)
+                mat_id = ps_to_mat_id(material, database)
+            except (AttributeError, IndexError):
+                mat_id = None
+            if mat_id is None:
+                # Fallback: try to identify from domain materials list
+                try:
+                    materials = self._domain.getMaterialsInDomain()
+                    if i < len(materials):
+                        mat_id = ps_to_mat_id(materials[i], database)
+                except Exception:
+                    pass
+            if mat_id is None:
+                continue  # Skip unknown materials rather than mislabel
+
+            try:
+                mesh = self._domain.getLevelSetMesh(i)
+                nodes = np.asarray(mesh.getNodes(), dtype=float)
+                cells = np.asarray(mesh.getTriangles(), dtype=np.int64)
+                if nodes.size == 0 or cells.size == 0:
+                    continue
+                triangles = nodes[cells.reshape(-1, 3)][:, :, :3]
+                if len(triangles) > int(face_limit):
+                    stride = max(1, len(triangles) // int(face_limit))
+                    triangles = triangles[::stride]
+                surfaces.append((mat_id, triangles))
+            except Exception:
+                continue
+
+        if not surfaces:
+            # Fallback: surface mesh of entire domain (single material)
+            mesh = self._domain.getSurfaceMesh()
+            nodes = np.asarray(mesh.getNodes(), dtype=float)
+            cells = np.asarray(mesh.getTriangles(), dtype=np.int64)
+            if nodes.size == 0 or cells.size == 0:
+                return []
+            triangles = nodes[cells.reshape(-1, 3)][:, :, :3]
+            if len(triangles) > int(face_limit):
+                stride = max(1, len(triangles) // int(face_limit))
+                triangles = triangles[::stride]
+            silicon_id = next(
+                mid for mid, m in database.items() if m.name == "Silicon"
+            )
+            surfaces.append((silicon_id, triangles))
+
+        return surfaces
 
     def grid(self) -> np.ndarray:
         raise ProcessBackendError(
@@ -250,18 +299,16 @@ class ViennaPSBackend(ProcessBackend):
         )
 
     def _material_from_name(self, name: str) -> Any:
-        ps = self._ps
-        mapping = {
-            "sio2": ps.Material.SiO2,
-            "silicon dioxide": ps.Material.SiO2,
-            "sin": ps.Material.Si3N4,
-            "si3n4": ps.Material.Si3N4,
-            "silicon nitride": ps.Material.Si3N4,
-            "poly": ps.Material.PolySi,
-            "polysilicon": ps.Material.PolySi,
-        }
-        key = str(name).strip().lower()
-        for pattern, material in mapping.items():
-            if pattern in key:
-                return material
-        return ps.Material.SiO2  # 默认
+        """BUG-003 fix: unknown materials raise explicit error, not silent SiO2."""
+        from .material_mapping import name_to_ps_material
+
+        result = name_to_ps_material(name)
+        if result is not None:
+            return result
+        raise ProcessBackendError(
+            f"ViennaPS 不支持材料 '{name}'。"
+            f"请使用 FAST 后端，或为此材料添加显式 ViennaPS 映射。",
+            code="unsupported_material",
+            suggestion=f"可用材料：Si, SiO2, Si3N4, PolySi, W, Cu, TiN；"
+                       f"收到的 '{name}' 不在映射表中",
+        )
