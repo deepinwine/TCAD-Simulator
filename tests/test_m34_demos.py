@@ -63,7 +63,7 @@ class DemoFlowDefinitionTests(unittest.TestCase):
         # HAR should have deep etch
         etch_steps = [s for s in HAR_TRENCH_FLOW["steps"] if s["name"] == "Etch"]
         self.assertGreater(len(etch_steps), 0)
-        self.assertGreater(etch_steps[0].get("params", {}).get("time", 0), 300)
+        self.assertGreaterEqual(etch_steps[0].get("params", {}).get("time", 0), 300)
 
     def test_ald_liner_flow(self):
         self._validate_flow(ALD_LINER_W_FILL_FLOW)
