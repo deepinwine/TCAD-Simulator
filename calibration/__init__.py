@@ -8,3 +8,4 @@ from .metrics import CalibrationMetrics, MeasurementResult, ReferenceTarget, com
 from .runner import CalibrationRunner, CalibrationProfile
 
 __all__ = ["CalibrationMetrics", "CalibrationProfile", "CalibrationRunner", "MeasurementResult", "ReferenceTarget", "compare_to_reference"]
+from .metrology import MeasurementROI, MetrologyEngine

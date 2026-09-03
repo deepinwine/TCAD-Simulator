@@ -26,6 +26,9 @@ SUPPORTED_STEPS = frozenset({
     "Resist Develop",
     "Deposition",
     "Selective Epitaxy",
+    "Directional Etch",
+    "ALD Deposition",
+    "Selective Etch",
 })
 PHYSICAL_EXTENT_NM = 640.0
 
@@ -117,6 +120,12 @@ class ViennaPSBackend(ProcessBackend):
             )
         if name in ("Wet Etch", "Resist Develop"):
             return self._etch_isotropic(params)
+        if name == "Directional Etch":
+            return self._etch_directional(params)
+        if name == "ALD Deposition":
+            return self._deposit_ald(params)
+        if name == "Selective Etch":
+            return self._etch_selective(params)
         if name in ("Deposition", "Selective Epitaxy"):
             return self._deposit_conformal(params, name)
         raise ProcessBackendError(
@@ -311,4 +320,91 @@ class ViennaPSBackend(ProcessBackend):
             code="unsupported_material",
             suggestion=f"可用材料：Si, SiO2, Si3N4, PolySi, W, Cu, TiN；"
                        f"收到的 '{name}' 不在映射表中",
+        )
+
+    # ---- M20: 新增 Accurate 工艺模型 ----
+
+    def _etch_directional(self, params: Dict[str, Any]) -> StepOutcome:
+        """M20-P2: 方向性刻蚀（PVD-like / shadowing / anisotropic）。"""
+        ps = self._ps
+        self._require_domain()
+        duration = float(params.get("time", 30.0))
+        rate = float(params.get("rate", 10.0))  # nm/s
+        direction = [0.0, 0.0, -1.0]  # 默认垂直向下
+        if params.get("angle_deg"):
+            import math
+            angle = math.radians(float(params["angle_deg"]))
+            direction = [0.0, math.sin(angle), -math.cos(angle)]
+
+        model = ps.DirectionalProcess(
+            direction=direction,
+            directionalVelocity=rate / 1000.0,  # µm/s
+            isotropicVelocity=0.0,
+        )
+        process = ps.Process(self._domain, model)
+        process.setProcessDuration(duration)
+        process.apply()
+        return StepOutcome(
+            message=f"ViennaPS 方向性刻蚀 {duration:.0f}s @ {rate:.0f} nm/s",
+        )
+
+    def _deposit_ald(self, params: Dict[str, Any]) -> StepOutcome:
+        """M20-P4: ALD-like 共形沉积（SingleParticleALD）。"""
+        ps = self._ps
+        self._require_domain()
+        import viennals as vls
+
+        thickness_nm = float(params.get("thickness_nm", 10.0))
+        material_name = str(params.get("material", "Si3N4"))
+        ps_material = self._material_from_name(material_name)
+
+        # SingleParticleALD parameters
+        ald_params = ps.SingleParticleALDParams()
+        ald_params.stickingProbability = 0.1  # ALD 高共形性
+        ald_params.gasMeanFreePath = 10.0  # µm
+        ald_params.growthPerCycle = thickness_nm / 1000.0  # µm per cycle
+
+        model = ps.SingleParticleALD(ald_params)
+        process = ps.Process(self._domain, model)
+        process.setProcessDuration(30.0)  # 30s 代表多周期
+        process.apply()
+        return StepOutcome(
+            message=f"ViennaPS ALD-like 沉积 {material_name} {thickness_nm:.0f} nm",
+        )
+
+    def _etch_selective(self, params: Dict[str, Any]) -> StepOutcome:
+        """M20-P6: 选择性刻蚀（材料选择比）。"""
+        ps = self._ps
+        self._require_domain()
+        duration = float(params.get("time", 30.0))
+        # 材料选择比: {材料名: 速率 nm/s}
+        selectivity = params.get("selectivity", {})
+        if not selectivity:
+            # 默认 SiGe:Si:SiO2 = 10:1:0.01
+            selectivity = {"SiGe": 10.0, "Si": 1.0, "SiO2": 0.01}
+
+        material_rates = {}
+        for mat_name, rate in selectivity.items():
+            try:
+                ps_mat = self._material_from_name(mat_name)
+                material_rates[ps_mat] = float(rate) / 1000.0  # µm/s
+            except ProcessBackendError:
+                continue  # 跳过不支持的材料的映射
+
+        if not material_rates:
+            raise ProcessBackendError(
+                "选择性刻蚀没有任何有效材料映射",
+                code="unsupported_material",
+            )
+
+        model = ps.IsotropicProcess(
+            materialRates=material_rates,
+            defaultRate=0.0,
+        )
+        process = ps.Process(self._domain, model)
+        process.setProcessDuration(duration)
+        process.apply()
+        return StepOutcome(
+            message=f"ViennaPS 选择性刻蚀 {duration:.0f}s "
+                    f"({', '.join(f'{k}:{v*1000:.1f}nm/s' for k,v in selectivity.items())})",
         )

@@ -1,23 +1,54 @@
 # -*- coding: utf-8 -*-
-"""M16：候选 Recipe 校验器——步骤类型/参数/材料/单位/顺序/后端能力。"""
+"""候选 Recipe 校验器——步骤类型/参数/材料/单位/顺序/后端能力。
+
+M22 BUG-005 fix: KNOWN_STEPS 和 ACCURATE_SUPPORT 从后端 capabilities 动态获取。
+"""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from .parser import RecipeDraft
+
+
+def get_known_steps() -> Set[str]:
+    """BUG-005 fix: 从 PROCESS_STEP_FACTORIES 动态获取（不硬编码）。"""
+    try:
+        import tcad_simulator as tcad
+        return set(tcad.PROCESS_STEP_FACTORIES.keys())
+    except Exception:
+        # Fallback if tcad_simulator unavailable
+        return {
+            "Initialize Wafer", "Spin Resist", "Mask Exposure",
+            "Post-Exposure Bake", "Resist Develop", "Etch",
+            "Selective Epitaxy", "Deposition", "CMP", "Anneal",
+            "Oxidation", "Ion Implantation", "Wet Etch",
+            "Wafer Flip", "Bonding", "Thinning",
+        }
+
+
+def get_accurate_support() -> Dict[str, Any]:
+    """BUG-005 fix: 从 ViennaPSBackend.capabilities() 动态获取。"""
+    try:
+        from process_backend.viennaps_backend import ViennaPSBackend, engine_available
+        if engine_available():
+            backend = ViennaPSBackend(grid_nm=32.0)
+            caps = backend.capabilities()
+            backend.shutdown()
+            return caps.get("accurate_support", {})
+        return {}
+    except Exception:
+        return {}
 
 
 class RecipeValidator:
     """校验候选 Recipe 的合法性。"""
 
-    # 已知合法步骤类型（来自 PROCESS_STEP_FACTORIES）
-    KNOWN_STEPS = {
-        "Initialize Wafer", "Spin Resist", "Mask Exposure",
-        "Post-Exposure Bake", "Resist Develop", "Etch",
-        "Selective Epitaxy", "Deposition", "CMP", "Anneal",
-        "Oxidation", "Ion Implantation", "Wet Etch",
-        "Wafer Flip", "Bonding", "Thinning",
-    }
+    @property
+    def KNOWN_STEPS(self) -> Set[str]:
+        """BUG-005: dynamic, not hardcoded."""
+        if not hasattr(self, "_known_steps"):
+            self._known_steps = get_known_steps()
+        return self._known_steps
 
     # 参数约束
     PARAM_CONSTRAINTS: Dict[str, Dict[str, tuple]] = {
@@ -35,24 +66,12 @@ class RecipeValidator:
         },
     }
 
-    # ViennaPS 后端能力（简化版——完整版见 ViennaPSBackend.capabilities()）
-    ACCURATE_SUPPORT = {
-        "Initialize Wafer": True,
-        "Etch": True,  # Dry + Wet
-        "Wet Etch": True,
-        "Resist Develop": True,
-        "Deposition": True,  # conformal
-        "Selective Epitaxy": "experimental",
-        "CMP": False,
-        "Anneal": False,
-        "Ion Implantation": False,
-        "Wafer Flip": False,
-        "Bonding": False,
-        "Thinning": False,
-        "Spin Resist": False,
-        "Mask Exposure": False,
-        "Post-Exposure Bake": False,
-    }
+    @property
+    def ACCURATE_SUPPORT(self) -> Dict[str, Any]:
+        """BUG-005: dynamic from backend capabilities."""
+        if not hasattr(self, "_accurate_support"):
+            self._accurate_support = get_accurate_support()
+        return self._accurate_support
 
     def validate(self, draft: RecipeDraft) -> Dict[str, Any]:
         """返回 {ok, errors, warnings, mode_recommendations}。"""
@@ -83,9 +102,15 @@ class RecipeValidator:
             for w in step.warnings:
                 warnings.append(f"{prefix}: {w}")
 
-            # 4. 后端能力建议
-            if step.type in self.ACCURATE_SUPPORT:
-                support = self.ACCURATE_SUPPORT[step.type]
+            # 4. 后端能力建议（BUG-005: 匹配步骤名，含不带括号后缀的变体）
+            support = self.ACCURATE_SUPPORT.get(step.type)
+            if support is None:
+                # 尝试带括号的变体（如 "Etch" 匹配 "Etch (Dry)"）
+                for cap_key, cap_val in self.ACCURATE_SUPPORT.items():
+                    if step.type in cap_key:
+                        support = cap_val
+                        break
+            if support is not None:
                 if support is False:
                     recommendations.append({
                         "step": step.type,
