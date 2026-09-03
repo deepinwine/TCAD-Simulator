@@ -158,6 +158,44 @@ License review completed (ADR-022): PyQt5 GPL conflicts with MIT → the packagi
 system browser). PyInstaller spec (`tcad_studio.spec`) excludes all Qt/PySide/tkinter;
 React build output embedded as static data. No Qt dependency in the packaged binary.
 
+## M13 — Geometry Bridge (2026-09-02)
+
+**Implemented**: `geometry_scene/bridge.py` — Voxel↔GeometryScene↔ViennaPS 三条 conversion path + `docs/GEOMETRY_BRIDGE.md` 语义约定（nm canonical、+Z up、MaterialDatabase ID）。
+**Integrated**: tests only; HybridBackend has NOT yet adopted the bridge (states drift independently).
+**Known limitation**: even-odd voxelizer volume error ~80% (reference algorithm, not production); cross-backend geometry handoff documented as unimplemented in hybrid.py.
+**Status**: Implemented + Tested (not Integrated into HybridBackend execution path).
+
+## M14 — ViennaPS Process Expansion (2026-09-02)
+
+**Implemented**: ViennaPSBackend supports Initialize Wafer, Etch-Dry (SF6O2), Wet Etch (IsotropicProcess), Resist Develop, Deposition (conformal GeometricAdvect), Selective Epitaxy (experimental).
+**Integrated**: capabilities() returns structured accurate_support dict.
+**Known limitation**: material_surfaces() returns all geometry as Silicon (BUG-002); _material_from_name() silently defaults unknown to SiO2 (BUG-003).
+**Status**: Implemented + Partially Integrated.
+
+## M15 — Calibration Framework (2026-09-02)
+
+**Implemented**: `calibration/` — CalibrationProfile/Runner/Report/Metrics, grid search, reproducibility (git commit + engine version + timestamp).
+**Known limitation**: measure_etch_depth() uses mesh z-range (BUG-004, not true etch depth); only synthetic references; ViennaPS flux=100 is experimental placeholder (BUG-008).
+**Status**: Implemented + Tested (framework ready, measurement semantics need M21).
+
+## M16 — Natural Language Recipe Parser (2026-09-02)
+
+**Implemented**: `recipe_planner/` — rule-based parser (Chinese/English), MaterialNormalizer (longest-match), UnitNormalizer (nm/µm/Å/s/min), RecipeValidator (step type/param range/order logic/mode recommendation).
+**Known limitation**: RecipeValidator hardcodes KNOWN_STEPS and ACCURATE_SUPPORT (BUG-005); parser cannot handle SADP/bond/flip level complexity.
+**Status**: Implemented + Tested.
+
+## M17 — Recipe Assistant Integration (2026-09-02)
+
+**Implemented**: React RecipeAssistant component (textarea → parse → review → apply → import); `/api/recipe/parse` POST endpoint in main WebUI server (tcad_simulator.py); E2E browser verified (NL → 5-step recipe → Run All → 3D).
+**Integrated**: Single-server (no FastAPI dependency); component wired into App.tsx left pane above Process Flow.
+**Validated**: E2E browser test passed (Chinese input, 5 steps, run all, 3D geometry loaded).
+**Status**: Implemented + Integrated + Validated.
+
+## M18 — Hybrid Geometry Truth (2026-09-03, in progress)
+
+**Goal**: Make GeometryScene the canonical state in HybridBackend; enable true FAST↔ACCURATE↔FAST continuity.
+**Bugs to fix**: BUG-001 (layer sort by thickness not z), BUG-007 (hybrid.py docs say unimplemented), BUG-006 (80% tolerance too loose).
+
 ## Backlog (owner slots these into the sequence)
 
 - Parameter sweep / DOE runner with metrology comparison (natural fit after M4).
@@ -166,7 +204,7 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-02, M9 first slice merged)
+## Current Branch State (2026-09-03, M17 complete, M18 in progress)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |

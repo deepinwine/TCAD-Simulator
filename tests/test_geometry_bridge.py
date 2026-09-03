@@ -141,7 +141,7 @@ class UnsupportedGeometryTests(unittest.TestCase):
         layers = scene_to_viennaps_layers(scene)
         self.assertEqual(len(layers), 1)
         self.assertEqual(layers[0][1], 1)  # mat_id = Silicon
-        self.assertAlmostEqual(layers[0][0], 50.0)  # thickness
+        self.assertAlmostEqual(layers[0][2], 50.0)  # thickness (index 2 in M18 format)
 
     def test_can_convert_simple_stack(self):
         tri1 = make_box_triangles(0, 0, 0, 100, 100, 50)

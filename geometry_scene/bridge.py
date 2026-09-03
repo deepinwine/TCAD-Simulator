@@ -140,30 +140,29 @@ def _ray_triangle_z(
 
 def scene_to_viennaps_layers(
     scene: GeometryScene,
-) -> List[Tuple[float, int, bool]]:
-    """GeometryScene → ViennaPS MakeTrench.MaterialLayer 列表。
+) -> List[Tuple[float, int, float, bool]]:
+    """GeometryScene → ViennaPS layer list (z_min, mat_id, thickness_nm, is_mask).
 
-    第一版仅支持「从下到上的 stacked conformal layers」。
-    返回 [(thickness_nm, mat_id, is_mask), ...]，从 substrate 开始向上。
-    不支持的 topology 返回空列表（调用者应报错）。
+    Sorted by z_min ascending (bottom → top). BUG-001 fix: was sorting by
+    thickness (wrong); now tracks actual z position.
+    Returns [(z_min_nm, mat_id, thickness_nm, is_mask), ...].
     """
     meshes = scene.meshes
     if not meshes:
         return []
 
-    # 按 z_min 排序（从下到上）
     layers = []
     for mesh in meshes:
         pts = mesh.triangles.reshape(-1, 3)
-        z_min = pts[:, 2].min()
-        z_max = pts[:, 2].max()
+        z_min = float(pts[:, 2].min())
+        z_max = float(pts[:, 2].max())
         thickness_nm = z_max - z_min
         if thickness_nm <= 0:
             continue
         is_mask = mesh.mat_id == 4  # Photoresist 视为 mask
-        layers.append((float(thickness_nm), mesh.mat_id, is_mask))
+        layers.append((z_min, mesh.mat_id, float(thickness_nm), is_mask))
 
-    layers.sort(key=lambda layer: layer[0], reverse=True)  # 厚的在下
+    layers.sort(key=lambda layer: layer[0])  # BUG-001 fix: 按 z_min 升序
     return layers
 
 
