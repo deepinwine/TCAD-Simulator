@@ -78,14 +78,16 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
         </div>
       )}
       <div className={workspaceClass}>
-        <RecipeAssistant />
-        <ProcessFlowPane
-          recipe={state.recipe}
-          selectedStepIndex={state.selectedStepIndex}
-          onSelect={actions.selectStep}
-        >
-          <StepStructureBar />
-        </ProcessFlowPane>
+        <div className="workspace-left">
+          <RecipeAssistant />
+          <ProcessFlowPane
+            recipe={state.recipe}
+            selectedStepIndex={state.selectedStepIndex}
+            onSelect={actions.selectStep}
+          >
+            <StepStructureBar />
+          </ProcessFlowPane>
+        </div>
         <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} />
         <ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />
       </div>

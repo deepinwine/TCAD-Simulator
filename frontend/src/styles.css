@@ -237,15 +237,42 @@ button:focus-visible,
 
 .studio-workspace {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(270px, 29%) minmax(300px, 30%) minmax(440px, 1fr);
+  display: flex;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
-.studio-workspace.parameters-collapsed {
-  grid-template-columns: minmax(270px, 29%) minmax(440px, 1fr);
+/* 左侧区域：Recipe Assistant + Process Flow */
+.workspace-left {
+  display: flex;
+  width: 30%;
+  min-width: 240px;
+  max-width: 400px;
+  flex: 0 0 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid #202b38;
+}
+
+/* 中间：Parameters */
+.studio-workspace > .parameter-pane {
+  flex: 0 0 auto;
+  width: 28%;
+  min-width: 240px;
+  max-width: 360px;
+}
+
+/* 右侧：3D Viewer 全高占满剩余 */
+.studio-workspace > .viewer-pane {
+  flex: 1 1 auto;
+  min-width: 400px;
+  height: 100%;
+}
+
+.studio-workspace.parameters-collapsed > .parameter-pane {
+  display: none;
 }
 
 .workspace-pane {
@@ -1233,4 +1260,26 @@ button:focus-visible,
 .mode-reason {
   color: #5b7183;
   font-style: italic;
+}
+
+.recipe-assistant {
+  border-bottom: 1px solid #1e2a3a;
+  background: #0f1722;
+  max-height: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.workspace-left .process-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.recipe-assistant .pane-header h2 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.workspace-left .process-pane {
+  border-right: 0;
 }
