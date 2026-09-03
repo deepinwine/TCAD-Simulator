@@ -196,6 +196,31 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 **Goal**: Make GeometryScene the canonical state in HybridBackend; enable true FAST↔ACCURATE↔FAST continuity.
 **Bugs to fix**: BUG-001 (layer sort by thickness not z), BUG-007 (hybrid.py docs say unimplemented), BUG-006 (80% tolerance too loose).
 
+## M20–M22 (2026-09-03)
+
+**M20**: Directional Etch (`DirectionalProcess`), ALD Deposition (`SingleParticleALD`), Selective Etch (`IsotropicProcess` with materialRates). 7 tests green.
+**M21**: `calibration/metrology.py` — MetrologyEngine with ROI-based etch depth (surface descent, BUG-004 fix), CD, film thickness, step coverage. 9 tests green.
+**M22**: RecipeValidator KNOWN_STEPS from PROCESS_STEP_FACTORIES, ACCURATE_SUPPORT from ViennaPSBackend.capabilities() (BUG-005 fix). All planner tests green.
+
+## M24 — Performance Benchmarks (2026-09-03)
+
+**Implemented**: `tools/run_benchmarks.py` — profiling at 64³/128³ for voxel pipeline, scene→voxel conversion, ViennaPS steps, hybrid flow.
+
+### Key Results (128³)
+| Operation | Time | Assessment |
+|---|---|---|
+| Voxel full recipe (10 steps) | 0.83s | ✅ production ready |
+| Surface extraction | 65ms | ✅ fast |
+| GeometryScene conversion | 0.1ms | ✅ negligible |
+| **Scene→Voxel (Python voxelizer)** | **41.5s** | ❌ **HOTSPOT** |
+| ViennaPS init | 3ms | ✅ fast |
+| ViennaPS etch (5s process) | 8s | ✅ reasonable |
+| Hybrid FAST→ACC→FAST (32³) | 0.3s | ✅ good |
+
+### Performance Hotspot
+Scene→Voxel conversion is the clear bottleneck: Python even-odd voxelizer at O(triangles × nx × ny).
+Next step: VTK C++ pipeline or C++ accelerated voxelizer (libtcad_core).
+
 ## Backlog (owner slots these into the sequence)
 
 - Parameter sweep / DOE runner with metrology comparison (natural fit after M4).
