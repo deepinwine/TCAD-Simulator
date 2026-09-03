@@ -9,3 +9,4 @@ from .runner import CalibrationRunner, CalibrationProfile
 
 __all__ = ["CalibrationMetrics", "CalibrationProfile", "CalibrationRunner", "MeasurementResult", "ReferenceTarget", "compare_to_reference"]
 from .metrology import MeasurementROI, MetrologyEngine
+from .cross_section import CrossSection, CrossSectionEngine, MaterialSegment

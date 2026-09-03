@@ -104,7 +104,9 @@ def _voxelize_mesh(
         v = inv_det * (SX * e1[1] - SY * e1[0])
 
         # Inside triangle: u >= 0, v >= 0, u + v <= 1
-        inside = (u >= 0) & (v >= 0) & (u + v <= 1)
+        # (relaxed boundary for numerical precision on diagonal edges)
+        eps = 1e-10
+        inside = (u >= -eps) & (v >= -eps) & (u + v <= 1 + eps)
         # Restrict to bounding box
         full_mask = np.zeros((nx, ny), dtype=bool)
         full_mask[np.ix_(ix_mask, iy_mask)] = inside[np.ix_(ix_mask, iy_mask)]
