@@ -143,9 +143,12 @@ def scene_to_viennaps_layers(
 ) -> List[Tuple[float, int, float, bool]]:
     """GeometryScene → ViennaPS layer list (z_min, mat_id, thickness_nm, is_mask).
 
-    Sorted by z_min ascending (bottom → top). BUG-001 fix: was sorting by
-    thickness (wrong); now tracks actual z position.
-    Returns [(z_min_nm, mat_id, thickness_nm, is_mask), ...].
+    BLOCK-003 fix: validates input before sorting. Rejects:
+    - empty meshes
+    - non-finite coordinates (NaN/Inf)
+    - same material with disconnected layers (gap would be silently filled)
+    Returns sorted by z_min ascending.
+    Raises ValueError on unsupported topology.
     """
     meshes = scene.meshes
     if not meshes:
@@ -153,16 +156,53 @@ def scene_to_viennaps_layers(
 
     layers = []
     for mesh in meshes:
+        if mesh.triangles.size == 0:
+            raise ValueError(
+                f"material {mesh.mat_id} has empty mesh; "
+                "cannot convert to ViennaPS layers"
+            )
         pts = mesh.triangles.reshape(-1, 3)
+        # BLOCK-003: reject non-finite coordinates
+        if not np.isfinite(pts).all():
+            raise ValueError(
+                f"material {mesh.mat_id} has non-finite (NaN/Inf) coordinates"
+            )
         z_min = float(pts[:, 2].min())
         z_max = float(pts[:, 2].max())
         thickness_nm = z_max - z_min
         if thickness_nm <= 0:
-            continue
-        is_mask = mesh.mat_id == 4  # Photoresist 视为 mask
-        layers.append((z_min, mesh.mat_id, float(thickness_nm), is_mask))
+            raise ValueError(
+                f"material {mesh.mat_id} has zero/negative thickness "
+                f"({thickness_nm}); refusing to silently skip"
+            )
+        is_mask = mesh.mat_id == 4
+        layers.append((z_min, mesh.mat_id, thickness_nm, is_mask))
 
-    layers.sort(key=lambda layer: layer[0])  # BUG-001 fix: 按 z_min 升序
+    # BLOCK-003: detect same-material disconnected layers
+    # (would incorrectly fill the gap with one thick layer)
+    by_material: Dict[int, List[float]] = {}
+    for z_min, mat_id, thickness, _ in layers:
+        by_material.setdefault(mat_id, []).append(z_min)
+    for mat_id, z_mins in by_material.items():
+        if len(z_mins) > 1:
+            raise ValueError(
+                f"material {mat_id} has {len(z_mins)} disconnected layers "
+                f"(z_mins={sorted(z_mins)}); ViennaPS bridge v1 only supports "
+                "single contiguous layer per material"
+            )
+
+    # BLOCK-003: detect overlapping layers (different materials at same z)
+    for i in range(len(layers)):
+        for j in range(i + 1, len(layers)):
+            z_min_a, _, thick_a, _ = layers[i]
+            z_min_b, _, thick_b, _ = layers[j]
+            if z_min_a < z_min_b + thick_b and z_min_b < z_min_a + thick_a:
+                raise ValueError(
+                    f"layers {i} and {j} overlap in z; "
+                    "ViennaPS bridge v1 only supports non-overlapping stacks"
+                )
+
+    layers.sort(key=lambda layer: layer[0])
     return layers
 
 

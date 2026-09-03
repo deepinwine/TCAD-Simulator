@@ -44,13 +44,26 @@ jobs:
             tests.test_calibration \
             tests.test_recipe_planner \
             tests.test_process_api_facade
-      - name: Layout tests (requires gdstk)
+      - name: Layout tests (optional gdstk)
         env:
           TCAD_SKIP_QT: '1'
           MPLBACKEND: Agg
         run: |
-          pip install gdstk
-          python -m unittest tests.test_layout_adapter || echo "gdstk optional; skipped"
+          # BLOCK-005: optional deps must not break CI if unavailable,
+          # but test failures must always propagate.
+          if pip install gdstk 2>/dev/null; then
+            echo "gdstk installed — running full layout tests"
+            python -m unittest tests.test_layout_adapter
+          else
+            echo "::warning::gdstk not installable — running layout tests (will skip)"
+            python -m unittest tests.test_layout_adapter || {
+              exit_code=$?
+              if [ $exit_code -ne 0 ]; then
+                echo "::error::layout tests failed (not a skip)"
+                exit $exit_code
+              fi
+            }
+          fi
 
   frontend:
     runs-on: ubuntu-latest
