@@ -1,0 +1,202 @@
+{
+  "name": "DRAM Narrow BL + Wide Active Si",
+  "description": "DRAM窄预埋Bitline + 上层Active Silicon横向做宽结构：W bitline阵列 → oxide bonding → flip → thin → trench → air gap → selective epi lateral grow",
+  "version": 1,
+  "parameters": {
+    "domain_x_nm": 3600,
+    "domain_y_nm": 4000,
+    "bitline_pitch_nm": 600,
+    "bitline_width_nm": 180,
+    "bitline_thickness_nm": 120,
+    "first_wafer_si_nm": 2500,
+    "final_remaining_si_nm": 450,
+    "bond_oxide_1_nm": 180,
+    "bond_oxide_2_nm": 180,
+    "carrier_si_nm": 1000,
+    "first_semiconductor_width_nm": 240,
+    "active_semiconductor_width_nm": 420,
+    "active_semiconductor_height_nm": 450,
+    "air_gap_liner_nm": 20,
+    "air_gap_seal_nm": 30,
+    "num_bitlines": 5,
+    "grid_resolution": 64,
+    "active_si_mode": "SELECTIVE_EPI",
+    "enable_air_gap": true,
+    "enable_device_completion": false
+  },
+  "steps": [
+    {
+      "name": "Initialize Wafer",
+      "enabled": true,
+      "params": {
+        "wafer_type": "Bulk",
+        "material": "Silicon",
+        "thickness_nm": 2500
+      },
+      "_label": "1. First Si wafer 2.5um"
+    },
+    {
+      "name": "Deposition",
+      "enabled": true,
+      "params": {
+        "material": "Tungsten",
+        "thickness": 120
+      },
+      "_label": "2a. W deposition 0.12um"
+    },
+    {
+      "name": "Spin Resist",
+      "enabled": true,
+      "params": {
+        "material": "Photoresist",
+        "thickness_nm": 300
+      },
+      "_label": "2b. Spin resist"
+    },
+    {
+      "name": "Mask Exposure",
+      "enabled": true,
+      "params": {
+        "pattern": "Lines",
+        "critical_dimension": 180,
+        "pitch": 600,
+        "orientation": 90
+      },
+      "_label": "2c. Litho: BL pattern CD=180nm pitch=600nm"
+    },
+    {
+      "name": "Resist Develop",
+      "enabled": true,
+      "params": {
+        "time": 60
+      },
+      "_label": "2d. Develop"
+    },
+    {
+      "name": "Etch",
+      "enabled": true,
+      "params": {
+        "material": "Tungsten",
+        "chemistry": "Dry",
+        "time": 60,
+        "stop_on_material": "Silicon"
+      },
+      "_label": "2e. Anisotropic W etch → 5 BL lines"
+    },
+    {
+      "name": "Deposition",
+      "enabled": true,
+      "params": {
+        "material": "Silicon Dioxide",
+        "thickness": 400
+      },
+      "_label": "3a. SiO2 deposition (gap fill)"
+    },
+    {
+      "name": "CMP",
+      "enabled": true,
+      "params": {
+        "target": 2500,
+        "target_material": "Tungsten",
+        "time": 120
+      },
+      "_label": "3b. CMP planarize → bonding surface"
+    },
+    {
+      "name": "Bonding",
+      "enabled": true,
+      "params": {
+        "handle_material": "Silicon",
+        "handle_thickness_nm": 1000,
+        "bonding_material": "Silicon Dioxide",
+        "bonding_layer_nm": 180
+      },
+      "_label": "5. Oxide-to-oxide wafer bonding"
+    },
+    {
+      "name": "Wafer Flip",
+      "enabled": true,
+      "params": {},
+      "_label": "6. Wafer flip"
+    },
+    {
+      "name": "Thinning",
+      "enabled": true,
+      "params": {
+        "target_thickness_nm": 450,
+        "material": "Silicon"
+      },
+      "_label": "7. Backside thinning to 0.45um"
+    },
+    {
+      "name": "Spin Resist",
+      "enabled": true,
+      "params": {
+        "material": "Photoresist",
+        "thickness_nm": 250
+      },
+      "_label": "8a. Spin resist for trench litho"
+    },
+    {
+      "name": "Mask Exposure",
+      "enabled": true,
+      "params": {
+        "pattern": "Lines",
+        "critical_dimension": 360,
+        "pitch": 600,
+        "orientation": 90
+      },
+      "_label": "8b. Litho: trench pattern (between BLs)"
+    },
+    {
+      "name": "Resist Develop",
+      "enabled": true,
+      "params": {
+        "time": 60
+      },
+      "_label": "8c. Develop"
+    },
+    {
+      "name": "Etch",
+      "enabled": true,
+      "params": {
+        "material": "Silicon",
+        "chemistry": "Dry",
+        "time": 90,
+        "stop_on_material": "Silicon Dioxide",
+        "sidewall": 89
+      },
+      "_label": "8d. Trench etch between BLs → FirstSemiconductorPortion"
+    },
+    {
+      "name": "Deposition",
+      "enabled": true,
+      "params": {
+        "material": "Silicon Dioxide",
+        "thickness": 20
+      },
+      "_label": "9a. Air gap SiO2 liner 20nm"
+    },
+    {
+      "name": "Deposition",
+      "enabled": true,
+      "params": {
+        "material": "Silicon Nitride",
+        "thickness": 30,
+        "directionality": 0.9
+      },
+      "_label": "9b. SiN pinch-off seal (directional)"
+    },
+    {
+      "name": "Selective Epitaxy",
+      "enabled": true,
+      "params": {
+        "material": "Silicon",
+        "thickness": 450,
+        "temperature": 750,
+        "seed_rule": "Semiconductor"
+      },
+      "_label": "10. Selective Si epi lateral grow → wide Active Si"
+    }
+  ]
+}
