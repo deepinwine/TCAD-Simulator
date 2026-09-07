@@ -1,148 +1,93 @@
-# -*- coding: utf-8 -*-
-"""M34: Advanced semiconductor demo flow definitions.
+"""Advanced voxel demonstrations composed from the validated core recipes.
 
-每个 flow 是 {name, description, steps: [{name, params}]}，
-通过 tcad_simulator.PROCESS_STEP_FACTORIES 反序列化为可执行 ProcessStep。
+These are portable ProcessStep data, not geometry constructors. The public
+registry is tcad_simulator.load_demo_flows; constants remain import-compatible.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from copy import deepcopy
 
 
-def _flow(name: str, description: str, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """构造标准 demo flow dict。"""
-    return {
-        "name": name,
-        "description": description,
-        "steps": [
-            {"name": s["name"], "enabled": True, "params": s.get("params", {})}
-            for s in steps
-        ],
-    }
+def build_advanced_flows(core):
+    """Derive independent recipes without calling the public loader recursively."""
+    def variant(source, name, description):
+        flow = deepcopy(core[source])
+        flow.update(name=name, description=description)
+        return flow
+
+    def step(name, label, **params):
+        return {"name": name, "instance_name": label, "enabled": True, "params": params}
+
+    def liner(material):
+        return step("Deposition", f"10 nm {material} voxel liner", material=material,
+                    thickness=10.0, method="ALD", coverage="Full wafer", directionality=0.0)
+
+    sti = variant("Basic Trench", "STI (Shallow Trench Isolation)",
+                  "简化浅沟槽隔离：氧化层开窗、硅刻蚀、去胶、理想氧化物填充及CMP；无氮化硅硬掩膜。")
+    sti["steps"].extend([
+        step("Fill", "Fill isolation trench with oxide", material="Silicon Dioxide",
+             max_depth_nm=200.0, direction="top", include_sealed=False),
+        step("Deposition", "Oxide overburden", material="Silicon Dioxide",
+             thickness=30.0, method="CVD", coverage="Full wafer"),
+        step("CMP", "Planarize isolation oxide", target=320.0, pressure=4.0,
+             time=60.0, preston=0.5, selectivity_mode="Manual",
+             selectivity_pairs=[{"material": "Silicon Dioxide", "ratio": 1.0}]),
+    ])
+
+    contact = variant("W Plug + CMP", "Contact Plug (W Fill + CMP)",
+                      "四个介质接触孔：光刻开孔、去胶、体素共形TiN阻挡层、理想W填充及CMP。")
+    contact["steps"].insert(7, liner("TiN"))
+    contact["steps"][-1]["params"]["selectivity_pairs"].append({"material": "TiN", "ratio": 1.0})
+
+    via = deepcopy(contact)
+    via.update(name="BEOL Via (Dual Damascene)",
+               description="简化单大马士革通孔：四个介质孔、体素TaN衬里、理想Cu填充及CMP；不模拟双大马士革整合。")
+    for blob in via["steps"]:
+        params = blob["params"]
+        if params.get("material") == "TiN":
+            params["material"] = "TaN"
+            blob["instance_name"] = "10 nm TaN voxel liner"
+        if params.get("material") == "Tungsten":
+            params["material"] = "Copper"
+            blob["instance_name"] = blob["instance_name"].replace("tungsten", "copper")
+        if blob["name"] == "CMP":
+            blob["instance_name"] = "Polish copper and TaN to oxide stop"
+            params["selectivity_pairs"] = [{"material": material, "ratio": 1.0}
+                                            for material in ("Copper", "TaN")]
+
+    spacer = variant("Spacer Formation", "Spacer Formation (SADP-like)",
+                     "多晶硅芯轴图形化、体素共形氮化硅沉积、方向性回刻、选择性去芯轴，保留两道侧墙。")
+
+    har = variant("Basic Trench", "HAR Trench (DRIE)",
+                  "深沟槽几何演示：氧化层开窗后延长硅干法刻蚀；体素速率代理，不模拟Bosch循环或精确HAR输运。")
+    har["steps"][0]["params"]["thickness_nm"] = 600.0
+    har["steps"][0]["instance_name"] = "600 nm silicon for deep trench"
+    for blob in har["steps"]:
+        if blob["name"] == "Etch" and blob["params"]["material"] == "Silicon":
+            blob["params"].update(time=240.0, selectivity=100.0)
+            blob["instance_name"] = "Deep silicon trench dry etch"
+
+    ald = deepcopy(contact)
+    ald.update(name="ALD Liner + W Fill",
+               description="四个介质孔：体素共形SiN衬里、TiN阻挡层、理想W填充及CMP；ALD为几何近似，不模拟反应动力学。")
+    ald["steps"].insert(7, liner("Silicon Nitride"))
+    ald["steps"][-1]["params"]["selectivity_pairs"].append({"material": "Silicon Nitride", "ratio": 1.0})
+
+    bond = variant("Bonding + Thinning", "Bond + Flip + Thin",
+                   "翻转器件硅晶圆、氧化物键合200 nm硅承载片，再将器件硅减薄至80 nm；简化几何键合。")
+    return {flow["name"]: flow for flow in (sti, contact, via, spacer, har, ald, bond)}
 
 
-# ---- M34 Demo Flows ----
-
-STI_FLOW = _flow(
-    "STI (Shallow Trench Isolation)",
-    "硅衬底氧化→氮化硅硬掩膜→光刻→各向异性刻蚀Si→氧化物填充→CMP",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "Bulk", "material": "Silicon", "thickness_nm": 500}},
-        {"name": "Oxidation/Nitridation", "params": {"temperature": 1000, "time": 300, "thickness_nm": 15}},
-        {"name": "Deposition", "params": {"material": "Silicon Nitride", "thickness_nm": 100}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 300}},
-        {"name": "Mask Exposure", "params": {"pattern": "Lines", "cd_nm": 200}},
-        {"name": "Resist Develop", "params": {"time": 60}},
-        {"name": "Etch", "params": {"material": "Silicon Nitride", "chemistry": "Dry", "time": 60}},
-        {"name": "Etch", "params": {"material": "Silicon", "chemistry": "Dry", "time": 120}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 400}},
-        {"name": "CMP", "params": {"target": 500}},
-    ],
-)
-
-CONTACT_PLUG_FLOW = _flow(
-    "Contact Plug (W Fill + CMP)",
-    "硅衬底→氧化层→光刻接触孔→刻蚀→TiN阻挡层→W填充→CMP",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "Bulk", "material": "Silicon", "thickness_nm": 400}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 300}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 250}},
-        {"name": "Mask Exposure", "params": {"pattern": "Contacts", "cd_nm": 120}},
-        {"name": "Resist Develop", "params": {"time": 60}},
-        {"name": "Etch", "params": {"material": "Silicon Dioxide", "chemistry": "Dry", "time": 90}},
-        {"name": "Deposition", "params": {"material": "TiN", "thickness_nm": 10}},
-        {"name": "Deposition", "params": {"material": "Tungsten", "thickness_nm": 350}},
-        {"name": "CMP", "params": {"target": 700}},
-    ],
-)
-
-BEOL_VIA_FLOW = _flow(
-    "BEOL Via (Dual Damascene)",
-    "介质沉积→光刻通孔→刻蚀→金属填充→CMP（简化单大马士革）",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "SOI", "material": "Silicon", "thickness_nm": 200}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 500}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 300}},
-        {"name": "Mask Exposure", "params": {"pattern": "Vias", "cd_nm": 100}},
-        {"name": "Resist Develop", "params": {"time": 60}},
-        {"name": "Etch", "params": {"material": "Silicon Dioxide", "chemistry": "Dry", "time": 120}},
-        {"name": "Deposition", "params": {"material": "TaN", "thickness_nm": 5}},
-        {"name": "Deposition", "params": {"material": "Copper", "thickness_nm": 600}},
-        {"name": "CMP", "params": {"target": 700}},
-    ],
-)
-
-SPACER_FLOW = _flow(
-    "Spacer Formation (SADP-like)",
-    "芯轴沉积→共形氮化硅→各向异性回刻→去除芯轴→侧墙保留",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "Bulk", "material": "Silicon", "thickness_nm": 400}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 100}},
-        {"name": "Deposition", "params": {"material": "Polysilicon", "thickness_nm": 150}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 200}},
-        {"name": "Mask Exposure", "params": {"pattern": "Lines", "cd_nm": 80}},
-        {"name": "Resist Develop", "params": {"time": 60}},
-        {"name": "Etch", "params": {"material": "Polysilicon", "chemistry": "Dry", "time": 60}},
-        {"name": "Deposition", "params": {"material": "Silicon Nitride", "thickness_nm": 30}},
-        {"name": "Etch", "params": {"material": "Silicon Nitride", "chemistry": "Dry", "time": 30}},
-        {"name": "Etch", "params": {"material": "Polysilicon", "chemistry": "Wet", "time": 60}},
-    ],
-)
-
-HAR_TRENCH_FLOW = _flow(
-    "HAR Trench (Deep Reactive Ion Etch)",
-    "高深宽比深沟槽刻蚀（Bosch-like 简化模型）",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "Bulk", "material": 1, "thickness_nm": 400}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 200}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 500}},
-        {"name": "Mask Exposure", "params": {"pattern": "Lines", "cd_nm": 100}},
-        {"name": "Resist Develop", "params": {"time": 90}},
-        {"name": "Etch", "params": {"material": 1, "chemistry": "Dry", "time": 300}},
-    ],
-)
-
-ALD_LINER_W_FILL_FLOW = _flow(
-    "ALD Liner + W Fill",
-    "深沟槽→ALD SiN衬里→TiN阻挡层→W填充→CMP",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "Bulk", "material": "Silicon", "thickness_nm": 1000}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 200}},
-        {"name": "Spin Resist", "params": {"material": "Photoresist", "thickness_nm": 400}},
-        {"name": "Mask Exposure", "params": {"pattern": "Contacts", "cd_nm": 80}},
-        {"name": "Resist Develop", "params": {"time": 60}},
-        {"name": "Etch", "params": {"material": "Silicon", "chemistry": "Dry", "time": 300}},
-        {"name": "Deposition", "params": {"material": "Silicon Nitride", "thickness_nm": 8}},
-        {"name": "Deposition", "params": {"material": "TiN", "thickness_nm": 5}},
-        {"name": "Deposition", "params": {"material": "Tungsten", "thickness_nm": 400}},
-        {"name": "CMP", "params": {"target": 1200}},
-    ],
-)
-
-BOND_THIN_FLOW = _flow(
-    "Bond + Flip + Thin",
-    "键合第二晶圆→翻转→减薄至停止层",
-    [
-        {"name": "Initialize Wafer", "params": {"wafer_type": "SOI", "material": "Silicon", "thickness_nm": 725}},
-        {"name": "Deposition", "params": {"material": "Silicon Dioxide", "thickness_nm": 50}},
-        {"name": "Wafer Flip", "params": {}},
-        {"name": "Bonding", "params": {"bond_material": "Silicon Dioxide"}},
-        {"name": "Thinning", "params": {"target_thickness_nm": 50, "stop_layer": "Silicon Nitride"}},
-    ],
-)
+def _compatibility_flows():
+    from tcad_simulator import MaterialDatabase, _load_core_demo_flows
+    return build_advanced_flows(_load_core_demo_flows(MaterialDatabase()))
 
 
-DEMO_FLOWS: Dict[str, Dict[str, Any]] = {
-    "Basic Trench": None,  # 由 tcad_simulator 内置提供
-    "Spacer Formation": None,  # 由 tcad_simulator 内置提供
-    "Bonding + Thinning": None,  # 由 tcad_simulator 内置提供
-    "W Plug + CMP": None,  # 由 tcad_simulator 内置提供
-    "Basic BEOL": None,  # 由 tcad_simulator 内置提供
-    "STI (Shallow Trench Isolation)": STI_FLOW,
-    "Contact Plug (W Fill + CMP)": CONTACT_PLUG_FLOW,
-    "BEOL Via (Dual Damascene)": BEOL_VIA_FLOW,
-    "Spacer Formation (SADP-like)": SPACER_FLOW,
-    "HAR Trench (DRIE)": HAR_TRENCH_FLOW,
-    "ALD Liner + W Fill": ALD_LINER_W_FILL_FLOW,
-    "Bond + Flip + Thin": BOND_THIN_FLOW,
-}
+DEMO_FLOWS = _compatibility_flows()
+STI_FLOW = DEMO_FLOWS["STI (Shallow Trench Isolation)"]
+CONTACT_PLUG_FLOW = DEMO_FLOWS["Contact Plug (W Fill + CMP)"]
+BEOL_VIA_FLOW = DEMO_FLOWS["BEOL Via (Dual Damascene)"]
+SPACER_FLOW = DEMO_FLOWS["Spacer Formation (SADP-like)"]
+HAR_TRENCH_FLOW = DEMO_FLOWS["HAR Trench (DRIE)"]
+ALD_LINER_W_FILL_FLOW = DEMO_FLOWS["ALD Liner + W Fill"]
+BOND_THIN_FLOW = DEMO_FLOWS["Bond + Flip + Thin"]

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -86,31 +87,67 @@ class ProcessCadFacade:
                 code="unknown_demo",
                 suggestion=f"可用配方：{sorted(flows)}",
             )
-        self._blobs = [dict(blob) for blob in flows[name].get("steps", [])]
-        self._reset()
+        self._load_recipe(flows[name], demo_resolution=True)
 
     def load_recipe_blob(self, blob: Dict[str, Any]) -> None:
+        self._load_recipe(blob)
+
+    def _load_recipe(self, blob: Dict[str, Any], *, demo_resolution: bool = False) -> None:
+        """Validate and build a candidate before replacing the loaded session."""
+        from recipe_planner.schema import validate_import
+
         steps = blob.get("steps") if isinstance(blob, dict) else None
         if not isinstance(steps, list):
             raise ProcessCadError(
                 "配方载荷缺少 steps 列表",
                 code="invalid_recipe",
             )
-        self._blobs = [dict(step) for step in steps]
-        self._reset()
+        try:
+            domain = blob.get("domain", {})
+            if not isinstance(domain, dict):
+                raise ValueError("domain 必须是对象")
+            effective_domain = {
+                "grid_shape": list(domain.get("grid_shape", self._grid_shape)),
+                "voxel_size_nm": domain.get("voxel_size_nm", self._voxel_nm),
+            }
+            # Validate exactly the steps and complete domain this facade will
+            # publish. Missing/partial domains inherit the current session.
+            effective = {**blob, "steps_full": None, "steps": steps, "domain": effective_domain}
+            validate_import(effective, self._database)
+            shape = tuple(effective_domain["grid_shape"])
+            voxel_nm = float(effective_domain["voxel_size_nm"])
+            if demo_resolution:
+                # grid is the requested X resolution, while the demo owns its
+                # physical extent. Round other axes up to avoid domain clipping.
+                voxel_nm = shape[0] * voxel_nm / self._grid
+                shape = tuple((n * self._grid + shape[0] - 1) // shape[0] for n in shape)
+                validate_import({**effective, "domain": {"grid_shape": list(shape), "voxel_size_nm": voxel_nm}}, self._database)
+            candidate_blobs = deepcopy(steps)
+            candidate = self._tcad.ProcessModel(
+                self._database, grid_shape=shape, voxel_size_nm=voxel_nm, max_workers=1,
+            )
+        except (ValueError, TypeError, MemoryError, OverflowError) as exc:
+            raise ProcessCadError(str(exc), code="invalid_recipe") from exc
 
-    def _reset(self) -> None:
+        self._blobs = candidate_blobs
+        self._grid_shape = shape
+        self._voxel_nm = voxel_nm
+        self._reset(candidate)
+
+    def _reset(self, candidate: Optional[Any] = None) -> None:
+        if candidate is None:
+            candidate = self._tcad.ProcessModel(
+                self._database,
+                grid_shape=self._grid_shape,
+                voxel_size_nm=self._voxel_nm,
+                max_workers=1,
+            )
         if self._model is not None:
             try:
                 self._model.parallel.shutdown()
             except Exception:
                 pass
-        self._model = self._tcad.ProcessModel(
-            self._database,
-            grid_shape=self._grid_shape,
-            voxel_size_nm=self._voxel_nm,
-            max_workers=1,
-        )
+        self._model = candidate
         self._statuses = {}
         for position in range(len(self._blobs)):
             self._statuses[position] = "ready"

@@ -106,7 +106,8 @@ class FacadeCoreTests(unittest.TestCase):
         material_names = [material.name for material in view.materials]
         self.assertIn("Silicon", material_names)
         payload = to_json(view)
-        self.assertEqual(payload["model"]["gridShape"], [GRID, GRID, GRID])
+        self.assertEqual(payload["model"]["gridShape"], [GRID, GRID, 72])
+        self.assertAlmostEqual(payload["model"]["voxelSizeNm"], 640.0 / GRID)
 
     def test_run_all_marks_done_and_increments_revision(self) -> None:
         facade = make_facade()
@@ -141,7 +142,7 @@ class FacadeCoreTests(unittest.TestCase):
         recipe = tcad.load_demo_flows(database)[DEMO]
         model = tcad.ProcessModel(
             database,
-            grid_shape=(GRID, GRID, GRID),
+            grid_shape=(GRID, GRID, 72),
             voxel_size_nm=640.0 / GRID,
             max_workers=1,
         )
@@ -166,6 +167,119 @@ class FacadeCoreTests(unittest.TestCase):
 
         self.assertEqual(facade.occupied_voxels(), direct_occupied)
         self.assertEqual(facade.present_material_names(), direct_materials)
+
+
+class FacadeRecipeLoadingTests(unittest.TestCase):
+    def make_facade(self):
+        facade = make_facade()
+        self.addCleanup(lambda: facade._model.parallel.shutdown())
+        return facade
+
+    def test_har_demo_keeps_declared_extent_at_requested_resolution(self):
+        import numpy as np
+        facade = self.make_facade()
+        facade.load_demo("HAR Trench (DRIE)")
+        summary = facade.model_summary()
+        self.assertEqual(summary.gridShape, (48, 48, 72))
+        self.assertAlmostEqual(summary.voxelSizeNm, 640.0 / 48)
+        facade.run_all()
+        self.assertTrue(all(step.runtimeStatus == "done" for step in facade.recipe()))
+        grid = facade._model.grid
+        silicon = grid == facade._database.id_for("Silicon")
+        field_top = np.flatnonzero(silicon[4, 24])[-1]
+        trench_top = np.flatnonzero(silicon[24, 24])[-1]
+        self.assertGreater((field_top - trench_top) * summary.voxelSizeNm, 300)
+        self.assertTrue(np.all(grid[24, 24, trench_top + 1:] == 0))
+        self.assertTrue(np.any(grid == facade._database.id_for("Silicon Dioxide")))
+
+    def test_explicit_recipe_domain_is_used_exactly_and_input_is_copied(self):
+        facade = self.make_facade()
+        blob = {"domain": {"grid_shape": [40, 32, 80], "voxel_size_nm": 7.5},
+                "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]}
+        facade.load_recipe_blob(blob)
+        self.assertEqual(facade.model_summary().gridShape, (40, 32, 80))
+        self.assertEqual(facade.model_summary().voxelSizeNm, 7.5)
+        self.assertEqual(facade._model.grid.shape, (40, 32, 80))
+        blob["steps"][0]["params"]["thickness_nm"] = -1
+        blob["domain"]["grid_shape"][2] = 1
+        self.assertEqual(facade.recipe()[0].params["thickness_nm"], 300.0)
+        facade.run_all()
+        self.assertEqual(facade.occupied_voxels(), 40 * 32 * 40)
+        facade.load_demo(DEMO)
+        self.assertEqual(facade.model_summary().gridShape, (48, 48, 72))
+        self.assertAlmostEqual(facade.model_summary().voxelSizeNm, 640.0 / 48)
+
+    def test_invalid_recipe_preserves_geometry_recipe_revision_and_timeline(self):
+        import numpy as np
+        facade = self.make_facade()
+        facade.run_to(1)
+        before = to_json(facade.init())
+        timeline = to_json(facade.get_timeline())
+        revision = facade.model_revision()
+        old_model = facade._model
+        grid = old_model.grid.copy()
+        invalid = [
+            {"steps": [{"name": "Unknown process", "params": {}}]},
+            {"steps": [{"name": "Deposition", "params": {"thickness": -1}}]},
+            {"steps": [{"name": "Etch", "params": {"depth_nm": 100}}]},
+            {"steps_full": [{"name": "Initialize Wafer"}],
+             "steps": [{"name": "Unknown process", "params": {}}]},
+            {"domain": {"grid_shape": [32, 32, 32], "voxel_size_nm": 5.0},
+             "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]},
+            {"domain": {"grid_shape": [32, 32, 0]}, "steps": [{"name": "Initialize Wafer"}]},
+            {"domain": {"voxel_size_nm": float("nan")}, "steps": [{"name": "Initialize Wafer"}]},
+            {"steps": [None]},
+            {"steps": []},
+        ]
+        for blob in invalid:
+            with self.subTest(blob=blob):
+                with self.assertRaises(ProcessCadError) as ctx:
+                    facade.load_recipe_blob(blob)
+                self.assertEqual(ctx.exception.code, "invalid_recipe")
+                self.assertIs(facade._model, old_model)
+                np.testing.assert_array_equal(facade._model.grid, grid)
+                self.assertEqual(to_json(facade.init()), before)
+                self.assertEqual(to_json(facade.get_timeline()), timeline)
+                self.assertEqual(facade.model_revision(), revision)
+        self.assertEqual(facade.run_step(2).runtimeStatus, "done")
+
+    def test_model_allocation_failure_preserves_loaded_state(self):
+        from unittest import mock
+        facade = self.make_facade()
+        facade.run_step(0)
+        old_model = facade._model
+        before = to_json(facade.init())
+        timeline = to_json(facade.get_timeline())
+        with mock.patch.object(facade._tcad, "ProcessModel", side_effect=MemoryError("allocation failed")):
+            with self.assertRaises(ProcessCadError) as ctx:
+                facade.load_recipe_blob({"domain": {"grid_shape": [32, 32, 80], "voxel_size_nm": 5.0},
+                                         "steps": [{"name": "Initialize Wafer"}]})
+        self.assertEqual(ctx.exception.code, "invalid_recipe")
+        self.assertIs(facade._model, old_model)
+        self.assertEqual(to_json(facade.init()), before)
+        self.assertEqual(to_json(facade.get_timeline()), timeline)
+        self.assertEqual(facade.run_step(1).runtimeStatus, "done")
+
+    def test_inherited_partial_domain_is_validated_before_state_swap(self):
+        facade = self.make_facade()
+        facade.load_recipe_blob({"domain": {"grid_shape": [32, 32, 32], "voxel_size_nm": 5.0},
+                                 "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 100.0}}]})
+        facade.run_all()
+        old_model = facade._model
+        before = to_json(facade.init())
+        revision = facade.model_revision()
+        for blob in (
+            {"steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]},
+            {"domain": {"grid_shape": [32, 32, 32]},
+             "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]},
+            {"domain": {"voxel_size_nm": 5.0},
+             "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]},
+        ):
+            with self.subTest(blob=blob), self.assertRaises(ProcessCadError):
+                facade.load_recipe_blob(blob)
+            self.assertIs(facade._model, old_model)
+            self.assertEqual(to_json(facade.init()), before)
+            self.assertEqual(facade.model_revision(), revision)
 
 
 def _find_numeric_spec(step: StepView):

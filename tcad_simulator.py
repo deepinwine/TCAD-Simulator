@@ -32391,7 +32391,7 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     return step
 
 
-def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+def _load_core_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
     """Return fresh, portable definitions for the built-in Process CAD flows."""
 
     def _step(
@@ -32796,6 +32796,15 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
             "steps": beol_steps,
         },
     }
+
+
+def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
+    """Return fresh core and advanced recipes through the single public registry."""
+    from demos.flows import build_advanced_flows
+
+    flows = _load_core_demo_flows(material_db)
+    flows.update(build_advanced_flows(flows))
+    return flows
 
 
 def _webui_demo_recipes(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:

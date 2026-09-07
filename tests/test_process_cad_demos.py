@@ -124,7 +124,9 @@ class DemoRecipeRegistryTests(unittest.TestCase):
 
         demos = tcad.load_demo_flows(database)
 
-        self.assertEqual(tuple(demos), DEMO_NAMES)
+        self.assertEqual(tuple(demos)[:len(DEMO_NAMES)], DEMO_NAMES)
+        from demos import DEMO_FLOWS
+        self.assertEqual(set(demos), set(DEMO_NAMES) | set(DEMO_FLOWS))
         for name, recipe in demos.items():
             with self.subTest(demo=name):
                 self.assertEqual(recipe["name"], name)
@@ -247,7 +249,8 @@ class DemoRecipeRegistryTests(unittest.TestCase):
 
                 init_result = session.rpc("init", {}, timeout_s=30.0)["result"]
 
-                self.assertEqual(tuple(init_result["demo_recipes"]), DEMO_NAMES)
+                self.assertEqual(tuple(init_result["demo_recipes"])[:len(DEMO_NAMES)], DEMO_NAMES)
+                self.assertEqual(len(init_result["demo_recipes"]), 12)
                 self.assertEqual(
                     init_result["demo_recipes"],
                     tcad.load_demo_flows(tcad.MaterialDatabase()),

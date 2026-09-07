@@ -44,7 +44,8 @@ class ApiV2Tests(unittest.TestCase):
         )
         self.assertGreater(len(payload["recipe"]), 0)
         self.assertIn("Silicon", [m["name"] for m in payload["materials"]])
-        self.assertEqual(payload["model"]["gridShape"], [GRID, GRID, GRID])
+        self.assertEqual(payload["model"]["gridShape"], [GRID, GRID, 72])
+        self.assertAlmostEqual(payload["model"]["voxelSizeNm"], 640.0 / GRID)
         self.assertEqual(
             set(payload["recipe"][0].keys()),
             {
@@ -59,6 +60,13 @@ class ApiV2Tests(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["code"], "unknown_demo")
+
+    def test_har_init_preserves_physical_domain_through_v2(self) -> None:
+        response = self.client.get("/api/v2/init", params={"demo": "HAR Trench (DRIE)"})
+        self.assertEqual(response.status_code, 200)
+        model = response.json()["model"]
+        self.assertEqual(model["gridShape"], [GRID, GRID, 72])
+        self.assertAlmostEqual(model["voxelSizeNm"] * model["gridShape"][2], 960.0)
 
     def test_manifest_shape_and_stl_binary(self) -> None:
         manifest = self.client.get("/api/v2/preview/manifest").json()
