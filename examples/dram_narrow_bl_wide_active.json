@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "name": "DRAM Narrow BL + Wide Active Si (ideal geometry)",
+  "description": "可回放最终叠层几何：5道窄W线与5道较宽Active Si；不模拟侧向外延、气隙、键合整合或完整DRAM器件。",
+  "parameters": {
+    "domain_x_nm": 3600,
+    "domain_y_nm": 4000,
+    "bitline_pitch_nm": 600,
+    "bitline_width_nm": 180,
+    "bitline_thickness_nm": 120,
+    "num_bitlines": 5,
+    "carrier_si_nm": 1000,
+    "bond_oxide_nm": 360,
+    "cap_oxide_nm": 180,
+    "active_semiconductor_width_nm": 420,
+    "active_semiconductor_height_nm": 450
+  },
+  "domain": {"grid_shape": [58, 64, 45], "voxel_size_nm": 62.5, "threads": 1},
+  "steps": [
+    {"name": "Initialize Wafer", "instance_name": "Carrier silicon", "enabled": true, "params": {"thickness_nm": 1000.0}},
+    {"name": "Deposition", "instance_name": "Bond oxide geometry", "enabled": true, "params": {"material": "Silicon Dioxide", "thickness": 360.0}},
+    {"name": "Deposition", "instance_name": "Tungsten bitline film", "enabled": true, "params": {"material": "Tungsten", "thickness": 120.0}},
+    {"name": "Spin Resist", "instance_name": "Patterning resist", "enabled": true, "params": {"thickness_nm": 250.0}},
+    {"name": "Mask Exposure", "instance_name": "Five narrow bitlines", "enabled": true, "params": {"advanced_enable": 1, "mask_mode": "Custom", "mask_file": "examples/dram_bitline_mask.pgm", "mask_name": "Five narrow bitlines", "dose": 80.0}},
+    {"name": "Resist Develop", "instance_name": "Open spaces between lines", "enabled": true, "params": {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0}},
+    {"name": "Etch", "instance_name": "Pattern Tungsten", "enabled": true, "params": {"material": "Tungsten", "chemistry": "Dry", "time": 60.0, "rate_override": 2400.0, "selectivity": 500.0, "sidewall": 90.0, "stop_on_material": "Silicon Dioxide"}},
+    {"name": "Strip", "instance_name": "Strip bitline resist", "enabled": true, "params": {"materials": "Photoresist"}},
+    {"name": "Fill", "instance_name": "Isolate bitlines with oxide", "enabled": true, "params": {"material": "Silicon Dioxide", "max_depth_nm": 200.0}},
+    {"name": "Deposition", "instance_name": "Oxide cap", "enabled": true, "params": {"material": "Silicon Dioxide", "thickness": 180.0}},
+    {"name": "Deposition", "instance_name": "Ideal active silicon film (not lateral epitaxy)", "enabled": true, "params": {"material": "Silicon", "thickness": 450.0}},
+    {"name": "Spin Resist", "instance_name": "Patterning resist", "enabled": true, "params": {"thickness_nm": 250.0}},
+    {"name": "Mask Exposure", "instance_name": "Five wider active silicon lines", "enabled": true, "params": {"advanced_enable": 1, "mask_mode": "Custom", "mask_file": "examples/dram_active_mask.pgm", "mask_name": "Five wider active silicon lines", "dose": 80.0}},
+    {"name": "Resist Develop", "instance_name": "Open spaces between lines", "enabled": true, "params": {"time": 60.0, "rate": 300.0, "contrast": 3.0, "threshold": 10.0}},
+    {"name": "Etch", "instance_name": "Pattern Silicon", "enabled": true, "params": {"material": "Silicon", "chemistry": "Dry", "time": 60.0, "rate_override": 9000.0, "selectivity": 500.0, "sidewall": 90.0, "stop_on_material": "Silicon Dioxide"}},
+    {"name": "Strip", "instance_name": "Strip active resist", "enabled": true, "params": {"materials": "Photoresist"}}
+  ]
+}
