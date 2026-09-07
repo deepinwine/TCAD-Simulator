@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from .normalizer import MaterialNormalizer, UnitNormalizer
 from .parser import PlannedStep, RecipeDraft, RecipePlanner
 from .validator import RecipeValidator
+from .schema import step_schema
 
 
 def build_llm_prompt(text: str) -> str:
@@ -25,7 +26,8 @@ def build_llm_prompt(text: str) -> str:
     schema = {
         "available_step_types": factories,
         "available_materials": materials,
-        "units": "All lengths in nm, times in seconds, temperatures in °C",
+        "step_parameters": step_schema(db),
+        "units": "Use each parameter's units: lengths nm, times seconds, rate_override Angstrom/min (not nm/s).",
         "output_schema": {
             "steps": [
                 {
@@ -85,11 +87,16 @@ def parse_llm_response(response_text: str) -> RecipeDraft:
         draft.warnings.append(f"LLM 输出不是有效 JSON: {exc}")
         return draft
 
+    if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+        return RecipeDraft(warnings=["LLM 输出必须是包含 steps 数组的对象"])
     draft = RecipeDraft(source_text=data.get("sourceText", ""))
     normalizer = MaterialNormalizer()
     units = UnitNormalizer()
 
     for step_data in data.get("steps", []):
+        if not isinstance(step_data, dict) or not isinstance(step_data.get("params", {}), dict):
+            draft.ambiguities.append("无法解析 LLM 步骤或参数对象")
+            continue
         step_type = str(step_data.get("type", ""))
         params = step_data.get("params", {})
 

@@ -21,12 +21,13 @@ PROCESS_SYNONYMS: dict[str, list[str]] = {
     "Mask Exposure": ["lithography", "exposure", "光刻", "曝光", "pattern", "图形", "掩膜", "photolithography"],
     "CMP": ["cmp", "化学机械抛光", "平坦化", "planarization", "polish", "抛光"],
     "Anneal": ["anneal", "annealing", "退火", "热处理"],
-    "Oxidation": ["oxidation", "oxidize", "氧化", "thermal oxidation", "热氧化"],
+    "Oxidation/Nitridation": ["oxidation", "oxidize", "热氧化", "thermal oxidation"],
     "Spin Resist": ["spin", "coat", "涂胶", "旋涂", "spin coat", "涂布光刻胶"],
-    "Resist Develop": ["develop", "development", "显影", "去胶", "strip"],
+    "Resist Develop": ["develop", "development", "显影"],
+    "Strip": ["去胶", "strip"],
     "Ion Implantation": ["implant", "implantation", "注入", "离子注入"],
     "Selective Epitaxy": ["epitaxy", "selective epitaxy", "外延", "选择生长"],
-    "Fill": ["fill", "填充", "填满"],
+    "Fill": ["fill", "填充", "填满", "填"],
 }
 
 
@@ -87,6 +88,8 @@ class RecipePlanner:
             step = self._parse_segment(segment)
             if step is not None:
                 draft.steps.append(step)
+            else:
+                draft.ambiguities.append(f"无法解析工艺片段：{segment}")
 
         # 如果没有任何 Initialize → 自动加默认
         if draft.steps and not any(s.type == "Initialize Wafer" for s in draft.steps):
@@ -106,7 +109,7 @@ class RecipePlanner:
         return draft
 
     def _segment(self, text: str) -> List[str]:
-        parts = re.split(r'[，。；,;.]\s*', text)
+        parts = re.split(r'[，。；,;]|(?<!\d)\.(?!\d)|(?:然后|随后|接着|并且|并|\bthen\b|\band\b)\s*', text, flags=re.IGNORECASE)
         return [p.strip() for p in parts if p.strip()]
 
     def _parse_segment(self, segment: str) -> Optional[PlannedStep]:
@@ -114,10 +117,16 @@ class RecipePlanner:
 
         # 匹配工艺步骤类型
         step_type = None
-        for canonical, synonyms in PROCESS_SYNONYMS.items():
+        # Action verbs take precedence over substrate context ("on a Si wafer").
+        entries = [(k, v) for k, v in PROCESS_SYNONYMS.items() if k != "Initialize Wafer"]
+        entries.append(("Initialize Wafer", PROCESS_SYNONYMS["Initialize Wafer"]))
+        action_end = 0
+        for canonical, synonyms in entries:
             for syn in synonyms:
-                if syn in lower:
+                match = re.search((r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])") if syn.isascii() else re.escape(syn), lower)
+                if match:
                     step_type = canonical
+                    action_end = match.end()
                     break
             if step_type:
                 break
@@ -135,32 +144,32 @@ class RecipePlanner:
         if length_nm is not None:
             if step_type == "Etch":
                 params["depth_nm"] = length_nm
-            elif step_type in ("Deposition", "Selective Epitaxy", "Oxidation"):
+            elif step_type in ("Deposition", "Selective Epitaxy"):
+                params["thickness"] = length_nm
+            elif step_type in ("Initialize Wafer", "Spin Resist"):
                 params["thickness_nm"] = length_nm
-            elif step_type == "Initialize Wafer":
-                params["thickness_nm"] = length_nm
-            else:
-                params["cd_nm"] = length_nm
+            elif step_type == "Mask Exposure":
+                params["critical_dimension"] = length_nm
             confidence = 0.85
         else:
             if step_type == "Etch":
-                warnings.append("未检测到刻蚀深度——使用默认 100nm")
-                params["depth_nm"] = 100.0
+                warnings.append("未指定完整刻蚀参数；执行器使用工艺模型和时间，而不是目标深度")
                 is_default = True
             elif step_type in ("Deposition", "Selective Epitaxy"):
                 warnings.append("未检测到沉积厚度——使用默认 50nm")
-                params["thickness_nm"] = 50.0
+                params["thickness"] = 50.0
                 is_default = True
             confidence = 0.5
 
         # 提取材料
-        material_name, is_ambiguous = self.materials.normalize(segment)
-        if material_name:
+        material_text = segment[action_end:] if step_type != "Initialize Wafer" else segment
+        material_name, is_ambiguous = self.materials.normalize(material_text)
+        if material_name and step_type in ("Initialize Wafer", "Deposition", "Etch", "Selective Epitaxy", "Spin Resist", "Fill"):
             params["material"] = material_name
             if is_ambiguous:
                 warnings.append(f"材料 '{segment}' 有歧义——默认解析为 {material_name}")
             confidence = min(confidence + 0.1, 0.95)
-        elif step_type in ("Deposition", "Etch", "Oxidation", "Selective Epitaxy"):
+        elif step_type in ("Deposition", "Etch", "Selective Epitaxy"):
             warnings.append("未检测到材料名——使用默认 SiO2")
             params["material"] = "Silicon Dioxide"
             is_default = True
@@ -170,6 +179,14 @@ class RecipePlanner:
         if time_s is not None:
             params["time"] = time_s
             confidence = min(confidence + 0.05, 0.95)
+
+        if step_type == "Mask Exposure":
+            if any(token in lower for token in ("孔", "hole", "contact", "via")):
+                params["pattern"] = "Contacts"
+            elif any(token in lower for token in ("线", "line")):
+                params["pattern"] = "Lines"
+        if step_type == "Strip":
+            params["materials"] = material_name or "Photoresist"
 
         # Etch 特有参数
         if step_type == "Etch":
@@ -203,7 +220,7 @@ class RecipePlanner:
 
         if has_litho:
             litho = next(s for s in draft.steps if s.type == "Mask Exposure")
-            if "cd_nm" not in litho.params and "pattern" not in litho.params:
+            if "critical_dimension" not in litho.params and "pattern" not in litho.params:
                 draft.ambiguities.append(
                     "光刻参数不完整：未指定 CD 或图形类型。建议指定 hole/line 尺寸。"
                 )

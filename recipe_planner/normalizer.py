@@ -15,7 +15,7 @@ MATERIAL_SYNONYMS: dict[str, list[str]] = {
     "Polysilicon": ["poly", "polysilicon", "poly si", "多晶硅"],
     "SiGe": ["sige", "硅锗", "锗硅"],
     "Tungsten": ["w", "tungsten", "钨"],
-    "Titanium Nitride": ["tin", "titanium nitride", "氮化钛"],
+    "TiN": ["tin", "titanium nitride", "氮化钛"],
     "Copper": ["cu", "copper", "铜"],
     "Aluminum": ["al", "aluminum", "aluminium", "铝"],
     "HfO2": ["hfo2", "hafnium oxide", "氧化铪"],
@@ -32,12 +32,13 @@ class MaterialNormalizer:
             if t == canonical.lower():
                 return canonical, False
             for syn in synonyms:
-                if syn in t:
+                pattern = (r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])") if syn.isascii() else re.escape(syn)
+                if re.search(pattern, t):
                     candidates.append((len(syn), canonical))
         if candidates:
             # 最长匹配优先（"sio2" 优先于 "si"）
             candidates.sort(key=lambda c: -c[0])
-            return candidates[0][1], False
+            return candidates[0][1], candidates[0][1] == "Silicon Dioxide" and "oxide" in t and "silicon" not in t and "sio2" not in t
         # "oxide" 可能指 SiO2 也可能是其他氧化物——歧义
         if "oxide" in t and "sio2" not in t and "silicon" not in t:
             return "Silicon Dioxide", True  # 默认 SiO2 但标注歧义
@@ -52,6 +53,7 @@ UNIT_CONVERSIONS = {
     "纳米": 1.0,
     "um": 1000.0,
     "μm": 1000.0,
+    "µm": 1000.0,
     "micron": 1000.0,
     "micrometer": 1000.0,
     "微米": 1000.0,

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Set
 
 from .parser import RecipeDraft
+from .schema import normalize_params, parameter_errors, step_schema
 
 
 def get_known_steps() -> Set[str]:
@@ -76,8 +77,12 @@ class RecipeValidator:
     def validate(self, draft: RecipeDraft) -> Dict[str, Any]:
         """返回 {ok, errors, warnings, mode_recommendations}。"""
         errors: List[str] = []
-        warnings: List[str] = []
+        warnings: List[str] = ["当前 WebUI 使用 Fast / voxel 执行；以下 Accurate 建议仅表示独立 ViennaPS 后端能力，不会自动切换引擎。"]
         recommendations: List[Dict[str, str]] = []
+        schema = step_schema()
+        if not draft.steps:
+            errors.append("配方为空：没有可执行的工艺步骤")
+        errors.extend(a for a in draft.ambiguities if a.startswith("无法解析"))
 
         for i, step in enumerate(draft.steps):
             prefix = f"步骤 {i+1} ({step.type})"
@@ -88,15 +93,10 @@ class RecipeValidator:
                 continue
 
             # 2. 参数范围
-            constraints = self.PARAM_CONSTRAINTS.get(step.type, {})
-            for param, (lo, hi) in constraints.items():
-                if param in step.params:
-                    value = step.params[param]
-                    if isinstance(value, (int, float)):
-                        if not (lo <= value <= hi):
-                            errors.append(
-                                f"{prefix}: 参数 {param}={value} 超出范围 [{lo}, {hi}]"
-                            )
+            issues = parameter_errors(step.type, step.params, schema)
+            errors.extend(f"{prefix}: {issue}" for issue in issues)
+            if not issues:
+                step.params = normalize_params(step.type, step.params)
 
             # 3. 步骤内在 warnings
             for w in step.warnings:
@@ -132,6 +132,12 @@ class RecipeValidator:
 
         # 5. 顺序逻辑
         step_types = [s.type for s in draft.steps]
+        for i, kind in enumerate(step_types):
+            if kind == "Mask Exposure":
+                if "Spin Resist" not in step_types[:i]:
+                    errors.append(f"步骤 {i+1}: Mask Exposure 前需要 Spin Resist，否则曝光不会产生有效掩膜")
+                if "Resist Develop" not in step_types[i+1:]:
+                    errors.append(f"步骤 {i+1}: Mask Exposure 后需要 Resist Develop")
         if "CMP" in step_types:
             cmp_idx = step_types.index("CMP")
             if cmp_idx == 0:
@@ -148,6 +154,7 @@ class RecipeValidator:
 
         return {
             "ok": len(errors) == 0,
+            "execution_backend": "voxel",
             "errors": errors,
             "warnings": warnings,
             "mode_recommendations": recommendations,

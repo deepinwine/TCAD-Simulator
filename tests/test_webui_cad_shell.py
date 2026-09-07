@@ -107,6 +107,8 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
                 manager = self._start_manager(temp_dir)
                 session, _cookie = manager.create_session()
                 session.rpc("recipe_new", {"name": "Dirty statuses"}, timeout_s=30.0)
+                recipe = session.rpc("get_recipe", {}, timeout_s=30.0)["result"]
+                self.assertLess(recipe[0]["params"]["thickness_nm"], 80.0)
                 session.rpc(
                     "recipe_insert_steps",
                     {"steps": [{"name": "Spin Resist"}, {"name": "Etch"}]},

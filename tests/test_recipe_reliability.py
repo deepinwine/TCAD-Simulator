@@ -1,0 +1,160 @@
+import os
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+
+os.environ.setdefault('TCAD_SKIP_QT', '1')
+os.environ.setdefault('MPLBACKEND', 'Agg')
+
+import tcad_simulator as tcad
+from recipe_planner import RecipePlanner, RecipeValidator
+from recipe_planner.parser import PlannedStep, RecipeDraft
+
+
+class RecipeReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.db = tcad.MaterialDatabase()
+        self.validator = RecipeValidator()
+        self.validator._accurate_support = {}
+
+    def test_substrate_context_does_not_swallow_deposition(self):
+        draft = RecipePlanner().parse('在硅衬底上沉积100nm氧化硅')
+        self.assertEqual([s.type for s in draft.steps], ['Initialize Wafer', 'Deposition'])
+        self.assertEqual(draft.steps[1].params['thickness'], 100)
+        self.assertEqual(draft.steps[1].params['material'], 'Silicon Dioxide')
+
+    def test_decimal_and_micro_symbol_survive(self):
+        for unit in ('um', 'µm', 'μm'):
+            with self.subTest(unit=unit):
+                draft = RecipePlanner().parse('初始化硅衬底200nm，沉积0.1 '+unit+' SiO2')
+                self.assertEqual(draft.steps[1].params['thickness'], 100)
+
+    def test_multiple_actions_in_same_clause_preserved(self):
+        draft = RecipePlanner().parse('填W并CMP')
+        self.assertEqual([s.type for s in draft.steps], ['Initialize Wafer', 'Fill', 'CMP'])
+        self.assertEqual(draft.steps[1].params['material'], 'Tungsten')
+
+    def test_empty_or_unknown_recipe_cannot_be_applied(self):
+        for text in ('', '生成DRAM结构，窄埋入式Bitline和宽Active Si'):
+            self.assertFalse(self.validator.validate(RecipePlanner().parse(text))['ok'])
+
+    def test_unparsed_clause_is_not_silently_dropped(self):
+        draft = RecipePlanner().parse('沉积100nm SiO2，然后执行神奇工艺')
+        self.assertFalse(self.validator.validate(draft)['ok'])
+        self.assertTrue(draft.ambiguities)
+
+    def test_runtime_rejects_invalid_params_before_execution(self):
+        for params in ({'time': 'not-a-number'}, {'time': float('nan')}, {'nonsense': 50}, {'material': 'NotARealMaterial'}):
+            draft = RecipeDraft(steps=[PlannedStep('Initialize Wafer'), PlannedStep('Etch', params)])
+            self.assertFalse(self.validator.validate(draft)['ok'], params)
+
+    def test_depth_without_rate_is_not_treated_as_time(self):
+        draft = RecipePlanner().parse('初始化硅衬底200nm，刻蚀50nm硅')
+        result = self.validator.validate(draft)
+        self.assertFalse(result['ok'])
+        self.assertTrue(any('深度' in e or 'depth' in e for e in result['errors']))
+
+    def test_deposition_alias_reaches_real_executor(self):
+        for thickness in (5, 100, 500):
+            step = tcad._webui_deserialize_step({'name': 'Deposition', 'params': {'thickness_nm': thickness}}, self.db)
+            model = tcad.ProcessModel(self.db, grid_shape=(16, 16, 16), voxel_size_nm=20, max_workers=1)
+            try:
+                with patch.object(model, 'deposit_material') as deposit:
+                    step.execute(model)
+                self.assertEqual(deposit.call_args.args[1], thickness)
+            finally:
+                model.parallel.shutdown()
+
+    def test_exposure_alias_and_hole_pattern(self):
+        draft = RecipePlanner().parse('光刻100nm孔')
+        exposure = next(s for s in draft.steps if s.type == 'Mask Exposure')
+        self.assertEqual(exposure.params['critical_dimension'], 100)
+        self.assertEqual(exposure.params['pattern'], 'Contacts')
+        self.assertFalse(self.validator.validate(draft)['ok'])  # no resist/develop
+
+    def test_llm_prompt_contains_actual_parameter_contract(self):
+        from recipe_planner.llm_planner import build_llm_prompt
+        prompt = build_llm_prompt('沉积')
+        self.assertIn('critical_dimension', prompt)
+        self.assertIn('thickness', prompt)
+        self.assertIn('rate_override', prompt)
+
+    def test_english_words_do_not_match_element_substrings(self):
+        from recipe_planner import MaterialNormalizer
+        self.assertIsNone(MaterialNormalizer().normalize('grow new layer')[0])
+
+    def test_reports_actual_webui_execution_mode(self):
+        result = self.validator.validate(RecipePlanner().parse('沉积100nm SiO2'))
+        self.assertEqual(result['execution_backend'], 'voxel')
+        self.assertTrue(any('Fast' in warning for warning in result['warnings']))
+
+    def test_thickness_conflicting_alias_rejected(self):
+        draft = RecipeDraft(steps=[PlannedStep('Initialize Wafer'), PlannedStep('Deposition', {'thickness': 10, 'thickness_nm': 20})])
+        self.assertFalse(self.validator.validate(draft)['ok'])
+
+    def test_import_preflight_rejects_bad_recipe_without_mutation(self):
+        from recipe_planner.schema import validate_import
+        for blob in ({'steps': []}, {'steps': [{'name': 'Made Up'}]},
+                     {'steps': [{'name': 'Etch', 'params': {'time': 'oops'}}]}):
+            with self.subTest(blob=blob), self.assertRaises(ValueError):
+                validate_import(blob, self.db)
+
+    def test_import_rejects_invalid_domain_and_mask(self):
+        from recipe_planner.schema import validate_import
+        for domain in ({'grid_shape': [16, 16, 0], 'voxel_size_nm': 10},
+                       {'grid_shape': [16, 16, 16], 'voxel_size_nm': float('nan')}):
+            with self.assertRaises(ValueError):
+                validate_import({'domain': domain, 'steps': [{'name': 'Initialize Wafer'}]}, self.db)
+        with self.assertRaises(ValueError):
+            validate_import({'steps': [{'name': 'Mask Exposure', 'custom_mask': [['oops']]}]}, self.db)
+
+    def test_custom_exposure_does_not_fall_back_when_mask_file_is_missing(self):
+        step = tcad._webui_deserialize_step({
+            'name': 'Mask Exposure',
+            'params': {'mask_mode': 'Custom', 'mask_file': '/definitely/missing/mask.pgm'},
+        }, self.db)
+        model = tcad.ProcessModel(self.db, grid_shape=(8, 8, 8), voxel_size_nm=20, max_workers=1)
+        self.addCleanup(model.parallel.shutdown)
+        before = model.open_mask.copy()
+        with self.assertRaisesRegex(ValueError, 'mask|Mask'):
+            step.execute(model)
+        np.testing.assert_array_equal(model.open_mask, before)
+
+    def test_strip_is_not_development(self):
+        draft = RecipePlanner().parse('去胶')
+        self.assertEqual(draft.steps[-1].type, 'Strip')
+        self.assertEqual(draft.steps[-1].params['materials'], 'Photoresist')
+
+    def test_real_worker_import_rejects_without_replacing_recipe(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            manager = tcad.WebUIServerManager(host='127.0.0.1', port=0, max_users=1,
+                storage_root=Path(folder), enable_ai_agent=False,
+                default_domain={'grid_shape': [16, 16, 80], 'voxel_size_nm': 10, 'threads': 1})
+            manager.start()
+            try:
+                session, _ = manager.create_session()
+                draft = RecipePlanner().parse('在硅衬底上沉积100nm氧化硅')
+                recipe = {'steps': [{'name': s.type, 'params': s.params} for s in draft.steps]}
+                self.assertTrue(session.rpc('recipe_import', {'recipe': recipe})['ok'])
+                self.assertTrue(session.rpc('run_all', {}, timeout_s=60)['ok'])
+                before = session.rpc('get_recipe', {})['result']
+                failed = session.rpc('recipe_import', {'recipe': {'steps': [{'name': 'Made Up'}]}})
+                self.assertFalse(failed['ok'])
+                self.assertEqual(session.rpc('get_recipe', {})['result'], before)
+            finally:
+                manager.stop()
+
+    def test_oversize_substrate_rejected_before_reset(self):
+        model = tcad.ProcessModel(self.db, grid_shape=(16, 16, 16), voxel_size_nm=20, max_workers=1)
+        try:
+            model.grid[0, 0, 0] = 2
+            step = tcad.InitializeWaferStep(self.db)
+            step.params['thickness_nm'] = 1000
+            with self.assertRaisesRegex(ValueError, 'domain|域'):
+                step.execute(model)
+            self.assertEqual(model.grid[0, 0, 0], 2)
+        finally:
+            model.parallel.shutdown()

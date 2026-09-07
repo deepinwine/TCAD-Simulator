@@ -77,7 +77,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("CMP", types)
         # 验证参数
         dep = next(s for s in draft.steps if s.type == "Deposition")
-        self.assertEqual(dep.params.get("thickness_nm"), 100.0)
+        self.assertEqual(dep.params.get("thickness"), 100.0)
         self.assertEqual(dep.params.get("material"), "Silicon Dioxide")
         etch = next(s for s in draft.steps if s.type == "Etch")
         self.assertEqual(etch.params.get("depth_nm"), 500.0)
@@ -135,7 +135,7 @@ class ValidatorTests(unittest.TestCase):
 
     def test_valid_recipe(self):
         draft = parse_natural_language(
-            "在Si上沉积100 nm SiO2，光刻100 nm，刻蚀50 nm"
+            "在Si上沉积100 nm SiO2，涂胶100nm，光刻100 nm孔，显影，刻蚀SiO2 30秒"
         )
         result = self.v.validate(draft)
         self.assertTrue(result["ok"])
@@ -147,7 +147,8 @@ class ValidatorTests(unittest.TestCase):
         # parse 自动加了 Initialize，所以 Etch 不是第一步
         # 手动构建一个没有 Initialize 的情况
         if "Etch" in [s.type for s in draft.steps]:
-            self.assertTrue(result["ok"])  # auto-inferred init makes it valid
+            self.assertFalse(result["ok"])  # Initial substrate does not supply an etch rate/time.
+            self.assertTrue(any("depth_nm" in error for error in result["errors"]))
 
     def test_mode_recommendations(self):
         draft = parse_natural_language(

@@ -104,13 +104,14 @@ def create_app(
     @app.post("/api/v2/recipe/parse")
     def parse_recipe(request: Dict[str, Any]) -> Dict[str, Any]:
         """M16：自然语言 → 结构化候选 Recipe + 校验结果。"""
-        from recipe_planner import RecipeValidator, parse_natural_language
+        from recipe_planner import RecipeValidator
+        from recipe_planner.llm_planner import plan_recipe
 
         text = str(request.get("text", "")).strip()
         if not text:
             return {"ok": False, "error": "text is required"}
         try:
-            draft = parse_natural_language(text)
+            draft = plan_recipe(text)
             validation = RecipeValidator().validate(draft)
             return {"ok": True, "draft": draft.to_dict(), "validation": validation}
         except Exception as exc:  # noqa: BLE001

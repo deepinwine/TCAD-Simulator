@@ -18978,6 +18978,9 @@ class InitializeWaferStep(ProcessStep):
         )
 
     def execute(self, model: ProcessModel) -> str:
+        requested_nm = float(self.params.get("thickness_nm", 200.0))
+        if not math.isfinite(requested_nm) or requested_nm < 0 or requested_nm > model.grid.shape[2] * model.voxel_size_nm:
+            raise ValueError("衬底厚度超出仿真域 Z 高度；请扩大 domain/grid 或减小厚度，不能静默裁剪")
         model.reset_state()
         wafer_type = str(self.params.get("wafer_type", "Bulk") or "Bulk").strip()
         handle_name = _resolve_material_name_any(model.material_db, self.params.get("material")) or "Silicon"
@@ -19280,8 +19283,14 @@ class ExposureStep(ProcessStep):
                 try:
                     self.image_mask = load_mask_from_file(self.params["mask_file"])
                     mask_override = resample_mask(self.image_mask, model.open_mask.shape)
-                except Exception:
-                    mask_override = None
+                except Exception as exc:
+                    raise ValueError(
+                        f"Unable to load custom mask file {self.params['mask_file']!r}: {exc}"
+                    ) from exc
+            if mask_override is None:
+                raise ValueError(
+                    "Custom Mask Exposure requires a readable mask_file or embedded custom mask"
+                )
 
         def _truthy(v: Any) -> bool:
             if isinstance(v, bool):
@@ -32350,6 +32359,8 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     params_raw = data.get("params_raw", None)
     params = params_raw if isinstance(params_raw, dict) and params_raw else data.get("params", {})
     if isinstance(params, dict):
+        from recipe_planner.schema import normalize_params
+        params = normalize_params(name, params)
         step.params.update(params)
     step.enabled = bool(data.get("enabled", True))
     if isinstance(step, ExposureStep):
@@ -72031,6 +72042,13 @@ def _webui_worker_main(
                 _autosave("auto-saved before new recipe", immediate=True)
                 # New recipe should start minimal: keep only "Initialize Wafer".
                 init_step = InitializeWaferStep(material_db)
+                # A new recipe has no user-specified thickness. Reserve growth
+                # space in small configured domains; imported explicit sizes are
+                # validated, never silently clipped.
+                init_step.params["thickness_nm"] = min(
+                    float(init_step.params["thickness_nm"]),
+                    float(default_domain_shape[2]) * float(default_domain_voxel_nm) * 0.5,
+                )
                 steps = [init_step]
                 _reset_step_runtime_statuses()
                 try:
@@ -72200,6 +72218,8 @@ def _webui_worker_main(
                         pending_warnings.extend([str(w) for w in mig_warn if str(w).strip()][:12])
                 except Exception as exc:
                     raise ValueError(f"Invalid recipe JSON: {exc}")
+                from recipe_planner.schema import validate_import
+                validate_import(recipe_obj, material_db)
                 prev_name = payload.get("current_name")
                 if isinstance(prev_name, str) and prev_name.strip():
                     current_recipe_name = prev_name.strip()[:80]
@@ -74286,8 +74306,9 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "text is required"}, status=400)
                 return
             try:
-                from recipe_planner import RecipeValidator, parse_natural_language
-                draft = parse_natural_language(parse_text)
+                from recipe_planner import RecipeValidator
+                from recipe_planner.llm_planner import plan_recipe
+                draft = plan_recipe(parse_text)
                 validation = RecipeValidator().validate(draft)
                 self._send_json({
                     "ok": True,
@@ -105481,7 +105502,9 @@ def _run_recipe_io_selftest() -> int:
         except Exception:
             pass
         try:
-            steps_syn[9].params.update({"thickness": 35.0})
+            # Exercise a real CMP contract field.  The historical synthetic
+            # fixture used ``thickness``, which CMP never consumed.
+            steps_syn[9].params.update({"target": 35.0})
         except Exception:
             pass
         try:
