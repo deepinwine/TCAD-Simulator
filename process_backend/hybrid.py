@@ -5,11 +5,12 @@
     ProcessStep → ModeSelector → target backend
     → (switch: bridge transfer, atomic — all-or-nothing)
     → target.execute_step(step)  [execution error → try fallback]
-    → target surfaces → canonical scene update  [extraction error → keep old canonical]
+    → target surfaces → canonical scene update  [any failure → rollback]
 """
 from __future__ import annotations
 
 import logging
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
@@ -118,17 +119,18 @@ class HybridBackend(ProcessBackend):
 
     def _bridge_to_accurate(self) -> bool:
         """M25: Transfer canonical scene to ViennaPS Domain via load_geometry_scene."""
-        target = self._get_accurate()
-        if self._canonical_scene is None:
-            return True  # target will initialize from first step
         try:
+            target = self._get_accurate()
+            if self._canonical_scene is None:
+                if not self._update_canonical_scene():
+                    return False
             target.load_geometry_scene(self._canonical_scene)
             return True
-        except ProcessBackendError as exc:
+        except Exception as exc:
             logger.info("bridge to ViennaPS rejected: %s", exc)
             self._routing_log.append({
                 "step": "(bridge)", "mode": FAST,
-                "reason": f"geometry import failed: {exc.code}: {exc}",
+                "reason": f"geometry import failed: {getattr(exc, 'code', 'engine_error')}: {exc}",
             })
             return False
 
@@ -136,7 +138,8 @@ class HybridBackend(ProcessBackend):
         """Transfer canonical scene to VoxelBackend, rebuilding derived state."""
         target = self._fast
         if self._canonical_scene is None:
-            return True
+            return False
+        before = target.snapshot()
         try:
             from geometry_scene.bridge import scene_to_voxel_grid
             summary = target.summary()
@@ -154,38 +157,14 @@ class HybridBackend(ProcessBackend):
             self._rebuild_voxel_derived(model)
             return True
         except Exception as exc:
+            target.restore(before)
             logger.warning("bridge to Voxel failed: %s", exc)
             return False
 
     @staticmethod
     def _rebuild_voxel_derived(model) -> None:
-        """Rebuild VoxelBackend derived caches after grid replacement.
-
-        ISSUE-002 fix: height_map is the top-Z index per (x,y) column.
-        Must reverse along Z (axis=2), not X (axis=0).
-        """
-        try:
-            if hasattr(model, 'height_map') and model.height_map is not None:
-                import numpy as np
-                void_id = 0
-                occupied = model.grid != void_id  # (nx, ny, nz)
-                # For each (x,y) column, find the highest z with material
-                # occupied.any(axis=2) → has any material in this column
-                # occupied[:, :, ::-1] → reverse Z axis (top first)
-                # argmax finds first True from top → index in reversed array
-                # Convert back to original z index: nz - 1 - reversed_idx
-                nz = occupied.shape[2]
-                reversed_argmax = np.argmax(occupied[:, :, ::-1], axis=2)
-                has_material = occupied.any(axis=2)
-                model.height_map = np.where(
-                    has_material,
-                    nz - 1 - reversed_argmax,  # convert reversed→original index
-                    -1,  # no material
-                ).astype(model.height_map.dtype if hasattr(model.height_map, 'dtype') else int)
-            if hasattr(model, '_ensure_material_z_cache'):
-                model._ensure_material_z_cache()
-        except Exception as exc:
-            logger.debug("derived rebuild partial: %s", exc)
+        """Use native occupied-layer count (top index + 1, empty = 0)."""
+        model._rebuild_height_map()
 
     def _switch_backend(self, target: str) -> str:
         """Atomic backend switch. Returns the actual active name after switch."""
@@ -234,31 +213,28 @@ class HybridBackend(ProcessBackend):
     def execute_step(self, step: Any) -> StepOutcome:
         name = str(getattr(step, "name", ""))
         mode = self._selector.select(name)
-
-        # BLOCK-002: atomic switch — bridge failure keeps current backend
-        actual_mode = self._switch_backend(mode)
-        self._routing_log.append({"step": name, "mode": actual_mode})
-
-        # BLOCK-001: execution and canonical update are isolated
+        before = self.snapshot()
         try:
-            outcome = self._active.execute_step(step)
-        except ProcessBackendError:
-            if actual_mode == ACCURATE:
-                self._routing_log.append({
-                    "step": f"{name} (fallback)", "mode": FAST,
-                })
-                # Switch to FAST with bridge
+            actual_mode = self._switch_backend(mode)
+            self._routing_log.append({"step": name if actual_mode == mode else f"{name} (fallback)", "mode": actual_mode})
+            try:
+                outcome = self._active.execute_step(step)
+            except ProcessBackendError:
+                if actual_mode != ACCURATE:
+                    raise
+                # Retry only execution failure, and only from the pre-step state.
+                self.restore(before)
+                self._routing_log.append({"step": f"{name} (fallback)", "mode": FAST})
                 if self._switch_backend(FAST) == FAST:
                     outcome = self._fast.execute_step(step)
                 else:
-                    raise  # bridge to FAST also failed
-            else:
-                raise
-
-        # Update canonical scene AFTER execution succeeds (BLOCK-001)
-        # Extraction failure does NOT trigger re-execution
-        self._update_canonical_scene()
-        return outcome
+                    raise
+            if not self._update_canonical_scene():
+                raise ProcessBackendError("几何提取失败，已撤销本步骤", code="canonical_update_failed")
+            return outcome
+        except Exception:
+            self.restore(before)
+            raise
 
     # ---- BLOCK-004 fix: versioned snapshot with backend identity ----
 
@@ -267,38 +243,34 @@ class HybridBackend(ProcessBackend):
             "version": SNAPSHOT_VERSION,
             "backend": self._active_name,
             "state": self._active.snapshot(),
-            "scene": self._canonical_scene,
+            "scene": copy.deepcopy(self._canonical_scene),
         }
 
     def restore(self, state: Any) -> None:
-        if isinstance(state, dict) and state.get("version") == SNAPSHOT_VERSION:
-            # New format: explicit version check (BLOCK-004)
-            backend_name = state.get("backend", FAST)
-            if backend_name == ACCURATE:
-                self._active = self._get_accurate()
-                self._active_name = ACCURATE
-            else:
-                self._active = self._fast
-                self._active_name = FAST
-            self._active.restore(state["state"])
-            self._canonical_scene = state.get("scene")
-        elif isinstance(state, dict) and "backend" in state and "state" in state:
-            # Legacy v1 dict without version — try best-effort (BLOCK-004)
-            logger.warning("restoring legacy snapshot without version marker")
-            backend_name = state.get("backend", FAST)
-            if backend_name == ACCURATE:
-                self._active = self._get_accurate()
-                self._active_name = ACCURATE
-            else:
-                self._active = self._fast
-                self._active_name = FAST
-            self._active.restore(state["state"])
-            self._canonical_scene = state.get("scene")
-            self._update_canonical_scene()
+        wrapped = isinstance(state, dict) and ("backend" in state or "version" in state)
+        if wrapped:
+            if state.get("version", SNAPSHOT_VERSION) != SNAPSHOT_VERSION or state.get("backend") not in (FAST, ACCURATE) or "state" not in state:
+                raise ProcessBackendError("无效或不支持的快照格式", code="invalid_snapshot")
+            name, raw = state["backend"], state["state"]
         else:
-            # Raw backend state — restore into current active
-            self._active.restore(state)
-            self._update_canonical_scene()
+            # Legacy raw voxel dicts belong to FAST, never the current ViennaPS domain.
+            name = FAST if isinstance(state, dict) else ACCURATE
+            raw = state
+        target = self._fast if name == FAST else self._get_accurate()
+        previous = target.snapshot() if name == FAST or target._domain is not None else None
+        old_active, old_name, old_scene = self._active, self._active_name, self._canonical_scene
+        try:
+            target.restore(raw)
+            self._active, self._active_name = target, name
+            if wrapped and "scene" in state:
+                self._canonical_scene = copy.deepcopy(state["scene"])
+            elif not self._update_canonical_scene():
+                raise ProcessBackendError("快照几何提取失败", code="invalid_snapshot")
+        except Exception:
+            if previous is not None:
+                target.restore(previous)
+            self._active, self._active_name, self._canonical_scene = old_active, old_name, old_scene
+            raise
 
     def material_surfaces(self, face_limit: int = 20000):
         return self._active.material_surfaces(face_limit)

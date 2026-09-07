@@ -34,10 +34,11 @@ class Issue002HeightMapTests(unittest.TestCase):
 
         HybridBackend._rebuild_voxel_derived(model)
 
-        # Every column with material should have height_map = 5 (top z index)
+        # Native ProcessModel contract: top Z index + 1 (occupied-layer height).
         hm = model.height_map
-        self.assertTrue((hm[:, :] == 5).all(),
-                        f"height_map should be 5 everywhere, got {hm[0,0]}")
+        self.assertTrue((hm[:, :] == 6).all(),
+                        f"height_map should be 6 everywhere, got {hm[0,0]}")
+        backend.shutdown()
 
     def test_height_map_empty_column(self):
         from process_backend.hybrid import HybridBackend
@@ -50,8 +51,8 @@ class Issue002HeightMapTests(unittest.TestCase):
         HybridBackend._rebuild_voxel_derived(model)
 
         hm = model.height_map
-        self.assertTrue((hm == 3).all(),
-                        f"height_map should be 3, got {hm[0,0]}")
+        self.assertTrue((hm == 4).all(),
+                        f"height_map should be 4, got {hm[0,0]}")
         backend.shutdown()
 
 

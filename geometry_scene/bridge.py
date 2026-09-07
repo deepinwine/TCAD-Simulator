@@ -64,7 +64,8 @@ def _voxelize_mesh(
     original Python nested loop.
     """
     nx, ny, nz = len(xs), len(ys), len(zs)
-    crossings = np.zeros((nx, ny, nz), dtype=np.int8)
+    crossings = np.zeros((nx, ny, nz), dtype=bool)
+    column_hits = {}
     # Precompute 2D grid for broadcasting
     PX, PY = np.meshgrid(xs, ys, indexing="ij")  # (nx, ny)
 
@@ -126,10 +127,16 @@ def _voxelize_mesh(
         # Broadcast: crossings[ix, iy, z] += 1 for all z >= z_hit[ix, iy]
         for ix, iy in hit_indices:
             zh = z_hit[ix, iy]
-            crossings[ix, iy, zs >= zh] += 1
+            column_hits.setdefault((ix, iy), []).append(float(zh))
 
     # Even-odd rule: odd crossing count = inside
-    return (crossings % 2) == 1
+    # Adjacent triangles share edges: a ray on the diagonal meets TWO
+    # triangles at the SAME surface. Count that surface once, not twice.
+    for (ix, iy), hits in column_hits.items():
+        ordered = np.sort(hits)
+        unique = ordered[np.r_[True, np.diff(ordered) > 1e-8]]
+        crossings[ix, iy] = (np.searchsorted(unique, zs, side="right") % 2) == 1
+    return crossings
 
 
 def _column_crossing(zs: np.ndarray, z_hit: float) -> np.ndarray:
@@ -211,6 +218,27 @@ def scene_to_viennaps_layers(
                 f"material {mesh.mat_id} has zero/negative thickness "
                 f"({thickness_nm}); refusing to silently skip"
             )
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        # Layer reconstruction only represents a complete rectangular slab.
+        # Inspect triangles, not mesh count: GeometryScene merges equal IDs.
+        face_areas = np.zeros((3, 2))
+        for tri in mesh.triangles:
+            area = np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])) / 2
+            if area <= 1e-10:
+                raise ValueError("degenerate triangle in layer")
+            faces = [(axis, side) for axis in range(3) for side, edge in enumerate((lo[axis], hi[axis]))
+                     if np.allclose(tri[:, axis], edge, atol=1e-7, rtol=0)]
+            if len(faces) != 1:
+                raise ValueError("patterned or disconnected geometry cannot be flattened to layers")
+            face_areas[faces[0]] += area
+        dimensions = hi - lo
+        expected = np.array([dimensions[1]*dimensions[2], dimensions[0]*dimensions[2], dimensions[0]*dimensions[1]])
+        if not np.allclose(face_areas, expected[:, None], rtol=1e-6, atol=1e-7):
+            raise ValueError("open, overlapping or incomplete layer faces")
+        if layers:
+            first_pts = meshes[0].triangles.reshape(-1, 3)
+            if not (np.allclose(lo[:2], first_pts.min(axis=0)[:2]) and np.allclose(hi[:2], first_pts.max(axis=0)[:2])):
+                raise ValueError("lateral pattern or differing layer footprints cannot be preserved")
         is_mask = mesh.mat_id == 4
         layers.append((z_min, mesh.mat_id, thickness_nm, is_mask))
 
@@ -254,6 +282,10 @@ def can_convert_to_viennaps(scene: GeometryScene) -> Tuple[bool, str]:
         if pts.shape[0] < 4:
             return False, f"material {mesh.mat_id} has too few vertices"
 
+    try:
+        scene_to_viennaps_layers(scene)
+    except ValueError as exc:
+        return False, str(exc)
     return True, "ok"
 
 

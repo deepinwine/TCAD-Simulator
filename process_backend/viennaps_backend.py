@@ -137,10 +137,8 @@ class ViennaPSBackend(ProcessBackend):
     def load_geometry_scene(self, scene) -> None:
         """M25: Import canonical GeometryScene into ViennaPS Domain.
 
-        Supports stacked layers via MakeTrench.MaterialLayer (bottom→top).
-        Limited to: substrate + stacked conformal layers + mask.
-        Patterned features (trench/hole) in lateral dimension are NOT preserved
-        in v1 — this is a documented limitation.
+        Supports complete rectangular slabs only, preserving absolute nm bounds.
+        Patterned/open/disconnected surfaces are rejected before changing state.
 
         Raises ProcessBackendError if topology is unsupported.
         """
@@ -154,7 +152,10 @@ class ViennaPSBackend(ProcessBackend):
                 code="unsupported_geometry",
             )
 
-        layers = scene_to_viennaps_layers(scene)
+        try:
+            layers = scene_to_viennaps_layers(scene)
+        except ValueError as exc:
+            raise ProcessBackendError(str(exc), code="unsupported_geometry") from exc
         if not layers:
             raise ProcessBackendError(
                 "GeometryScene has no importable layers",
@@ -164,8 +165,6 @@ class ViennaPSBackend(ProcessBackend):
         ps = self._ps
         # Build domain using MakeTrench constructor 2 (sets up grid + substrate)
         # then add additional layers via insertNextLevelSetAsMaterial
-        first_mat_ps = None
-        first_thickness_um = 0.0
         layer_data = []
         for z_min, mat_id, thickness_nm, is_mask in layers:
             import tcad_simulator as tcad
@@ -185,32 +184,22 @@ class ViennaPSBackend(ProcessBackend):
                     f"Material '{mat_name}' (ID {mat_id}) not in ViennaPS",
                     code="unsupported_material",
                 )
-            if first_mat_ps is None:
-                first_mat_ps = ps_material
-                first_thickness_um = thickness_nm / 1000.0
-            else:
-                layer_data.append((ps_material, thickness_nm / 1000.0))
+            layer_data.append((ps_material, z_min / 1000.0, thickness_nm / 1000.0))
 
         # Substrate via MakeTrench constructor 2 (reliable domain setup)
-        self._domain = ps.Domain()
-        ps.MakeTrench(
-            self._domain,
-            gridDelta=self._grid_nm / 1000.0,
-            xExtent=self._extent_um,
-            yExtent=self._extent_um,
-            trenchWidth=self._extent_um * 2.0,
-            trenchDepth=first_thickness_um,
-            material=first_mat_ps,
-        ).apply()
-
-        # Additional stacked layers: conformal growth from top surface
         import viennals as vls
-        for ps_material, thickness_um in layer_data:
-            top_ls = vls.Domain(self._domain.getLevelSets()[-1])
-            vls.GeometricAdvect(
-                top_ls, vls.SphereDistribution(thickness_um),
-            ).apply()
-            self._domain.insertNextLevelSetAsMaterial(top_ls, ps_material, False)
+        vls.setDimension(3)
+        points = np.concatenate([m.triangles.reshape(-1, 3) for m in scene.meshes]) / 1000.0
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        delta = self._grid_nm / 1000.0
+        bounds = [value for axis in range(3) for value in (lo[axis] - 3*delta, hi[axis] + 3*delta)]
+        candidate = ps.Domain()
+        for ps_material, bottom, thickness in layer_data:
+            level = vls.Domain(bounds, [vls.BoundaryConditionEnum.INFINITE_BOUNDARY]*3, delta)
+            vls.MakeGeometry(level, vls.Box([lo[0], lo[1], bottom], [hi[0], hi[1], bottom+thickness])).apply()
+            candidate.insertNextLevelSetAsMaterial(level, ps_material, True)
+        # Publish only after every layer was successfully constructed.
+        self._domain = candidate
 
     def snapshot(self) -> Any:
         self._require_domain()
@@ -219,7 +208,9 @@ class ViennaPSBackend(ProcessBackend):
         return copy
 
     def restore(self, state: Any) -> None:
-        self._domain = state
+        candidate = self._ps.Domain()
+        candidate.deepCopy(state)
+        self._domain = candidate
 
     def material_surfaces(
         self, face_limit: int = 20000
@@ -240,54 +231,28 @@ class ViennaPSBackend(ProcessBackend):
         if not level_sets:
             return []
 
-        ps = self._ps
+        import viennals as vls
+        vls.setDimension(3)
         for i, level_set in enumerate(level_sets):
             # Get material for this level set
-            try:
-                material = self._domain.getMaterialForLevelSet(i)
-                mat_id = ps_to_mat_id(material, database)
-            except (AttributeError, IndexError):
-                mat_id = None
+            material = self._domain.getMaterialMap().getMaterialAtIdx(i)
+            mat_id = ps_to_mat_id(material, database)
             if mat_id is None:
-                # Fallback: try to identify from domain materials list
-                try:
-                    materials = self._domain.getMaterialsInDomain()
-                    if i < len(materials):
-                        mat_id = ps_to_mat_id(materials[i], database)
-                except Exception:
-                    pass
-            if mat_id is None:
-                continue  # Skip unknown materials rather than mislabel
-
-            try:
-                mesh = self._domain.getLevelSetMesh(i)
-                nodes = np.asarray(mesh.getNodes(), dtype=float)
-                cells = np.asarray(mesh.getTriangles(), dtype=np.int64)
-                if nodes.size == 0 or cells.size == 0:
-                    continue
-                triangles = nodes[cells.reshape(-1, 3)][:, :, :3]
-                if len(triangles) > int(face_limit):
-                    stride = max(1, len(triangles) // int(face_limit))
-                    triangles = triangles[::stride]
-                surfaces.append((mat_id, triangles))
-            except Exception:
-                continue
-
-        if not surfaces:
-            # Fallback: surface mesh of entire domain (single material)
-            mesh = self._domain.getSurfaceMesh()
+                raise ProcessBackendError(f"Unknown ViennaPS material {material}", code="unsupported_material")
+            # ViennaPS stores nested level sets; upper material is the difference,
+            # not the whole enclosing solid. Work on a copy to preserve engine state.
+            layer = vls.Domain(level_set)
+            if i:
+                vls.BooleanOperation(layer, level_sets[i-1], vls.BooleanOperationEnum.RELATIVE_COMPLEMENT).apply()
+            mesh = vls.Mesh()
+            vls.ToSurfaceMesh(layer, mesh).apply()
             nodes = np.asarray(mesh.getNodes(), dtype=float)
             cells = np.asarray(mesh.getTriangles(), dtype=np.int64)
             if nodes.size == 0 or cells.size == 0:
-                return []
+                continue
             triangles = nodes[cells.reshape(-1, 3)][:, :, :3]
-            if len(triangles) > int(face_limit):
-                stride = max(1, len(triangles) // int(face_limit))
-                triangles = triangles[::stride]
-            silicon_id = next(
-                mid for mid, m in database.items() if m.name == "Silicon"
-            )
-            surfaces.append((silicon_id, triangles))
+            # Never stride a canonical mesh: that leaves holes in conversion input.
+            surfaces.append((mat_id, triangles))
 
         return surfaces
 

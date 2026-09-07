@@ -45,7 +45,9 @@ class VoxelRoundTripTests(unittest.TestCase):
         db = tcad.MaterialDatabase()
         model = tcad.ProcessModel(db, grid_shape=(16,16,16), voxel_size_nm=5.0, max_workers=1)
         try:
-            tcad.InitializeWaferStep(db).execute(model)
+            init = tcad.InitializeWaferStep(db)
+            init.params['thickness_nm'] = 40.0
+            init.execute(model)
             surfaces = model.get_material_surfaces(5000)
             names = {mid: m.name for mid, m in db.items()}
             scene = surfaces_um_to_scene(surfaces, names)
@@ -77,7 +79,7 @@ class VoxelRoundTripTests(unittest.TestCase):
         import tcad_simulator as tcad
 
         db = tcad.MaterialDatabase()
-        model = tcad.ProcessModel(db, grid_shape=(32,32,32), voxel_size_nm=5.0, max_workers=1)
+        model = tcad.ProcessModel(db, grid_shape=(32,32,48), voxel_size_nm=20.0, max_workers=1)
         try:
             flow = tcad.load_demo_flows(db)["Basic Trench"]["steps"]
             for blob in flow[:6]:  # 前 6 步 = 到 Etch
@@ -93,7 +95,7 @@ class VoxelRoundTripTests(unittest.TestCase):
             self.assertIn("Silicon", mat_names)
 
             # round-trip 回体素
-            grid = scene_to_voxel_grid(scene, (32,32,32), 5.0)
+            grid = scene_to_voxel_grid(scene, (32,32,48), 20.0)
             si_id = next(mid for mid, m in db.items() if m.name == "Silicon")
             si_voxels = np.count_nonzero(grid == si_id)
             self.assertGreater(si_voxels, 0)
@@ -107,10 +109,12 @@ class VoxelRoundTripTests(unittest.TestCase):
         db = tcad.MaterialDatabase()
         model = tcad.ProcessModel(db, grid_shape=(16,16,16), voxel_size_nm=5.0, max_workers=1)
         try:
-            tcad.InitializeWaferStep(db).execute(model)
+            init = tcad.InitializeWaferStep(db)
+            init.params['thickness_nm'] = 40.0
+            init.execute(model)
             step = tcad.DepositionStep(db)
             step.params["material"] = next(mid for mid,m in db.items() if m.name == "Silicon Dioxide")
-            step.params["thickness_nm"] = 5.0  # 单层体素的薄膜
+            step.params["thickness"] = 5.0  # 单层体素的薄膜
             step.execute(model)
 
             surfaces = model.get_material_surfaces(5000)
@@ -120,8 +124,8 @@ class VoxelRoundTripTests(unittest.TestCase):
             sio2_count = np.count_nonzero(grid == sio2_id)
             # 薄膜可能因体素化丢失，但如果原始体素有，round-trip 后也应保留一些
             original = np.count_nonzero(model.grid == sio2_id)
-            if original > 0:
-                self.assertGreater(sio2_count, 0, "薄 SiO2 层应保留")
+            self.assertGreater(original, 0, "fixture must actually deposit a thin film")
+            self.assertGreater(sio2_count, 0, "薄 SiO2 层应保留")
         finally:
             model.parallel.shutdown()
 

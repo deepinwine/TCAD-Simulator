@@ -72,8 +72,11 @@ class ExecutionIsolationTests(unittest.TestCase):
             return original_surfaces(face_limit)
         backend._active.material_surfaces = failing_surfaces
 
-        # Should succeed (step executed) even though canonical update fails
-        outcome = backend.execute_step(original_step)
+        # Canonical cannot silently remain stale after a successful mutation.
+        before = backend.grid().copy()
+        with self.assertRaises(ProcessBackendError):
+            backend.execute_step(original_step)
+        np.testing.assert_array_equal(backend.grid(), before)
         self.assertEqual(call_count[0], 1)  # Exactly once, not re-executed
         backend.shutdown()
 
@@ -198,15 +201,8 @@ class BridgeValidationTests(unittest.TestCase):
         scene.add(1, _box(0, 0, 20, 100, 100, 30))
         # After merge, mesh has z_min=0, z_max=30 but vertices cluster at [0,10] and [20,30]
         # Bridge v1 detects this via vertex z-distribution gap check
-        try:
-            layers = scene_to_viennaps_layers(scene)
-            # If not rejected, the merged layer spans [0,30] with thickness=30
-            # This is the known limitation documented for M19 improvement
-            # The test verifies the output is at least well-formed
-            self.assertEqual(len(layers), 1)
-            self.assertAlmostEqual(layers[0][2], 30.0)  # thickness spans the gap
-        except ValueError:
-            pass  # If rejected, that's also correct behavior
+        with self.assertRaises(ValueError):
+            scene_to_viennaps_layers(scene)
 
     def test_overlapping_layers_rejected(self):
         from geometry_scene import GeometryScene
@@ -259,6 +255,10 @@ class SnapshotIdentityTests(unittest.TestCase):
         self.assertEqual(state["backend"], FAST)
 
         # Switch to ACCURATE
+        # Exact slab fixture: production marching-cubes rounded edges are not
+        # silently flattened by the conservative import adapter.
+        from geometry_scene import GeometryScene
+        backend._canonical_scene = GeometryScene.from_surfaces([(1, _box(0, 0, 0, 640, 640, 200))])
         backend._switch_backend(ACCURATE)
         self.assertEqual(backend._active_name, ACCURATE)
 
@@ -297,9 +297,12 @@ class RealContinuityTests(unittest.TestCase):
         backend._selector = sel
         steps = _load_steps(backend)
 
-        # FAST: Initialize + Spin Resist
+        # Real patterned etch needs exposure/development, not blanket resist.
         backend.execute_step(steps["Initialize Wafer"])
-        backend.execute_step(steps["Spin Resist"])
+        import tcad_simulator as tcad
+        flow = tcad.load_demo_flows(backend._fast.database)["Basic Trench"]["steps"]
+        for blob in flow[1:6]:
+            backend.execute_step(tcad._webui_deserialize_step(blob, backend._fast.database))
         grid_before_etch = backend._fast.grid().copy()
         self.assertEqual(backend._active_name, FAST)
 

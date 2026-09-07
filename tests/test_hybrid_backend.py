@@ -86,6 +86,9 @@ class HybridBackendTests(unittest.TestCase):
             for blob in flow if blob.get("name") == "Etch"
         )
         backend.execute_step(init)
+        from geometry_scene import GeometryScene
+        from tests.test_m18_review_fixes import _box
+        backend._canonical_scene = GeometryScene.from_surfaces([(1, _box(0, 0, 0, 640, 640, 200))])
         outcome = backend.execute_step(etch)
         log = backend.routing_log
         modes = [entry["mode"] for entry in log]
