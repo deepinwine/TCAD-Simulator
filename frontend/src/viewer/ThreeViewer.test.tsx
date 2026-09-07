@@ -51,6 +51,32 @@ const apiStub = {} as TcadApi;
 afterEach(() => cleanup());
 
 describe('ThreeViewer', () => {
+  it('显示部分加载警告，重试成功后更新材料列表并清除警告', async () => {
+    const loadMeshes = vi.fn()
+      .mockResolvedValueOnce({warnings: ['SiO2 下载失败'], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
+      .mockResolvedValueOnce({warnings: [], materials: [{matId: 2, name: 'SiO2', visible: true, opacity: 1}]});
+    const {runtime} = fakeViewerRuntime({loadMeshes});
+    render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={() => runtime} />);
+    expect(await screen.findByText('SiO2 下载失败')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', {name: '重试加载几何'}));
+    expect(await screen.findByText('SiO2')).toBeVisible();
+    expect(screen.queryByText('SiO2 下载失败')).not.toBeInTheDocument();
+  });
+
+  it('manifest 失败保留材料列表并标示旧几何', async () => {
+    const loadMeshes = vi.fn()
+      .mockResolvedValueOnce({warnings: [], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
+      .mockRejectedValueOnce(new Error('manifest 离线'));
+    const {runtime} = fakeViewerRuntime({loadMeshes});
+    const factory = () => runtime;
+    const view = render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={factory} />);
+    await screen.findByText('Si');
+    view.rerender(<ThreeViewer api={apiStub} refreshToken={2} runtimeFactory={factory} />);
+    await screen.findByText('manifest 离线');
+    expect(screen.getByText('Si')).toBeVisible();
+    expect(screen.getByText(/仍显示上次加载的几何/)).toBeVisible();
+  });
+
   it('相机操作不产生 API 请求，unmount 释放 runtime', async () => {
     const {runtime, calls} = fakeViewerRuntime();
     render(

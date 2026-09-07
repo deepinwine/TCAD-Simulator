@@ -206,7 +206,7 @@ describe('Toolbar 配方管理', () => {
     const nameInput = await screen.findByRole('textbox', {name: '配方名称'});
     fireEvent.change(nameInput, {target: {value: 'My Process'}});
     fireEvent.click(screen.getByRole('button', {name: '新建配方'}));
-    await waitFor(() => expect(api.newRecipe).toHaveBeenCalledWith('My Process'));
+    await waitFor(() => expect(api.newRecipe).toHaveBeenCalledWith('My Process', expect.any(AbortSignal)));
   });
 });
 

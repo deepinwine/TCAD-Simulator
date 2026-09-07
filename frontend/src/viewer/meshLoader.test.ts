@@ -90,6 +90,37 @@ function fakeDependencies(options: FakeOptions = {}) {
 }
 
 describe('createMeshLoader', () => {
+  it('manifest 网络错误向调用者抛出，随后允许相同 token 重试', async () => {
+    const deps = fakeDependencies();
+    const failure = new Error('manifest 离线');
+    deps.fetchManifest.mockRejectedValueOnce(failure);
+    const loader = createMeshLoader(deps);
+    await expect(loader.load(1)).rejects.toBe(failure);
+    await expect(loader.load(1)).resolves.toMatchObject({stale: false, revision: 3});
+  });
+
+  it.each([1, 2])('部分 STL 失败后 token %s 重试失败材料', async retryToken => {
+    const deps = fakeDependencies();
+    deps.fetchStl.mockRejectedValueOnce(new Error('临时失败'));
+    const loader = createMeshLoader(deps);
+    expect((await loader.load(1)).meshes).toHaveLength(1);
+    const recovered = await loader.load(retryToken);
+    expect(recovered.meshes.map(entry => entry.mesh.materialId)).toEqual([1, 2]);
+    expect(recovered.warnings).toEqual([]);
+    expect(recovered.cached).toBe(false);
+  });
+
+  it('被后续请求替代的 manifest 失败保持静默', async () => {
+    const pending = deferred<PreviewManifestView>();
+    const deps = fakeDependencies();
+    deps.fetchManifest.mockImplementationOnce(() => pending.promise);
+    const loader = createMeshLoader(deps);
+    const old = loader.load(1);
+    await loader.load(2);
+    pending.reject(new Error('旧请求失败'));
+    await expect(old).resolves.toMatchObject({stale: true});
+  });
+
   let uniqueGeometry: BufferGeometry;
 
   beforeEach(() => {

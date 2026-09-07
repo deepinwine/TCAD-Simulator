@@ -146,6 +146,81 @@ async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
 
+describe('失败恢复', () => {
+  it('运行及对账均失败时保留原错误并释放 gate，几何仍尝试刷新', async () => {
+    const failure = new TcadApiError('运行网络中断', {status: 0});
+    const recoveryFailure = new TcadApiError('对账离线', {status: 503});
+    const api = apiStub({
+      init: vi.fn().mockResolvedValueOnce(initView).mockRejectedValue(recoveryFailure),
+      runAll: vi.fn().mockRejectedValue(failure),
+      getTimeline: vi.fn().mockRejectedValue(recoveryFailure),
+    });
+    mount(api);
+    await waitUntilReady();
+    const before = captured!.state.previewGeneration;
+    await act(async () => captured!.actions.runAll());
+    expect(captured!.state.globalError).toBe(failure);
+    expect(captured!.state.timelineError).toBe(recoveryFailure);
+    expect(captured!.state.previewGeneration).toBe(before + 1);
+    expect(captured!.state.activeMutation).toBeNull();
+    expect(api.runAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('卸载后迟到的失败对账不得写回状态', async () => {
+    const pending = deferred<InitView>();
+    const api = apiStub({
+      init: vi.fn().mockResolvedValueOnce(initView).mockImplementation(() => pending.promise),
+      runAll: vi.fn().mockRejectedValue(new TcadApiError('失败', {status: 400})),
+    });
+    const view = mount(api);
+    await waitUntilReady();
+    let operation!: Promise<void>;
+    act(() => { operation = captured!.actions.runAll(); });
+    await waitFor(() => expect(api.init).toHaveBeenCalledTimes(2));
+    const before = captured!.state;
+    view.unmount();
+    await act(async () => { pending.resolve({...initView, recipe: []}); await operation; });
+    expect(captured!.state).toBe(before);
+  });
+
+  it('run/all 部分失败后同步成功步骤、模型与预览，保留原步骤错误', async () => {
+    const failure = new TcadApiError('刻蚀失败', {status: 400, details: {stepIndex: 1}});
+    const recoveredModel = {...initView.model, voxelSizeNm: 20};
+    const api = apiStub({
+      init: vi.fn().mockResolvedValueOnce(initView).mockResolvedValue({...initView, model: recoveredModel}),
+      runAll: vi.fn().mockRejectedValue(failure),
+      getTimeline: vi.fn().mockResolvedValue({current: 0, items: [
+        {index: 0, state: 'done', runtimeStatus: 'done', snapshotValid: true},
+        {index: 1, state: 'error', runtimeStatus: 'error', snapshotValid: false},
+      ]}),
+    });
+    mount(api);
+    await waitUntilReady();
+    const before = captured!.state.previewGeneration;
+    await act(async () => captured!.actions.runAll());
+    expect(captured!.state.recipe.map(item => item.runtimeStatus)).toEqual(['done', 'error']);
+    expect(captured!.state.timeline?.current).toBe(0);
+    expect(captured!.state.model).toEqual(recoveredModel);
+    expect(captured!.state.previewGeneration).toBeGreaterThan(before);
+    expect(captured!.state.stepErrors[1]).toBe(failure);
+    expect(api.runAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('导入结果区分失败、gate 拦截与成功', async () => {
+    const api = apiStub({importRecipe: vi.fn().mockRejectedValueOnce(new TcadApiError('导入失败', {status: 400})).mockResolvedValue({recipe: initView.recipe})});
+    mount(api);
+    await waitUntilReady();
+    let result: unknown;
+    await act(async () => { result = await captured!.actions.importRecipe({recipe: {}}); });
+    expect(result).toBe(false);
+    await act(async () => { result = await captured!.actions.importRecipe({recipe: {}}); });
+    expect(result).toBe(true);
+    act(() => { captured!.actions.updateDraft(0, 'dose', 50); });
+    await act(async () => { result = await captured!.actions.importRecipe({recipe: {}}); });
+    expect(result).toBe(false);
+  });
+});
+
 describe('AppStateProvider 掩膜上传', () => {
   it('uploadMask 调用端点并应用嵌套 set_step 结果', async () => {
     const updated = step(0, {
@@ -344,7 +419,7 @@ describe('AppStateProvider recipe management', () => {
     await waitUntilReady();
 
     await captured!.actions.newRecipe('My Recipe');
-    expect(api.newRecipe).toHaveBeenCalledWith('My Recipe');
+    expect(api.newRecipe).toHaveBeenCalledWith('My Recipe', expect.any(AbortSignal));
 
     await captured!.actions.saveRecipe('My Recipe');
     expect(api.saveRecipe).toHaveBeenCalledWith(

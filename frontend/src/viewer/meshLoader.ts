@@ -81,6 +81,7 @@ async function mapWithConcurrency<TIn, TOut>(
 interface CacheEntry {
   revision: number;
   meshes: LoadedMesh[];
+  complete: boolean;
 }
 
 /**
@@ -101,7 +102,7 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
 
   const load = async (token: number, signal?: AbortSignal): Promise<MeshLoadResult> => {
     if (signal?.aborted) return staleResult();
-    if (token === lastToken && cache !== null) {
+    if (token === lastToken && cache?.complete) {
       return {...staleResult(), stale: false, cached: true, ...cache};
     }
 
@@ -109,24 +110,38 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
     abortActive();
     const manifestRequest: PreviewManifestRequest = {mode: STL_MODE, faceLimit: 40000};
     let manifest: PreviewManifestView;
+    const manifestController = new AbortController();
+    activeControllers.add(manifestController);
+    const abortManifest = () => manifestController.abort();
+    signal?.addEventListener('abort', abortManifest);
     try {
-      manifest = await deps.fetchManifest(manifestRequest, signal ?? new AbortController().signal);
-    } catch {
-      return currentGeneration === generation ? staleResult() : staleResult();
+      manifest = await deps.fetchManifest(manifestRequest, manifestController.signal);
+    } catch (error) {
+      if (currentGeneration !== generation || manifestController.signal.aborted
+        || (error instanceof Error && error.name === 'AbortError')) return staleResult();
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', abortManifest);
+      activeControllers.delete(manifestController);
     }
     if (currentGeneration !== generation || signal?.aborted) return staleResult();
 
-    if (cache !== null && cache.revision === manifest.revision) {
+    if (cache?.complete && cache.revision === manifest.revision) {
       lastToken = token;
       return {revision: cache.revision, meshes: cache.meshes, warnings: [], stale: false, cached: true};
     }
 
     const requested = manifest.meshes.filter(entry => entry.visual?.visible !== false);
+    const reusable = new Map(cache?.revision === manifest.revision
+      ? cache.meshes.map(entry => [entry.mesh.materialId, entry]) : []);
     const warnings: string[] = [];
     const meshes = await mapWithConcurrency(
       requested,
       deps.concurrency ?? DEFAULT_CONCURRENCY,
       async (entry): Promise<LoadedMesh | null> => {
+        if (currentGeneration !== generation || signal?.aborted) return null;
+        const existing = reusable.get(entry.materialId);
+        if (existing) return {...existing, mesh: entry, material: toMaterialConfig(entry.visual)};
         const controller = new AbortController();
         activeControllers.add(controller);
         const onExternalAbort = () => controller.abort();
@@ -138,6 +153,7 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
             mode: STL_MODE,
           };
           const bytes = await deps.fetchStl(request, controller.signal);
+          if (currentGeneration !== generation || controller.signal.aborted) return null;
           const geometry = deps.parseStl(bytes);
           ownedGeometries.add(geometry);
           return {mesh: entry, geometry, material: toMaterialConfig(entry.visual)};
@@ -152,14 +168,15 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
       },
     );
 
-    if (currentGeneration !== generation) return staleResult();
+    if (currentGeneration !== generation || signal?.aborted) return staleResult();
     const loaded = meshes.filter((entry): entry is LoadedMesh => entry !== null);
-    cache = {revision: manifest.revision, meshes: loaded};
+    cache = {revision: manifest.revision, meshes: loaded, complete: loaded.length === requested.length};
     lastToken = token;
     return {revision: manifest.revision, meshes: loaded, warnings, stale: false, cached: false};
   };
 
   const dispose = () => {
+    generation += 1;
     abortActive();
     for (const geometry of ownedGeometries) geometry.dispose();
     ownedGeometries.clear();

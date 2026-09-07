@@ -39,6 +39,8 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   const [backend, setBackend] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [orthoActive, setOrthoActive] = useState(false);
   const [clip, setClip] = useState<ClipState>(clipStateAllOff);
   const [materials, setMaterials] = useState<MaterialSummary[]>([]);
@@ -77,6 +79,8 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     setLoadError(null);
     runtime.loadMeshes(refreshToken).then(result => {
       if (cancelled) return;
+      if (result.stale) return;
+      setLoadWarnings(result.warnings);
       setMaterials(result.materials);
       setDisplay(Object.fromEntries(result.materials.map(material => [
         material.matId,
@@ -89,16 +93,11 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
     return () => {
       cancelled = true;
     };
-  }, [refreshToken]);
+  }, [refreshToken, retryAttempt, api, runtimeFactory]);
 
   const retry = useCallback(() => {
-    const runtime = runtimeRef.current;
-    if (runtime === null) return;
-    setLoadError(null);
-    runtime.loadMeshes(refreshToken).catch(error => {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    });
-  }, [refreshToken]);
+    setRetryAttempt(attempt => attempt + 1);
+  }, []);
 
   const toggleProjection = useCallback(() => {
     const runtime = runtimeRef.current;
@@ -281,6 +280,16 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           <ErrorNotice
             title="几何加载失败"
             message={loadError}
+            suggestion={materials.length > 0 ? '仍显示上次加载的几何，可能与当前模型不同。请重试。' : undefined}
+            actionLabel="重试加载几何"
+            onAction={retry}
+          />
+        )}
+        {initError === null && loadError === null && loadWarnings.length > 0 && (
+          <ErrorNotice
+            title="部分材料加载失败"
+            message={loadWarnings.join('；')}
+            suggestion="当前几何不完整，请重试加载缺失材料。"
             actionLabel="重试加载几何"
             onAction={retry}
           />

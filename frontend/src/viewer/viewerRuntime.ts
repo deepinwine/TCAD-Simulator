@@ -34,7 +34,7 @@ export interface ViewerRuntime {
   pickAt(ndcX: number, ndcY: number): PickHit | null;
   setMeasureMarkers(points: MeasureMarkerPoints | null): void;
   fit(): void;
-  loadMeshes(token: number): Promise<{warnings: string[]; materials: MaterialSummary[]}>;
+  loadMeshes(token: number): Promise<{warnings: string[]; materials: MaterialSummary[]; stale?: boolean}>;
   dispose(): void;
 }
 
@@ -370,7 +370,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     async loadMeshes(token: number) {
       const result = await meshLoader.load(token);
       if (result.stale || disposed || group === null) {
-        return {warnings: result.warnings, materials: [] as MaterialSummary[]};
+        return {warnings: result.warnings, materials: [] as MaterialSummary[], stale: true};
       }
       const previous = group.children.slice();
       group.clear();

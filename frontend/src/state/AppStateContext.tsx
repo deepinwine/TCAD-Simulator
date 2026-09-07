@@ -43,7 +43,7 @@ export interface AppStateActions {
   reconcile(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
-  importRecipe(request: {recipe: unknown; name?: string}): Promise<void>;
+  importRecipe(request: {recipe: unknown; name?: string}): Promise<boolean>;
   newRecipe(name: string): Promise<void>;
   saveRecipe(name: string): Promise<void>;
   exportRecipe(): Promise<void>;
@@ -320,15 +320,30 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       if (!mountedRef.current) return;
       if (isAbortError(error, controller.signal)) return;
       const normalized = normalizeError(error);
+      const failedIndex = errorStepIndex(normalized, stateRef.current.recipe, operation, fallbackStepIndex);
       dispatch({
         type: 'run/failed',
-        index: errorStepIndex(
-          normalized,
-          stateRef.current.recipe,
-          operation,
-          fallbackStepIndex,
-        ),
+        index: failedIndex,
         error: normalized,
+      });
+      // run/all、run/to 可以在失败前已完成部分步骤；只读对账，绝不自动重复运行。
+      const generation = ++timelineGenerationRef.current;
+      const [initResult, timelineResult] = await Promise.allSettled([
+        api.init(controller.signal),
+        api.getTimeline(controller.signal),
+      ]);
+      if (!mountedRef.current || controller.signal.aborted
+        || generation !== timelineGenerationRef.current) return;
+      const recoveryError = timelineResult.status === 'rejected'
+        ? normalizeError(timelineResult.reason)
+        : initResult.status === 'rejected' ? normalizeError(initResult.reason) : undefined;
+      timelineErrorRef.current = recoveryError ?? null;
+      dispatch({
+        type: 'run/recovered',
+        index: failedIndex,
+        ...(initResult.status === 'fulfilled' ? {init: initResult.value} : {}),
+        ...(timelineResult.status === 'fulfilled' ? {timeline: timelineResult.value} : {}),
+        ...(recoveryError === undefined ? {} : {error: recoveryError}),
       });
     } finally {
       releaseController(controller);
@@ -534,18 +549,20 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
    * 配方替换（导入/新建）：服务端已重置历史，客户端整体替换并重拉 timeline。
    */
   const replaceRecipe = useCallback(async (
-    operation: () => Promise<RecipeLoadView>,
-  ): Promise<void> => {
-    if (!beginMutation('recipe')) return;
+    operation: (signal: AbortSignal) => Promise<RecipeLoadView>,
+  ): Promise<boolean> => {
+    if (!beginMutation('recipe')) return false;
     const controller = createController();
+    let applied = false;
     try {
-      const view = await operation();
-      if (!mountedRef.current || controller.signal.aborted) return;
+      const view = await operation(controller.signal);
+      if (!mountedRef.current || controller.signal.aborted) return false;
       dispatch({
         type: 'recipe/replaced',
         recipe: view.recipe,
         ...(view.model !== undefined ? {model: view.model} : {}),
       });
+      applied = true;
       const generation = ++timelineGenerationRef.current;
       try {
         const timeline = await api.getTimeline(controller.signal);
@@ -553,38 +570,39 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
           !mountedRef.current
           || controller.signal.aborted
           || generation !== timelineGenerationRef.current
-        ) return;
+        ) return applied;
         timelineErrorRef.current = null;
         dispatch({type: 'timeline/loaded', payload: timeline});
       } catch (timelineError) {
-        if (!mountedRef.current) return;
-        if (isAbortError(timelineError, controller.signal)) return;
-        if (generation !== timelineGenerationRef.current) return;
+        if (!mountedRef.current) return applied;
+        if (isAbortError(timelineError, controller.signal)) return applied;
+        if (generation !== timelineGenerationRef.current) return applied;
         const normalized = normalizeError(timelineError);
         timelineErrorRef.current = normalized;
         dispatch({type: 'timeline/loadFailed', error: normalized});
       }
     } catch (error) {
-      if (!mountedRef.current) return;
-      if (isAbortError(error, controller.signal)) return;
+      if (!mountedRef.current) return applied;
+      if (isAbortError(error, controller.signal)) return applied;
       dispatch({type: 'run/failed', error: normalizeError(error)});
     } finally {
       releaseController(controller);
       finishMutation('recipe');
     }
+    return applied;
   }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   const importRecipe = useCallback((request: {recipe: unknown; name?: string}) => (
-    replaceRecipe(() => api.importRecipe({
+    replaceRecipe(signal => api.importRecipe({
       recipe: request.recipe,
       autosaveCurrent: true,
       ...(request.name === undefined ? {} : {currentName: request.name}),
-    }))
+    }, signal))
   ), [api, replaceRecipe]);
 
-  const newRecipeAction = useCallback((name: string) => (
-    replaceRecipe(() => api.newRecipe(name))
-  ), [api, replaceRecipe]);
+  const newRecipeAction = useCallback(async (name: string): Promise<void> => {
+    await replaceRecipe(signal => api.newRecipe(name, signal));
+  }, [api, replaceRecipe]);
 
   const saveRecipeAction = useCallback(async (name: string): Promise<void> => {
     const controller = createController();

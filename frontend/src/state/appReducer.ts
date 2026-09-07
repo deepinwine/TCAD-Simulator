@@ -88,6 +88,7 @@ export type AppAction =
   | {type: 'run/started'; operation: Exclude<ActiveMutation, null>}
   | {type: 'run/succeeded'; payload: RunView; index?: number}
   | {type: 'run/failed'; index?: number; error: TcadApiError}
+  | {type: 'run/recovered'; index?: number; init?: InitView; timeline?: TimelineView; error?: TcadApiError}
   | {type: 'timeline/loadStarted'}
   | {type: 'timeline/loadCancelled'}
   | {type: 'timeline/loaded'; payload: TimelineView; errorToClear?: TcadApiError}
@@ -322,6 +323,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           recipe,
           stepErrors: {...state.stepErrors, [index]: action.error},
         };
+    }
+    case 'run/recovered': {
+      const timeline = action.timeline === undefined ? null : canonicalizeTimeline(action.timeline);
+      const recipe = action.init?.recipe ?? state.recipe;
+      return {
+        ...state,
+        recipe: updateStepRuntimeStatus(
+          timeline === null ? recipe : applyTimelineStatuses(recipe, timeline), action.index, 'error',
+        ),
+        model: action.init?.model ?? state.model,
+        timeline: timeline ?? state.timeline,
+        timelineStatus: timeline === null ? 'error' : 'ready',
+        timelineError: action.error ?? null,
+        previewGeneration: state.previewGeneration + 1,
+        // 对账只刷新服务端状态；原始运行错误仍留在对应步骤或全局通知中。
+      };
     }
     case 'timeline/loadStarted':
       return {

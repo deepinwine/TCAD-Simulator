@@ -40,12 +40,13 @@ export function RecipeAssistant() {
   const [draft, setDraft] = useState<DraftView | null>(null);
   const [validation, setValidation] = useState<ValidationView | null>(null);
   const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const generate = useCallback(async () => {
     const text = input.trim();
-    if (text === '' || busy) return;
+    if (text === '' || busy || applying) return;
     setBusy(true);
     setError(null);
     setDraft(null);
@@ -79,10 +80,12 @@ export function RecipeAssistant() {
       setError('Recipe 解析服务不可用（需启动 FastAPI /api/v2）');
     }
     setBusy(false);
-  }, [input, busy]);
+  }, [input, busy, applying]);
 
-  const apply = useCallback(() => {
-    if (draft === null || !validation?.ok) return;
+  const apply = useCallback(async () => {
+    if (draft === null || draft.steps.length === 0 || !validation?.ok || busy || applying) return;
+    setApplying(true);
+    setError(null);
     // 把 draft 转换为 recipe blob（与 /api/recipe/import 兼容的格式）
     const recipeBlob = {
       name: 'NL Generated Recipe',
@@ -92,11 +95,21 @@ export function RecipeAssistant() {
         params: step.params,
       })),
     };
-    void actions.importRecipe({recipe: recipeBlob, name: 'NL Recipe'});
-    setDraft(null);
-    setValidation(null);
-    setInput('');
-  }, [draft, validation, actions]);
+    try {
+      const applied = await actions.importRecipe({recipe: recipeBlob, name: 'NL Recipe'});
+      if (applied) {
+        setDraft(null);
+        setValidation(null);
+        setInput('');
+      } else {
+        setError('Recipe 未应用，工艺描述和草稿已保留。请检查错误或未保存的参数后重试。');
+      }
+    } catch {
+      setError('Recipe 导入失败，工艺描述和草稿已保留，请重试。');
+    } finally {
+      setApplying(false);
+    }
+  }, [draft, validation, actions, busy, applying]);
 
   return (
     <section className="recipe-assistant" aria-label="Recipe Assistant">
@@ -112,7 +125,7 @@ export function RecipeAssistant() {
         aria-label="工艺描述"
         placeholder={'描述你的半导体工艺…\n例：在Si上沉积100 nm SiO2，然后光刻100 nm孔，刻蚀500 nm，沉积20 nm SiN，填W并CMP'}
         value={input}
-        disabled={busy}
+        disabled={busy || applying}
         onChange={event => setInput(event.target.value)}
         onKeyDown={event => {
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -125,7 +138,7 @@ export function RecipeAssistant() {
         <button
           type="button"
           className="toolbar-button is-primary"
-          disabled={busy || input.trim() === ''}
+          disabled={busy || applying || input.trim() === ''}
           onClick={() => void generate()}
         >
           {busy ? '解析中…' : '生成 Recipe'}
@@ -134,9 +147,10 @@ export function RecipeAssistant() {
           <button
             type="button"
             className="toolbar-button"
-            onClick={apply}
+            disabled={busy || applying || draft.steps.length === 0}
+            onClick={() => void apply()}
           >
-            应用到 Process Flow
+            {applying ? '应用中…' : '应用到 Process Flow'}
           </button>
         )}
       </div>
@@ -146,6 +160,21 @@ export function RecipeAssistant() {
       {draft !== null && (
         <div className="recipe-draft" role="region" aria-label="Proposed Recipe">
           <h3>Proposed Recipe</h3>
+          {validation !== null && validation.errors.length > 0 && (
+            <div className="recipe-error" role="alert">
+              <h4>验证错误</h4>
+              <ul>{validation.errors.map((message, index) => <li key={index}>{message}</li>)}</ul>
+            </div>
+          )}
+          {(draft.warnings.length > 0 || (validation?.warnings.length ?? 0) > 0) && (
+            <div className="recipe-warnings" role="status">
+              <h4>警告</h4>
+              <ul>{[...draft.warnings, ...(validation?.warnings ?? [])].map((message, index) => (
+                <li key={index}>{message}</li>
+              ))}</ul>
+            </div>
+          )}
+          {draft.steps.length === 0 && <p role="alert">草稿没有可应用的步骤，请补充工艺描述。</p>}
           <ol className="recipe-steps">
             {draft.steps.map((step, index) => (
               <li key={index} className={`recipe-step ${step.isDefault ? 'is-default' : ''}`}>
