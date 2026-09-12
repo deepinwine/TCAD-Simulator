@@ -161,16 +161,20 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 ## M13 — Geometry Bridge (2026-09-02)
 
 **Implemented**: `geometry_scene/bridge.py` — Voxel↔GeometryScene↔ViennaPS 三条 conversion path + `docs/GEOMETRY_BRIDGE.md` 语义约定（nm canonical、+Z up、MaterialDatabase ID）。
-**Integrated**: tests only; HybridBackend has NOT yet adopted the bridge (states drift independently).
-**Known limitation**: even-odd voxelizer volume error ~80% (reference algorithm, not production); cross-backend geometry handoff documented as unimplemented in hybrid.py.
-**Status**: Implemented + Tested (not Integrated into HybridBackend execution path).
+**Integrated**: `HybridBackend` 使用 GeometryScene 作为切换边界，并在执行、恢复、
+桥接或 canonical scene 提取失败时原子回滚。
+**Known limitation**: ViennaPS v1 导入仅接受完整矩形层堆叠；图形化、断开、开口或
+重叠网格会明确回退 Fast，避免不可逆铺平。现有 WebUI 仍直接使用 Fast/voxel。
+**Status**: 安全边界已实现并测试；任意图形的 VTK/level-set 导入仍属后续工作。
 
 ## M14 — ViennaPS Process Expansion (2026-09-02)
 
 **Implemented**: ViennaPSBackend supports Initialize Wafer, Etch-Dry (SF6O2), Wet Etch (IsotropicProcess), Resist Develop, Deposition (conformal GeometricAdvect), Selective Epitaxy (experimental).
 **Integrated**: capabilities() returns structured accurate_support dict.
-**Known limitation**: material_surfaces() returns all geometry as Silicon (BUG-002); _material_from_name() silently defaults unknown to SiO2 (BUG-003).
-**Status**: Implemented + Partially Integrated.
+**Known limitation**: 可选依赖，CI 无 ViennaPS 时跳过真实引擎用例；跨后端只支持
+保守矩形层子集。
+**Status**: 材料映射、绝对坐标、多材料 surface 提取与原子 restore 已验证；
+主 WebUI 尚未切换为 Hybrid 执行器。
 
 ## M15 — Calibration Framework (2026-09-02)
 
@@ -180,21 +184,35 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 
 ## M16 — Natural Language Recipe Parser (2026-09-02)
 
-**Implemented**: `recipe_planner/` — rule-based parser (Chinese/English), MaterialNormalizer (longest-match), UnitNormalizer (nm/µm/Å/s/min), RecipeValidator (step type/param range/order logic/mode recommendation).
-**Known limitation**: RecipeValidator hardcodes KNOWN_STEPS and ACCURATE_SUPPORT (BUG-005); parser cannot handle SADP/bond/flip level complexity.
-**Status**: Implemented + Tested.
+**Implemented**: `recipe_planner/` — 多动作规则解析、边界安全的材料/单位归一化、
+由真实 ParameterSpec 导出的参数契约，以及类型、枚举、材料、有限值和顺序校验。
+**Known limitation**: 无 LLM 时复杂 SADP/键合描述会明确报告歧义，不承诺自动生成。
+**Status**: 主 WebUI 与 v2 接口共用 planner；导入前执行原子预检。
 
 ## M17 — Recipe Assistant Integration (2026-09-02)
 
 **Implemented**: React RecipeAssistant component (textarea → parse → review → apply → import); `/api/recipe/parse` POST endpoint in main WebUI server (tcad_simulator.py); E2E browser verified (NL → 5-step recipe → Run All → 3D).
 **Integrated**: Single-server (no FastAPI dependency); component wired into App.tsx left pane above Process Flow.
-**Validated**: E2E browser test passed (Chinese input, 5 steps, run all, 3D geometry loaded).
+**Validated**: 参数契约与前端错误恢复测试通过；输入示例显式包含涂胶/曝光/显影，
+刻蚀使用时间参数。旧的“任意中文描述生成 5 步并成功运行”不作为当前能力保证。
 **Status**: Implemented + Integrated + Validated.
 
-## M18 — Hybrid Geometry Truth (2026-09-03, in progress)
+## M18 — Hybrid Geometry Truth (2026-09-07, safe subset complete)
 
 **Goal**: Make GeometryScene the canonical state in HybridBackend; enable true FAST↔ACCURATE↔FAST continuity.
-**Bugs to fix**: BUG-001 (layer sort by thickness not z), BUG-007 (hybrid.py docs say unimplemented), BUG-006 (80% tolerance too loose).
+**Completed**: z_min 排序、占据层数 height-map 语义、版本化/旧格式 snapshot、
+执行及 bridge 回滚、退化三角形和不支持拓扑拒绝、绝对坐标与材料 surface 提取。
+**Remaining**: 图形化 Voxel→ViennaPS 无损导入；在完成前按 ADR-023 显式 Fast 回退。
+
+## Structure Reliability Closure (2026-09-07)
+
+- React 对 manifest/部分 STL 失败可见并可重试；Run All 部分失败后只读同步服务端
+  timeline/preview，保留原步骤错误；Recipe Assistant 等待导入成功才清空草稿。
+- 公共 demo registry 为核心 5 项 + 高级 7 项。测试逐步执行且验证开窗、填槽、
+  plug/via、侧墙、深槽和键合层；Fast 几何近似写入每个 demo 描述。
+- DRAM 示例改为 16 个正式 ProcessStep 的可回放理想叠层，使用已标定的 grid=64
+  掩膜、保存每步完整快照，并从最终网格量测 5 条 W 位线与 5 条更宽 Active Si；
+  其他 grid 明确拒绝，不宣称气隙、侧向外延或器件物理。
 
 ## M20–M22 (2026-09-03)
 
@@ -229,20 +247,19 @@ Next step: VTK C++ pipeline or C++ accelerated voxelizer (libtcad_core).
 - Incremental extraction of Worker/frontend/model subdomains; stable CI.
 - Demo-load main-thread stall investigation (~30–60 s, observed 2026-08-28).
 
-## Current Branch State (2026-09-03, M17 complete, M18 in progress)
+## Current Branch State (2026-09-07, structure reliability integration)
 
 | Branch | Commit | Relationship |
 | --- | --- | --- |
 | `origin/main`（FonaTech 公开仓库） | `41a2fcd` | 公开基线（2026-05 README 更新），不含任何 M1–M5 实现 |
-| `backup/main`（deepinwine） | `fc72adf` | **M9 首切片已由所有者授权快进合并**（M8 `f0d6005` + M9 1 提交，2026-09-02） |
-| 本地 `main` | `fc72adf` | 与 `backup/main` 一致 |
-| `codex/m9-viennaps` | `fc72adf` | M9 交付分支（后续切片继续在此分支推进） |
+| `backup/main`（deepinwine） | `58d8a09` | M31 基线；本修复验证后由所有者授权更新 |
+| 本地 `main` | `58d8a09` | 修复合并前与 `backup/main` 一致 |
+| `codex/structure-reliability` | 本文对应提交 | 从 `58d8a09` 分支，承载可靠性修复与回归 |
 
-祖先关系：`41a2fcd ⊂ …M2/M3 提交… ⊂ 31ce391 ⊂ …M4 7 提交… ⊂ 3f7faba`。
+祖先关系：`41a2fcd ⊂ …M2–M17 提交… ⊂ 3f7faba ⊂ …M18–M35 提交… ⊂ 58d8a09`。
 **`origin`（FonaTech）是上游第三方仓库，不归本项目所有者——永远不做同步/推送
 （ADR-010/017）；`backup`（deepinwine）是唯一的开发与发布远端。** 2026-08-31 曾误开
 fork PR #1，已立即关闭。
 
-- Next: M9 首切片经所有者审查后合并 → 补齐 ViennaPS 能力（掩膜刻蚀、多材料
-  堆叠、参数映射标定）或开始 M10 GeometryScene/VTK 桥；旧 WebUI 弃用决定仍
-  留待所有者单独评审（ADR-012）。
+- Next: 在任意图形 GeometryScene→ViennaPS 无损导入和校准数据完成前，保持 WebUI
+  Fast/voxel 执行边界；随后继续 Task 8，不提前弃用旧 WebUI（ADR-012）。

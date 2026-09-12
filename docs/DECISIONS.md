@@ -128,3 +128,16 @@ Rule: evolution is additive-only; endpoints and fields React consumes must be li
 `tests/test_webui_cad_shell.py::M2ApiContractTests` in the same change; methods are part
 of the contract (wrong-method requests 404); binary endpoints stay binary; deprecation
 only behind M4's versioned facade, never before React parity (M5).
+
+ADR-023 — 配方与几何变更必须可执行、可验证、原子提交（2026-09-07）。
+Reason: 旧自然语言解析器会丢动作并输出执行器不识别的参数；部分网格下载、
+配方导入和 Hybrid 切换失败后仍可能展示旧几何，形成「成功但只有硅块」的假象。
+Rules:
+- Recipe 参数以 `ProcessStep.parameter_specs()` 和少量已登记的兼容扩展为唯一约束；
+  仅迁移物理含义一致的别名，禁止把目标深度猜成刻蚀时间。
+- 配方及 domain 在替换会话状态前完整校验；模型分配、步骤执行、后端切换与
+  canonical scene 提取失败时回滚，不发布半完成状态。
+- Fast/voxel 是现有 WebUI 的实际执行后端。Accurate 推荐仅表示 ViennaPS 能力；
+  只有可证明无损的矩形层堆叠允许跨后端导入，图形化结构必须显式回退。
+- Demo 和示例必须通过正式 ProcessStep 回放并量测输出几何；不得吞异常、直接
+  写体素网格或用输入常量冒充测量结果，描述必须注明几何代理的适用范围。
