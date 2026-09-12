@@ -51,6 +51,17 @@ class RecipeReliabilityTests(unittest.TestCase):
         self.assertFalse(self.validator.validate(draft)['ok'])
         self.assertTrue(draft.ambiguities)
 
+    def test_overlapping_action_synonyms_resolve_to_longest_match(self):
+        for text in ('选择生长50nm SiGe', 'selective epitaxy 50nm SiGe'):
+            with self.subTest(text=text):
+                draft = RecipePlanner().parse(text)
+                self.assertEqual(
+                    [step.type for step in draft.steps],
+                    ['Initialize Wafer', 'Selective Epitaxy'],
+                )
+                self.assertEqual(draft.steps[1].params['thickness'], 50)
+                self.assertFalse(draft.ambiguities)
+
     def test_assistant_placeholder_is_executable(self):
         from pathlib import Path
         import re

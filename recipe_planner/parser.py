@@ -119,27 +119,52 @@ class RecipePlanner:
         step_type = None
         # Action verbs take precedence over substrate context ("on a Si wafer").
         entries = [(k, v) for k, v in PROCESS_SYNONYMS.items() if k != "Initialize Wafer"]
-        actions = set()
+        action_matches: list[tuple[int, int, str]] = []
         for canonical, synonyms in entries:
             for syn in synonyms:
                 pattern = (r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])") if syn.isascii() else re.escape(syn)
-                if re.search(pattern, lower):
-                    actions.add(canonical)
+                action_matches.extend(
+                    (match.start(), match.end(), canonical)
+                    for match in re.finditer(pattern, lower)
+                )
+
+        # A specific synonym may contain a generic one (for example
+        # "选择生长" contains the Deposition synonym "生长").  Keep the
+        # longest match for each overlapping span before deciding whether the
+        # clause really contains multiple actions.
+        selected_matches: list[tuple[int, int, str]] = []
+        for candidate in sorted(
+            action_matches,
+            key=lambda item: (-(item[1] - item[0]), item[0], item[2]),
+        ):
+            start, end, _canonical = candidate
+            if any(start < kept_end and kept_start < end
+                   for kept_start, kept_end, _ in selected_matches):
+                continue
+            selected_matches.append(candidate)
+
+        actions = {canonical for _, _, canonical in selected_matches}
         if len(actions) > 1:
             # No reliable clause boundary: reject instead of binding one action
             # to another action's material or thickness.
             return None
-        entries.append(("Initialize Wafer", PROCESS_SYNONYMS["Initialize Wafer"]))
+
         action_end = 0
-        for canonical, synonyms in entries:
-            for syn in synonyms:
-                match = re.search((r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])") if syn.isascii() else re.escape(syn), lower)
+        if selected_matches:
+            first_match = min(selected_matches, key=lambda item: item[0])
+            action_end = first_match[1]
+            step_type = first_match[2]
+        else:
+            for syn in PROCESS_SYNONYMS["Initialize Wafer"]:
+                match = re.search(
+                    (r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])")
+                    if syn.isascii() else re.escape(syn),
+                    lower,
+                )
                 if match:
-                    step_type = canonical
+                    step_type = "Initialize Wafer"
                     action_end = match.end()
                     break
-            if step_type:
-                break
 
         if step_type is None:
             return None
