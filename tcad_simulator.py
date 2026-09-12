@@ -18978,16 +18978,14 @@ class InitializeWaferStep(ProcessStep):
         )
 
     def execute(self, model: ProcessModel) -> str:
-        requested_nm = float(self.params.get("thickness_nm", 200.0))
-        if not math.isfinite(requested_nm) or requested_nm < 0 or requested_nm > model.grid.shape[2] * model.voxel_size_nm:
-            raise ValueError("衬底厚度超出仿真域 Z 高度；请扩大 domain/grid 或减小厚度，不能静默裁剪")
-        model.reset_state()
+        from recipe_planner.schema import validate_wafer_stack
+        total_nm, box_nm, dev_nm = validate_wafer_stack(
+            self.params,
+            capacity_nm=model.grid.shape[2] * model.voxel_size_nm,
+        )
         wafer_type = str(self.params.get("wafer_type", "Bulk") or "Bulk").strip()
         handle_name = _resolve_material_name_any(model.material_db, self.params.get("material")) or "Silicon"
-        total_nm = float(self.params.get("thickness_nm", 200.0) or 0.0)
         voxel_nm = float(max(model.voxel_size_nm, 1e-6))
-        box_nm = float(self.params.get("box_thickness_nm", 0.0) or 0.0)
-        dev_nm = float(self.params.get("device_thickness_nm", 0.0) or 0.0)
         if wafer_type != "SOI":
             box_nm = 0.0
             dev_nm = 0.0
@@ -19002,22 +19000,13 @@ class InitializeWaferStep(ProcessStep):
             box_layers = max(0, int(round(max(box_nm, 0.0) / voxel_nm)))
             dev_layers = max(0, int(round(max(dev_nm, 0.0) / voxel_nm)))
             nz = int(model.grid.shape[2])
-            # Clamp within domain; preserve at least 1 handle layer.
             if handle_layers + box_layers + dev_layers > nz:
-                overflow = (handle_layers + box_layers + dev_layers) - nz
-                # First trim device, then BOX, then handle.
-                trim_dev = min(dev_layers, overflow)
-                dev_layers -= trim_dev
-                overflow -= trim_dev
-                trim_box = min(box_layers, overflow)
-                box_layers -= trim_box
-                overflow -= trim_box
-                if overflow > 0:
-                    handle_layers = max(1, handle_layers - overflow)
+                raise ValueError("SOI 离散层数超出仿真域 Z 高度；请扩大 domain 或调整层厚")
 
             handle_id = int(model.material_db.id_for(handle_name))
             box_id = int(model.material_db.id_for(box_name))
             dev_id = int(model.material_db.id_for(dev_name))
+            model.reset_state()
             model.grid[:, :, :handle_layers] = np.uint16(handle_id)
             z = handle_layers
             if box_layers > 0:
@@ -19033,6 +19022,7 @@ class InitializeWaferStep(ProcessStep):
             model.substrate_thickness_nm = float(handle_layers) * voxel_nm
             mat_name = f"SOI: {handle_name}/{box_name}/{dev_name}"
         else:
+            model.reset_state()
             model.build_substrate(handle_name, total_nm)
             mat_name = handle_name
         # Temperature field is optional (allocated on demand by thermal solvers); keep a scalar hint only.

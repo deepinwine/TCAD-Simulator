@@ -150,6 +150,63 @@ class RecipeReliabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_import({'steps': [{'name': 'Mask Exposure', 'custom_mask': [['oops']]}]}, self.db)
 
+    def test_soi_layers_cannot_exceed_total_thickness_or_mutate_model(self):
+        from recipe_planner.schema import validate_import
+        params = {
+            'wafer_type': 'SOI',
+            'thickness_nm': 200,
+            'box_thickness_nm': 500,
+            'device_thickness_nm': 500,
+        }
+        blob = {
+            'domain': {'grid_shape': [16, 16, 64], 'voxel_size_nm': 10},
+            'steps': [{'name': 'Initialize Wafer', 'params': params}],
+        }
+        with self.assertRaisesRegex(ValueError, 'SOI|BOX|厚度'):
+            validate_import(blob, self.db)
+
+        step = tcad._webui_deserialize_step(blob['steps'][0], self.db)
+        model = tcad.ProcessModel(
+            self.db, grid_shape=(16, 16, 64), voxel_size_nm=10, max_workers=1,
+        )
+        self.addCleanup(model.parallel.shutdown)
+        before_grid = model.grid.copy()
+        before_height = model.height_map.copy()
+        before_thickness = model.substrate_thickness_nm
+        with self.assertRaisesRegex(ValueError, 'SOI|BOX|厚度'):
+            step.execute(model)
+        np.testing.assert_array_equal(model.grid, before_grid)
+        np.testing.assert_array_equal(model.height_map, before_height)
+        self.assertEqual(model.substrate_thickness_nm, before_thickness)
+
+    def test_prepare_import_preserves_legacy_domain_and_step_fallbacks(self):
+        from recipe_planner.schema import prepare_import
+        cases = (
+            {
+                'model': {'grid_shape': [12, 13, 40], 'voxel_size_nm': 7},
+                'steps': [{'name': 'Initialize Wafer', 'params': {'thickness_nm': 200}}],
+            },
+            {
+                'domain': {'threads': 1},
+                'model': {'grid_shape': [12, 13, 40], 'voxel_size_nm': 7},
+                'steps_full': [],
+                'steps': [{'name': 'Initialize Wafer', 'params': {'thickness_nm': 200}}],
+            },
+        )
+        for blob in cases:
+            with self.subTest(blob=blob):
+                candidate, rebuilt = prepare_import(
+                    blob,
+                    self.db,
+                    grid_shape=(32, 32, 32),
+                    voxel_size_nm=10,
+                    threads=2,
+                )
+                self.addCleanup(candidate.parallel.shutdown)
+                self.assertEqual(candidate.grid.shape, (12, 13, 40))
+                self.assertEqual(candidate.voxel_size_nm, 7)
+                self.assertEqual(len(rebuilt), 1)
+
     def test_custom_exposure_does_not_fall_back_when_mask_file_is_missing(self):
         step = tcad._webui_deserialize_step({
             'name': 'Mask Exposure',

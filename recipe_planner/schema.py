@@ -95,6 +95,41 @@ def parameter_errors(name, params, schema=None, material_db=None):
     return errors
 
 
+def validate_wafer_stack(params, *, capacity_nm=None):
+    """Validate coupled Initialize Wafer thicknesses before any model reset."""
+    if not isinstance(params, dict):
+        raise ValueError("Initialize Wafer params 必须是对象")
+
+    def finite_nonnegative(key, default):
+        value = params.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"Initialize Wafer 参数 {key} 必须是数值")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Initialize Wafer 参数 {key} 必须是有限非负数")
+        return float(value)
+
+    total_nm = finite_nonnegative("thickness_nm", 200.0)
+    if capacity_nm is not None and total_nm > float(capacity_nm):
+        raise ValueError("Initialize Wafer 厚度超出配方 domain 的 Z 高度")
+
+    box_nm = finite_nonnegative("box_thickness_nm", 0.0)
+    device_nm = finite_nonnegative("device_thickness_nm", 0.0)
+    wafer_type = str(params.get("wafer_type", "Bulk") or "Bulk").strip()
+    if wafer_type == "SOI" and (box_nm > 0.0 or device_nm > 0.0):
+        if box_nm + device_nm >= total_nm:
+            raise ValueError("SOI 的 BOX 与 device 厚度之和必须小于总厚度，以保留 handle 层")
+    return total_nm, box_nm, device_nm
+
+
+def _import_steps(blob):
+    """Use the first non-empty legacy/current recipe list, in wire priority order."""
+    for key in ("steps_full", "steps", "recipe"):
+        value = blob.get(key)
+        if isinstance(value, list) and value:
+            return value
+    raise ValueError("导入配方必须包含非空步骤列表")
+
+
 def validate_import(blob, material_db):
     """Preflight before autosave/reset; no replacement with a default recipe."""
     for domain_key in ("domain", "model"):
@@ -109,21 +144,14 @@ def validate_import(blob, material_db):
             voxel = domain["voxel_size_nm"]
             if isinstance(voxel, bool) or not isinstance(voxel, Real) or not math.isfinite(voxel) or voxel <= 0:
                 raise ValueError("domain.voxel_size_nm 必须是有限正数")
-    steps = next((blob[k] for k in ("steps_full", "steps", "recipe") if isinstance(blob.get(k), list)), None)
-    if not steps:
-        raise ValueError("导入配方必须包含非空步骤列表")
+    steps = _import_steps(blob)
     schema = step_schema(material_db)
     domain = blob.get("domain") or blob.get("model") or {}
-    if isinstance(domain, dict) and isinstance(domain.get("grid_shape"), (list, tuple)) and isinstance(domain.get("voxel_size_nm"), Real):
+    capacity_nm = None
+    if (isinstance(domain, dict)
+            and isinstance(domain.get("grid_shape"), (list, tuple))
+            and isinstance(domain.get("voxel_size_nm"), Real)):
         capacity_nm = domain["grid_shape"][2] * domain["voxel_size_nm"]
-        for step in steps:
-            if isinstance(step, dict) and step.get("name") == "Initialize Wafer":
-                step_params = step.get("params_raw") or step.get("params") or {}
-                if not isinstance(step_params, dict):
-                    raise ValueError("params 必须是对象")
-                thickness = step_params.get("thickness_nm", 200.0)
-                if isinstance(thickness, Real) and math.isfinite(thickness) and thickness > capacity_nm:
-                    raise ValueError("Initialize Wafer 厚度超出配方 domain 的 Z 高度")
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ValueError(f"步骤 {i+1} 必须是对象")
@@ -144,6 +172,8 @@ def validate_import(blob, material_db):
         params = step.get("params_raw") or step.get("params", {})
         # Files and mask labels are existing serialized exposure metadata.
         checked = params
+        if name == "Initialize Wafer":
+            validate_wafer_stack(checked, capacity_nm=capacity_nm)
         errors = parameter_errors(name, checked, schema, material_db)
         if errors:
             raise ValueError(f"步骤 {i+1} ({name}): {'; '.join(errors)}")
@@ -157,17 +187,19 @@ def prepare_import(blob, material_db, *, grid_shape, voxel_size_nm, threads=1, r
     tcad = runtime or tcad
     candidate_blob = deepcopy(blob)
     validate_import(candidate_blob, material_db)
-    domain = candidate_blob.get("domain") or candidate_blob.get("model") or {}
-    effective = {"grid_shape": domain.get("grid_shape", list(grid_shape)),
-                 "voxel_size_nm": domain.get("voxel_size_nm", voxel_size_nm),
-                 "threads": domain.get("threads", threads)}
+    domain = candidate_blob.get("domain") or {}
+    legacy_model = candidate_blob.get("model") or {}
+    effective = {
+        "grid_shape": domain.get("grid_shape") or legacy_model.get("grid_shape") or list(grid_shape),
+        "voxel_size_nm": domain.get("voxel_size_nm") or legacy_model.get("voxel_size_nm") or voxel_size_nm,
+        "threads": domain.get("threads") or legacy_model.get("threads") or threads,
+    }
     candidate_blob["domain"] = effective
     validate_import(candidate_blob, material_db)
     count = effective["threads"]
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ValueError("domain.threads 必须是正整数")
-    blobs = next(candidate_blob[k] for k in ("steps_full", "steps", "recipe")
-                 if isinstance(candidate_blob.get(k), list))
+    blobs = _import_steps(candidate_blob)
     rebuilt = []
     for data in blobs:
         step = tcad._webui_deserialize_step(data, material_db)
