@@ -164,8 +164,11 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 **Integrated**: `HybridBackend` 使用 GeometryScene 作为切换边界，并在执行、恢复、
 桥接或 canonical scene 提取失败时原子回滚。
 **Known limitation**: ViennaPS v1 导入仅接受完整矩形层堆叠；图形化、断开、开口或
-重叠网格会明确回退 Fast，避免不可逆铺平。现有 WebUI 仍直接使用 Fast/voxel。
-**Status**: 安全边界已实现并测试；任意图形的 VTK/level-set 导入仍属后续工作。
+重叠网格会明确回退 Fast，避免不可逆铺平。Fast→Accurate 只对横向完全一致的
+体素列生成解析矩形 slab，不使用 marching-cubes 表面猜测层边界。现有 WebUI
+仍直接使用 Fast/voxel。
+**Status**: 平坦衬底的真实 Fast→Accurate 路径与安全边界已实现并测试；任意图形的
+VTK/level-set 导入仍属后续工作。
 
 ## M14 — ViennaPS Process Expansion (2026-09-02)
 
@@ -191,7 +194,7 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 
 ## M17 — Recipe Assistant Integration (2026-09-02)
 
-**Implemented**: React RecipeAssistant component (textarea → parse → review → apply → import); `/api/recipe/parse` POST endpoint in main WebUI server (tcad_simulator.py); E2E browser verified (NL → 5-step recipe → Run All → 3D).
+**Implemented**: React RecipeAssistant component (textarea → parse → review → apply → import); `/api/recipe/parse` POST endpoint in main WebUI server (tcad_simulator.py)。
 **Integrated**: Single-server (no FastAPI dependency); component wired into App.tsx left pane above Process Flow.
 **Validated**: 参数契约与前端错误恢复测试通过；输入示例显式包含涂胶/曝光/显影，
 刻蚀使用时间参数。旧的“任意中文描述生成 5 步并成功运行”不作为当前能力保证。
@@ -201,7 +204,8 @@ React build output embedded as static data. No Qt dependency in the packaged bin
 
 **Goal**: Make GeometryScene the canonical state in HybridBackend; enable true FAST↔ACCURATE↔FAST continuity.
 **Completed**: z_min 排序、占据层数 height-map 语义、版本化/旧格式 snapshot、
-执行及 bridge 回滚、退化三角形和不支持拓扑拒绝、绝对坐标与材料 surface 提取。
+执行及 bridge 回滚、退化三角形和不支持拓扑拒绝、绝对坐标与材料 surface 提取，
+以及真实平坦体素衬底通过解析 slab 进入 Accurate 的连续性验证。
 **Remaining**: 图形化 Voxel→ViennaPS 无损导入；在完成前按 ADR-023 显式 Fast 回退。
 
 ## Structure Reliability Closure (2026-09-07)

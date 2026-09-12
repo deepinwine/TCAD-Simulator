@@ -41,9 +41,13 @@ jobs:
             tests.test_geometry_scene \
             tests.test_geometry_bridge \
             tests.test_m18_hybrid_truth \
+            tests.test_backend_reliability \
             tests.test_calibration \
             tests.test_recipe_planner \
-            tests.test_process_api_facade
+            tests.test_recipe_reliability \
+            tests.test_process_api_facade \
+            tests.test_m34_demos \
+            tests.test_dram_reliability
       - name: Layout tests (optional gdstk)
         env:
           TCAD_SKIP_QT: '1'
