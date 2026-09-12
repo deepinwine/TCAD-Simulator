@@ -15,6 +15,63 @@ from .scene import GeometryScene, MaterialMesh
 UM_TO_NM = 1000.0
 
 
+def _box_triangles(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """Return the closed 12-triangle surface of an axis-aligned box."""
+    x0, y0, z0 = lo
+    x1, y1, z1 = hi
+    vertices = np.array([
+        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+    ], dtype=float)
+    quads = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+             (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7))
+    triangles = []
+    for a, b, c, d in quads:
+        triangles.extend(((vertices[a], vertices[b], vertices[c]),
+                          (vertices[a], vertices[c], vertices[d])))
+    return np.asarray(triangles)
+
+
+def uniform_voxel_layers_to_scene(
+    grid: np.ndarray,
+    voxel_size_nm: float,
+    origin_nm: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    names: Dict[int, str] | None = None,
+) -> GeometryScene:
+    """Convert a laterally uniform voxel stack into exact rectangular slabs.
+
+    This is the conservative, lossless Voxel→ViennaPS bridge.  Any lateral
+    pattern is rejected instead of being flattened into a blanket layer.
+    """
+    voxels = np.asarray(grid)
+    if voxels.ndim != 3 or any(size <= 0 for size in voxels.shape):
+        raise ValueError("voxel grid must be a non-empty 3D array")
+    if not np.isfinite(voxel_size_nm) or voxel_size_nm <= 0:
+        raise ValueError("voxel size must be finite and positive")
+
+    profile = voxels[0, 0, :]
+    if not np.all(voxels == profile[np.newaxis, np.newaxis, :]):
+        raise ValueError("patterned voxel geometry cannot be flattened to layers")
+
+    ox, oy, oz = (float(value) for value in origin_nm)
+    nx, ny, nz = voxels.shape
+    scene = GeometryScene()
+    start = 0
+    while start < nz:
+        mat_id = int(profile[start])
+        end = start + 1
+        while end < nz and int(profile[end]) == mat_id:
+            end += 1
+        if mat_id != 0:
+            lo = np.array([ox, oy, oz + start * voxel_size_nm])
+            hi = np.array([ox + nx * voxel_size_nm,
+                           oy + ny * voxel_size_nm,
+                           oz + end * voxel_size_nm])
+            scene.add(mat_id, _box_triangles(lo, hi), (names or {}).get(mat_id, ""))
+        start = end
+    return scene
+
+
 def surfaces_um_to_scene(
     surfaces: List[Tuple[int, np.ndarray]],
     names: Dict[int, str] | None = None,

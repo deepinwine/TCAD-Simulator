@@ -31,9 +31,10 @@ class BackendReliabilityTests(unittest.TestCase):
         initial = self.backend._fast.grid().copy()
         step = tcad.InitializeWaferStep(self.backend._fast.database)
         with patch.object(step, 'execute', wraps=step.execute) as execute:
-            with patch.object(self.backend._fast, 'material_surfaces', side_effect=ValueError('extract')):
-                with self.assertRaises(ProcessBackendError):
-                    self.backend.execute_step(step)
+            with patch('geometry_scene.bridge.uniform_voxel_layers_to_scene', side_effect=ValueError('analytic extract')):
+                with patch.object(self.backend._fast, 'material_surfaces', side_effect=ValueError('mesh extract')):
+                    with self.assertRaises(ProcessBackendError):
+                        self.backend.execute_step(step)
             self.assertEqual(execute.call_count, 1)
         np.testing.assert_array_equal(self.backend._fast.grid(), initial)
 

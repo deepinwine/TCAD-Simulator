@@ -107,7 +107,18 @@ class HybridBackend(ProcessBackend):
     def _update_canonical_scene(self) -> bool:
         """Try to update canonical scene; returns success. Never raises."""
         try:
-            from geometry_scene.bridge import surfaces_um_to_scene
+            from geometry_scene.bridge import surfaces_um_to_scene, uniform_voxel_layers_to_scene
+            if self._active is self._fast:
+                try:
+                    names = {mid: material.name for mid, material in self._fast.database.items()}
+                    self._canonical_scene = uniform_voxel_layers_to_scene(
+                        self._fast.grid(), self._fast.summary().voxel_size_nm, names=names,
+                    )
+                    return True
+                except ValueError:
+                    # Patterned voxel geometry remains renderable as a mesh, but
+                    # can_convert_to_viennaps() will reject it for backend transfer.
+                    pass
             surfaces = self._active.material_surfaces(20000)
             self._canonical_scene = surfaces_um_to_scene(surfaces)
             return True

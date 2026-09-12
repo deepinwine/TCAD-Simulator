@@ -83,16 +83,18 @@ class HybridBackendTests(unittest.TestCase):
         init = tcad._webui_deserialize_step(flow[0], database)
         etch = next(
             tcad._webui_deserialize_step(blob, database)
-            for blob in flow if blob.get("name") == "Etch"
+            for blob in flow
+            if blob.get("name") == "Etch" and blob.get("params", {}).get("material") == "Silicon"
         )
+        etch.params["time"] = 0.25
         backend.execute_step(init)
-        from geometry_scene import GeometryScene
-        from tests.test_m18_review_fixes import _box
-        backend._canonical_scene = GeometryScene.from_surfaces([(1, _box(0, 0, 0, 640, 640, 200))])
+        self.assertIsNotNone(backend.canonical_scene)
         outcome = backend.execute_step(etch)
         log = backend.routing_log
         modes = [entry["mode"] for entry in log]
         self.assertIn(ACCURATE, modes)
+        self.assertEqual(backend._active_name, ACCURATE)
+        self.assertGreater(backend.canonical_scene.total_triangles, 0)
         backend.shutdown()
 
     def test_accurate_unsupported_falls_back_to_fast(self):

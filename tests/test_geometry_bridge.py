@@ -17,6 +17,7 @@ from geometry_scene.bridge import (
     scene_to_viennaps_layers,
     surfaces_um_to_scene,
     transfer_metrics,
+    uniform_voxel_layers_to_scene,
 )
 
 
@@ -154,6 +155,21 @@ class UnsupportedGeometryTests(unittest.TestCase):
         ok, reason = can_convert_to_viennaps(scene)
         self.assertTrue(ok)
 
+    def test_uniform_voxels_become_exact_layers_but_patterns_are_rejected(self):
+        grid = np.zeros((4, 3, 5), dtype=np.uint16)
+        grid[:, :, :2] = 1
+        grid[:, :, 2:4] = 2
+        scene = uniform_voxel_layers_to_scene(grid, 10.0)
+        self.assertEqual(scene_to_viennaps_layers(scene), [
+            (0.0, 1, 20.0, False),
+            (20.0, 2, 20.0, False),
+        ])
+        self.assertEqual(scene.bounds(), (0.0, 0.0, 0.0, 40.0, 30.0, 40.0))
+
+        grid[0, 0, 0] = 2
+        with self.assertRaisesRegex(ValueError, 'patterned'):
+            uniform_voxel_layers_to_scene(grid, 10.0)
+
 
 class TransferMetricsTests(unittest.TestCase):
     def test_metrics_reports_volume_error(self):
@@ -185,7 +201,12 @@ class HybridEndToEndTests(unittest.TestCase):
         db = backend._fast.database
         flow = tcad.load_demo_flows(db)["Basic Trench"]["steps"]
         init = tcad._webui_deserialize_step(flow[0], db)
-        etch = next(tcad._webui_deserialize_step(b, db) for b in flow if b.get("name") == "Etch")
+        etch = next(
+            tcad._webui_deserialize_step(b, db)
+            for b in flow
+            if b.get("name") == "Etch" and b.get("params", {}).get("material") == "Silicon"
+        )
+        etch.params["time"] = 0.25
         dep = next((tcad._webui_deserialize_step(b, db) for b in flow if b.get("name") == "Selective Epitaxy"), None)
 
         # FAST: Initialize
