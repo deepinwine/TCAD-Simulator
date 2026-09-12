@@ -35,6 +35,36 @@ class RecipeReliabilityTests(unittest.TestCase):
         self.assertEqual([s.type for s in draft.steps], ['Initialize Wafer', 'Fill', 'CMP'])
         self.assertEqual(draft.steps[1].params['material'], 'Tungsten')
 
+    def test_sequential_actions_keep_their_own_parameters(self):
+        for text in ('刻蚀100nm硅再沉积50nm氧化硅',
+                     '刻蚀100nm硅之后沉积50nm氧化硅',
+                     'etch 100nm silicon followed by deposit 50nm SiO2'):
+            with self.subTest(text=text):
+                draft = RecipePlanner().parse(text)
+                self.assertEqual([s.type for s in draft.steps], ['Initialize Wafer', 'Etch', 'Deposition'])
+                self.assertEqual(draft.steps[1].params['depth_nm'], 100)
+                self.assertEqual(draft.steps[2].params['thickness'], 50)
+                self.assertFalse(self.validator.validate(draft)['ok'])
+
+    def test_unsplittable_multiple_actions_are_rejected(self):
+        draft = RecipePlanner().parse('刻蚀100nm硅沉积50nm氧化硅')
+        self.assertFalse(self.validator.validate(draft)['ok'])
+        self.assertTrue(draft.ambiguities)
+
+    def test_assistant_placeholder_is_executable(self):
+        from pathlib import Path
+        import re
+        source = (Path(__file__).parents[1] / 'frontend/src/components/RecipeAssistant.tsx').read_text()
+        text = re.search(r"例：([^']+)'}", source).group(1)
+        draft = RecipePlanner().parse(text)
+        result = self.validator.validate(draft)
+        self.assertTrue(result['ok'], result)
+        model = tcad.ProcessModel(self.db, grid_shape=(32, 32, 64), voxel_size_nm=10, max_workers=1)
+        self.addCleanup(model.parallel.shutdown)
+        for step in draft.steps:
+            tcad._webui_deserialize_step({'name': step.type, 'params': step.params}, self.db).execute(model)
+        self.assertGreater(np.unique(model.grid[model.grid != 0]).size, 1)
+
     def test_empty_or_unknown_recipe_cannot_be_applied(self):
         for text in ('', '生成DRAM结构，窄埋入式Bitline和宽Active Si'):
             self.assertFalse(self.validator.validate(RecipePlanner().parse(text))['ok'])
@@ -144,6 +174,32 @@ class RecipeReliabilityTests(unittest.TestCase):
                 failed = session.rpc('recipe_import', {'recipe': {'steps': [{'name': 'Made Up'}]}})
                 self.assertFalse(failed['ok'])
                 self.assertEqual(session.rpc('get_recipe', {})['result'], before)
+
+                baseline = session.rpc('init', {})['result']
+                malformed = {
+                    'name': 'After',
+                    'domain': {'grid_shape': [8, 8, 20], 'voxel_size_nm': 5.0},
+                    'steps': [{'name': 'Mask Exposure', 'mask_file': {'not': 'a path'}}],
+                }
+                for command in ('recipe_import', 'load_recipe_ephemeral'):
+                    with self.subTest(command=command):
+                        rejected = session.rpc(command, {'recipe': malformed})
+                        self.assertFalse(rejected['ok'])
+                        after = session.rpc('init', {})['result']
+                        self.assertEqual(after['current_recipe'], baseline['current_recipe'])
+                        self.assertEqual(after['model'], baseline['model'])
+                        self.assertEqual(after['recipe'], baseline['recipe'])
+                malformed['steps'] = [{'name': 'Mask Exposure', 'params': {
+                    'mask_mode': 'Custom', 'mask_file': '/definitely/missing/specific-chip-mask.pgm'}}]
+                for command in ('recipe_import', 'load_recipe_ephemeral'):
+                    with self.subTest(command=command, missing_mask=True):
+                        rejected = session.rpc(command, {'recipe': malformed})
+                        self.assertFalse(rejected['ok'])
+                        self.assertIn('Mask file not found', rejected['error'])
+                        after = session.rpc('init', {})['result']
+                        self.assertEqual(after['current_recipe'], baseline['current_recipe'])
+                        self.assertEqual(after['model'], baseline['model'])
+                        self.assertEqual(after['recipe'], baseline['recipe'])
             finally:
                 manager.stop()
 

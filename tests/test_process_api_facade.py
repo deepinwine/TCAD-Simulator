@@ -228,6 +228,8 @@ class FacadeRecipeLoadingTests(unittest.TestCase):
              "steps": [{"name": "Initialize Wafer", "params": {"thickness_nm": 300.0}}]},
             {"domain": {"grid_shape": [32, 32, 0]}, "steps": [{"name": "Initialize Wafer"}]},
             {"domain": {"voxel_size_nm": float("nan")}, "steps": [{"name": "Initialize Wafer"}]},
+            {"domain": {"grid_shape": [8, 8, 20], "voxel_size_nm": 5.0},
+             "steps": [{"name": "Mask Exposure", "mask_file": {"not": "a path"}}]},
             {"steps": [None]},
             {"steps": []},
         ]

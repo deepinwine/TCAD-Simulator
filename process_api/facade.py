@@ -94,7 +94,7 @@ class ProcessCadFacade:
 
     def _load_recipe(self, blob: Dict[str, Any], *, demo_resolution: bool = False) -> None:
         """Validate and build a candidate before replacing the loaded session."""
-        from recipe_planner.schema import validate_import
+        from recipe_planner.schema import validate_import, prepare_import
 
         steps = blob.get("steps") if isinstance(blob, dict) else None
         if not isinstance(steps, list):
@@ -123,9 +123,9 @@ class ProcessCadFacade:
                 shape = tuple((n * self._grid + shape[0] - 1) // shape[0] for n in shape)
                 validate_import({**effective, "domain": {"grid_shape": list(shape), "voxel_size_nm": voxel_nm}}, self._database)
             candidate_blobs = deepcopy(steps)
-            candidate = self._tcad.ProcessModel(
-                self._database, grid_shape=shape, voxel_size_nm=voxel_nm, max_workers=1,
-            )
+            candidate, _ = prepare_import(
+                {"steps": candidate_blobs, "domain": {"grid_shape": list(shape), "voxel_size_nm": voxel_nm}},
+                self._database, grid_shape=shape, voxel_size_nm=voxel_nm)
         except (ValueError, TypeError, MemoryError, OverflowError) as exc:
             raise ProcessCadError(str(exc), code="invalid_recipe") from exc
 

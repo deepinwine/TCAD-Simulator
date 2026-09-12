@@ -32380,7 +32380,7 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
                 pass
         if "mask_file" in data:
             step.params["mask_file"] = data["mask_file"]
-            step.params.setdefault("mask_mode", "Custom")
+            step.params["mask_mode"] = "Custom"
             step.params.setdefault("mask_name", Path(step.params["mask_file"]).stem)
             step.image_mask = None
         try:
@@ -49933,7 +49933,7 @@ def _webui_worker_main(
 
         Strategy:
         - If mask_file exists: copy it into *this* session's uploads dir and rewrite mask_file.
-        - If mask_file is missing: generate a Mask Designer mask_file from the step params.
+        - If an explicit mask_file is missing: preserve the reference and fail.
         """
         warns: List[str] = []
         if not isinstance(step, ExposureStep):
@@ -49972,7 +49972,8 @@ def _webui_worker_main(
                 name = _webui_safe_filename(src2.name)
                 if not name:
                     name = "mask"
-                dest = up / name
+                digest = hashlib.sha256(src2.read_bytes()).hexdigest()[:16]
+                dest = up / f"{Path(name).stem}_{digest}{Path(name).suffix}"
                 # If it is already session-local, reuse.
                 try:
                     if dest.exists() and dest.is_file():
@@ -50108,30 +50109,7 @@ def _webui_worker_main(
 
         src = _resolve_mask_source(mf_raw)
         if src is None:
-            try:
-                params.pop("mask_file", None)
-            except Exception:
-                pass
-            try:
-                params["mask_mode"] = "Custom"
-            except Exception:
-                pass
-            warns.append(f"Mask Exposure: mask_file not found -> auto-generate via Mask Designer ({Path(mf_raw).name}).")
-            try:
-                step.image_mask = None
-            except Exception:
-                pass
-            try:
-                step.custom_mask = None
-            except Exception:
-                pass
-            try:
-                msgs = _webui_ensure_exposure_mask_file_via_mask_designer(step, reason="mask_file_not_found")
-                if msgs:
-                    warns.extend(msgs)
-            except Exception:
-                pass
-            return warns
+            raise ValueError(f"Mask file not found: {mf_raw}")
 
         # If already session-local, keep; otherwise copy.
         dest: Optional[Path] = None
@@ -72117,49 +72095,29 @@ def _webui_worker_main(
                 recipe_obj = payload.get("recipe")
                 if not isinstance(recipe_obj, dict):
                     raise ValueError("Invalid recipe payload")
+                from recipe_planner.schema import prepare_import
+                candidate_model, rebuilt = prepare_import(
+                    recipe_obj, material_db, grid_shape=default_domain_shape,
+                    voxel_size_nm=default_domain_voxel_nm, threads=default_domain_threads,
+                    runtime=sys.modules[__name__])
                 imported_name = recipe_obj.get("name")
                 if isinstance(imported_name, str) and imported_name.strip():
                     current_recipe_name = imported_name.strip()[:80]
                 else:
                     current_recipe_name = "Ephemeral"
 
-                domain = recipe_obj.get("domain") if isinstance(recipe_obj.get("domain"), dict) else {}
-                model_info = recipe_obj.get("model") if isinstance(recipe_obj.get("model"), dict) else {}
-                grid_shape = domain.get("grid_shape") or model_info.get("grid_shape")
-                voxel_nm = domain.get("voxel_size_nm") or model_info.get("voxel_size_nm")
-                threads = domain.get("threads") or model_info.get("threads")
-                if isinstance(grid_shape, (list, tuple)) and len(grid_shape) == 3 and voxel_nm is not None:
-                    nx, ny, nz = (int(grid_shape[0]), int(grid_shape[1]), int(grid_shape[2]))
-                    model.configure_domain((nx, ny, nz), float(voxel_nm))
-                else:
-                    _set_threads_quiet(default_domain_threads)
-                    try:
-                        model.configure_domain(default_domain_shape, default_domain_voxel_nm)
-                    except Exception:
-                        try:
-                            model.configure_domain(safe_shape, safe_voxel_nm)
-                        except Exception:
-                            model.reset_state()
+                old_model = model
+                model = candidate_model
+                model.surface_reaction_rate_table = old_model.surface_reaction_rate_table
+                model.anneal_diffusivity_table = old_model.anneal_diffusivity_table
+                model.set_log_sink(paths.get("live_log"))
+                old_model.set_log_sink(None)
+                old_model.parallel.shutdown()
                 try:
                     _update_cache_policy()
                 except Exception:
                     pass
-                if threads is not None:
-                    try:
-                        model.configure_parallelism(int(threads))
-                    except Exception:
-                        pass
-
-                imported_steps = recipe_obj.get("steps_full") or recipe_obj.get("steps") or recipe_obj.get("recipe")
-                rebuilt: List[ProcessStep] = []
-                if isinstance(imported_steps, list) and imported_steps:
-                    for step_blob in imported_steps:
-                        if not isinstance(step_blob, dict):
-                            continue
-                        rebuilt_step = _webui_deserialize_step(step_blob, material_db)
-                        if rebuilt_step is not None:
-                            rebuilt.append(rebuilt_step)
-                steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                steps = rebuilt
                 _reset_step_runtime_statuses()
                 try:
                     _invalidate_loop_cache()
@@ -72223,12 +72181,18 @@ def _webui_worker_main(
                     raise ValueError("Invalid recipe payload")
                 try:
                     recipe_obj, mig_warn = _recipe_json_validate_and_migrate(recipe_obj)
-                    if isinstance(mig_warn, list) and mig_warn:
-                        pending_warnings.extend([str(w) for w in mig_warn if str(w).strip()][:12])
                 except Exception as exc:
                     raise ValueError(f"Invalid recipe JSON: {exc}")
-                from recipe_planner.schema import validate_import
-                validate_import(recipe_obj, material_db)
+                migration_warnings = (
+                    [str(w) for w in mig_warn if str(w).strip()][:12]
+                    if isinstance(mig_warn, list)
+                    else []
+                )
+                from recipe_planner.schema import prepare_import
+                candidate_model, rebuilt = prepare_import(
+                    recipe_obj, material_db, grid_shape=model.grid.shape,
+                    voxel_size_nm=model.voxel_size_nm, threads=model.max_workers,
+                    runtime=sys.modules[__name__])
                 prev_name = payload.get("current_name")
                 if isinstance(prev_name, str) and prev_name.strip():
                     current_recipe_name = prev_name.strip()[:80]
@@ -72240,36 +72204,18 @@ def _webui_worker_main(
                 else:
                     current_recipe_name = "Imported"
 
-                domain = recipe_obj.get("domain") if isinstance(recipe_obj.get("domain"), dict) else {}
-                model_info = recipe_obj.get("model") if isinstance(recipe_obj.get("model"), dict) else {}
-                grid_shape = domain.get("grid_shape") or model_info.get("grid_shape")
-                voxel_nm = domain.get("voxel_size_nm") or model_info.get("voxel_size_nm")
-                threads = domain.get("threads") or model_info.get("threads")
-                if isinstance(grid_shape, (list, tuple)) and len(grid_shape) == 3 and voxel_nm is not None:
-                    nx, ny, nz = (int(grid_shape[0]), int(grid_shape[1]), int(grid_shape[2]))
-                    model.configure_domain((nx, ny, nz), float(voxel_nm))
-                else:
-                    model.reset_state()
+                old_model = model
+                model = candidate_model
+                model.surface_reaction_rate_table = old_model.surface_reaction_rate_table
+                model.anneal_diffusivity_table = old_model.anneal_diffusivity_table
+                model.set_log_sink(paths.get("live_log"))
+                old_model.set_log_sink(None)
+                old_model.parallel.shutdown()
                 try:
                     _update_cache_policy()
                 except Exception:
                     pass
-                if threads is not None:
-                    try:
-                        model.configure_parallelism(int(threads))
-                    except Exception:
-                        pass
-
-                imported_steps = recipe_obj.get("steps_full") or recipe_obj.get("steps") or recipe_obj.get("recipe")
-                rebuilt: List[ProcessStep] = []
-                if isinstance(imported_steps, list) and imported_steps:
-                    for step_blob in imported_steps:
-                        if not isinstance(step_blob, dict):
-                            continue
-                        rebuilt_step = _webui_deserialize_step(step_blob, material_db)
-                        if rebuilt_step is not None:
-                            rebuilt.append(rebuilt_step)
-                steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
+                steps = rebuilt
                 _reset_step_runtime_statuses()
                 if not rebuilt:
                     try:
@@ -72278,6 +72224,7 @@ def _webui_worker_main(
                     except Exception:
                         pass
                 pending_warnings.clear()
+                pending_warnings.extend(migration_warnings)
                 try:
                     for st in steps:
                         msgs = _normalize_step_material_params(st, material_db, admin_cfg)

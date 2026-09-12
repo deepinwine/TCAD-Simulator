@@ -118,13 +118,20 @@ def validate_import(blob, material_db):
         capacity_nm = domain["grid_shape"][2] * domain["voxel_size_nm"]
         for step in steps:
             if isinstance(step, dict) and step.get("name") == "Initialize Wafer":
-                thickness = (step.get("params_raw") or step.get("params") or {}).get("thickness_nm", 200.0)
+                step_params = step.get("params_raw") or step.get("params") or {}
+                if not isinstance(step_params, dict):
+                    raise ValueError("params 必须是对象")
+                thickness = step_params.get("thickness_nm", 200.0)
                 if isinstance(thickness, Real) and math.isfinite(thickness) and thickness > capacity_nm:
                     raise ValueError("Initialize Wafer 厚度超出配方 domain 的 Z 高度")
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ValueError(f"步骤 {i+1} 必须是对象")
         name = step.get("name")
+        if name == "Mask Exposure":
+            for key in ("mask_file", "mask_name"):
+                if key in step and not isinstance(step[key], str):
+                    raise ValueError(f"步骤 {i+1}: {key} 必须是字符串")
         if name == "Mask Exposure" and "custom_mask" in step:
             import numpy as np
             try:
@@ -136,7 +143,46 @@ def validate_import(blob, material_db):
                 raise ValueError(f"步骤 {i+1}: custom_mask 必须是非空二维 0/1 掩膜")
         params = step.get("params_raw") or step.get("params", {})
         # Files and mask labels are existing serialized exposure metadata.
-        checked = {k: v for k, v in params.items() if not (name == "Mask Exposure" and k in ("mask_file", "mask_name"))} if isinstance(params, dict) else params
+        checked = params
         errors = parameter_errors(name, checked, schema, material_db)
         if errors:
             raise ValueError(f"步骤 {i+1} ({name}): {'; '.join(errors)}")
+
+
+def prepare_import(blob, material_db, *, grid_shape, voxel_size_nm, threads=1, runtime=None):
+    """Build a fully validated candidate without changing the active session."""
+    from copy import deepcopy
+    from pathlib import Path
+    import tcad_simulator as tcad
+    tcad = runtime or tcad
+    candidate_blob = deepcopy(blob)
+    validate_import(candidate_blob, material_db)
+    domain = candidate_blob.get("domain") or candidate_blob.get("model") or {}
+    effective = {"grid_shape": domain.get("grid_shape", list(grid_shape)),
+                 "voxel_size_nm": domain.get("voxel_size_nm", voxel_size_nm),
+                 "threads": domain.get("threads", threads)}
+    candidate_blob["domain"] = effective
+    validate_import(candidate_blob, material_db)
+    count = effective["threads"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("domain.threads 必须是正整数")
+    blobs = next(candidate_blob[k] for k in ("steps_full", "steps", "recipe")
+                 if isinstance(candidate_blob.get(k), list))
+    rebuilt = []
+    for data in blobs:
+        step = tcad._webui_deserialize_step(data, material_db)
+        if step is None:
+            raise ValueError("Unknown process step")
+        if isinstance(step, tcad.ExposureStep):
+            path = step.params.get("mask_file")
+            if path:
+                source = Path(path).expanduser()
+                if not source.is_file():
+                    raise ValueError(f"Mask file not found: {path}")
+                step.image_mask = tcad.load_mask_from_file(str(source))
+            elif step.params.get("mask_mode") in ("Custom", "Designer", "Image") and step.custom_mask is None:
+                raise ValueError("Custom Mask Exposure requires a mask file or embedded mask")
+        rebuilt.append(step)
+    candidate = tcad.ProcessModel(material_db, grid_shape=tuple(effective["grid_shape"]),
+                                  voxel_size_nm=effective["voxel_size_nm"], max_workers=count)
+    return candidate, rebuilt

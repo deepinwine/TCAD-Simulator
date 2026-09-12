@@ -123,7 +123,7 @@ export function RecipeAssistant() {
         ref={inputRef}
         className="recipe-input"
         aria-label="工艺描述"
-        placeholder={'描述你的半导体工艺…\n例：在Si上沉积100 nm SiO2，然后光刻100 nm孔，刻蚀500 nm，沉积20 nm SiN，填W并CMP'}
+        placeholder={'描述你的半导体工艺…\n例：初始化硅衬底200nm，沉积100nm SiO2，涂胶100nm，光刻100nm孔，显影，刻蚀SiO2 30秒，去胶'}
         value={input}
         disabled={busy || applying}
         onChange={event => setInput(event.target.value)}

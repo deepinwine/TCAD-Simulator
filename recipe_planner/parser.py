@@ -109,7 +109,7 @@ class RecipePlanner:
         return draft
 
     def _segment(self, text: str) -> List[str]:
-        parts = re.split(r'[，。；,;]|(?<!\d)\.(?!\d)|(?:然后|随后|接着|并且|并|\bthen\b|\band\b)\s*', text, flags=re.IGNORECASE)
+        parts = re.split(r'[，。；,;]|(?<!\d)\.(?!\d)|(?:然后|随后|接着|之后|再|并且|并|\bfollowed\s+by\b|\bthen\b|\band\b)\s*', text, flags=re.IGNORECASE)
         return [p.strip() for p in parts if p.strip()]
 
     def _parse_segment(self, segment: str) -> Optional[PlannedStep]:
@@ -119,6 +119,16 @@ class RecipePlanner:
         step_type = None
         # Action verbs take precedence over substrate context ("on a Si wafer").
         entries = [(k, v) for k, v in PROCESS_SYNONYMS.items() if k != "Initialize Wafer"]
+        actions = set()
+        for canonical, synonyms in entries:
+            for syn in synonyms:
+                pattern = (r"(?<![a-z])" + re.escape(syn) + r"(?![a-z])") if syn.isascii() else re.escape(syn)
+                if re.search(pattern, lower):
+                    actions.add(canonical)
+        if len(actions) > 1:
+            # No reliable clause boundary: reject instead of binding one action
+            # to another action's material or thickness.
+            return None
         entries.append(("Initialize Wafer", PROCESS_SYNONYMS["Initialize Wafer"]))
         action_end = 0
         for canonical, synonyms in entries:
