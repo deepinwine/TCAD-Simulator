@@ -81,6 +81,36 @@ describe('ThreeViewer', () => {
     expect(alert).not.toHaveTextContent('Authorization: Bearer');
   });
 
+  it('初始化异常保留 API code 的本地化边界且不显示敏感原文', async () => {
+    render(
+      <ThreeViewer
+        api={apiStub}
+        refreshToken={1}
+        runtimeFactory={() => {
+          throw new TcadApiError('Authorization: Bearer secret-token', {
+            status: 404,
+            code: 'missing_mesh',
+          });
+        }}
+      />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('缺少所需的几何网格。');
+    expect(alert).not.toHaveTextContent('Authorization: Bearer');
+  });
+
+  it('普通加载异常显示安全的未知错误而非原始消息', async () => {
+    const {runtime} = fakeViewerRuntime({
+      loadMeshes: vi.fn(async () => {
+        throw new Error('secret-database-path: /private/db');
+      }),
+    });
+    render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={() => runtime} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('secret-database-path');
+  });
+
   it('manifest 失败保留材料列表并标示旧几何', async () => {
     const loadMeshes = vi.fn()
       .mockResolvedValueOnce({warnings: [], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
@@ -90,9 +120,9 @@ describe('ThreeViewer', () => {
     const view = render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={factory} />);
     await screen.findByText('Si');
     view.rerender(<ThreeViewer api={apiStub} refreshToken={2} runtimeFactory={factory} />);
-    await screen.findByText('manifest 离线');
+    expect(await screen.findByRole('alert')).toHaveTextContent('发生未预期的错误。');
+    expect(screen.queryByText('manifest 离线')).not.toBeInTheDocument();
     expect(screen.getByText('Si')).toBeVisible();
-    expect(screen.getByText(/仍显示上次加载的几何/)).toBeVisible();
   });
 
   it('相机操作不产生 API 请求，unmount 释放 runtime', async () => {
@@ -293,7 +323,8 @@ describe('ThreeViewer', () => {
     );
     await waitFor(() => expect(shared.calls.loadedTokens).toEqual([5]));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('材料 mat-2 下载失败');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('材料 mat-2 下载失败');
 
     shouldFail = false;
     fireEvent.click(screen.getByRole('button', {name: '重试加载几何'}));
@@ -310,7 +341,7 @@ describe('ThreeViewer', () => {
     await waitFor(() => expect(shared.calls.loadedTokens).toEqual([5, 5, 6]));
   });
 
-  it('WebGL 创建失败显示真实原因且不渲染假 3D', async () => {
+  it('WebGL 创建失败显示安全摘要且不渲染假 3D', async () => {
     render(
       <ThreeViewer
         api={apiStub}
@@ -321,7 +352,8 @@ describe('ThreeViewer', () => {
       />,
     );
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('WebGL2 上下文创建失败：canvas 被占用');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('WebGL2 上下文创建失败');
     expect(document.querySelector('canvas')).toBeNull();
     expect(screen.queryByText('WebGL2')).toBeNull();
     expect(screen.getByRole('button', {name: '正交视图'})).toBeDisabled();

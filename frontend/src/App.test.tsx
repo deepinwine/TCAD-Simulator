@@ -247,6 +247,58 @@ describe('App shell', () => {
     expect(runtime.dispose).not.toHaveBeenCalled();
   });
 
+  it('鼠标切换语言不会让合法参数草稿 blur 并保存', async () => {
+    const api = apiStub({
+      init: vi.fn(async () => initView([
+        step(0, {instanceName: 'Substrate'}),
+        step(1, {
+          instanceName: 'Etch',
+          params: {dose: 5},
+          parameterSpecs: [{
+            key: 'dose',
+            label: 'Dose',
+            type: 'float',
+            minimum: 0,
+          }],
+        }),
+      ])),
+    });
+    const runtime = {
+      backend: 'WebGL2', mount: vi.fn(), setStandardView: vi.fn(), setProjection: vi.fn(),
+      setClipping: vi.fn(), setMaterialDisplay: vi.fn(), pickAt: vi.fn(() => null),
+      setMeasureMarkers: vi.fn(), fit: vi.fn(), loadMeshes: vi.fn(async () => ({warnings: [], materials: []})),
+      dispose: vi.fn(),
+    };
+    const runtimeFactory = vi.fn(() => runtime);
+    render(<App api={api} viewerRuntimeFactory={runtimeFactory} />);
+
+    const etch = await screen.findByRole('option', {name: /Etch/});
+    fireEvent.click(etch);
+    const dose = screen.getByRole('textbox', {name: 'Dose'});
+    dose.focus();
+    fireEvent.change(dose, {target: {value: '6.00'}});
+    const english = screen.getByRole('button', {name: 'EN'});
+
+    const mousedownAllowed = fireEvent.mouseDown(english);
+    expect(mousedownAllowed).toBe(false);
+    if (mousedownAllowed) {
+      english.focus();
+      fireEvent.blur(dose);
+    }
+    fireEvent.mouseUp(english);
+    fireEvent.click(english);
+
+    await screen.findByRole('button', {name: 'Run All'});
+    expect(screen.getByRole('textbox', {name: 'Dose'})).toHaveValue('6.00');
+    expect(screen.getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
+    expect(api.setStep).not.toHaveBeenCalled();
+    expect(api.init).toHaveBeenCalledTimes(1);
+    expect(api.getTimeline).toHaveBeenCalledTimes(1);
+    expect(runtimeFactory).toHaveBeenCalledTimes(1);
+    expect(runtime.loadMeshes).toHaveBeenCalledTimes(1);
+    expect(runtime.dispose).not.toHaveBeenCalled();
+  });
+
   it('run 网络失败后可重新同步服务端权威状态', async () => {
     const api = apiStub({
       runAll: vi.fn(async () => {

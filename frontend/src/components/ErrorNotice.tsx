@@ -29,6 +29,32 @@ const knownErrorKeys: Record<string, TranslationKey> = {
   stale_revision: 'error.staleRevision',
   internal_error: 'error.internal',
   failed: 'error.failed',
+  worker_timeout: 'error.workerTimeout',
+  restore_failed: 'error.restoreFailed',
+  snapshot_unavailable: 'error.snapshotUnavailable',
+  worker_died: 'error.failed',
+  worker_send_failed: 'error.failed',
+  worker_poll_failed: 'error.failed',
+  worker_recv_failed: 'error.failed',
+  canonical_update_failed: 'error.failed',
+  invalid_snapshot: 'error.snapshotUnavailable',
+  engine_missing: 'error.missingMesh',
+  unsupported_step: 'error.failed',
+  unsupported_geometry: 'error.missingMesh',
+  unsupported_material: 'error.failed',
+  geometry_backend: 'error.internal',
+  no_geometry: 'error.missingMesh',
+  step_failed: 'error.failed',
+  unknown_backend: 'error.failed',
+  unknown_demo: 'error.invalidRecipe',
+  unknown_step: 'error.invalidRecipe',
+  invalid_step: 'error.invalidRecipe',
+  unknown_parameter: 'error.invalidRecipe',
+  invalid_parameter: 'error.invalidRecipe',
+  empty_recipe: 'error.invalidRecipe',
+  unknown_material_mesh: 'error.missingMesh',
+  no_recipe: 'error.invalidRecipe',
+  invalid_database: 'error.internal',
 };
 
 function safeDiagnosticText(value: string): string | null {
@@ -45,7 +71,9 @@ export function errorPresentation(
   error: TcadApiError,
   t: I18nContextValue['t'],
 ): {message: string; diagnostic?: string} {
-  const knownKey = error.code === undefined ? undefined : knownErrorKeys[error.code];
+  const knownKey = error.code !== undefined && Object.hasOwn(knownErrorKeys, error.code)
+    ? knownErrorKeys[error.code]
+    : undefined;
   if (knownKey !== undefined) return {message: t(knownKey)};
 
   const diagnostic: string[] = [];

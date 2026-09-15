@@ -36,13 +36,21 @@ const CLIP_AXES: ReadonlyArray<{axis: ClipAxis; label: string}> = [
   {axis: 'z', label: 'Z'},
 ];
 
+function asViewerApiError(error: unknown): TcadApiError {
+  if (error instanceof TcadApiError) return error;
+  return new TcadApiError(
+    error instanceof Error ? error.message : String(error),
+    {status: 0},
+  );
+}
+
 export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProps) {
   const {t} = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<ViewerRuntime | null>(null);
   const [backend, setBackend] = useState<string | null>(null);
-  const [initError, setInitError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<unknown>(null);
+  const [initError, setInitError] = useState<TcadApiError | null>(null);
+  const [loadError, setLoadError] = useState<TcadApiError | null>(null);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [orthoActive, setOrthoActive] = useState(false);
@@ -63,7 +71,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
       runtime = (runtimeFactory ?? createThreeViewerRuntime)(api);
       runtime.mount(container);
     } catch (error) {
-      setInitError(error instanceof Error ? error.message : String(error));
+      setInitError(asViewerApiError(error));
       return;
     }
     runtimeRef.current = runtime;
@@ -96,7 +104,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
       ])));
     }).catch(error => {
       if (cancelled) return;
-      setLoadError(error);
+      setLoadError(asViewerApiError(error));
     });
     return () => {
       cancelled = true;
@@ -283,17 +291,14 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
         {initError !== null && (
           <ErrorNotice
             title={t('viewer.initError')}
-            message={initError}
+            error={initError}
             suggestion={t('viewer.initSuggestion')}
           />
         )}
         {initError === null && loadError !== null && (
           <ErrorNotice
             title={t('viewer.loadError')}
-            error={loadError instanceof TcadApiError ? loadError : undefined}
-            message={loadError instanceof TcadApiError
-              ? undefined
-              : loadError instanceof Error ? loadError.message : String(loadError)}
+            error={loadError}
             suggestion={materials.length > 0 ? t('viewer.staleSuggestion') : undefined}
             actionLabel={t('viewer.retry')}
             onAction={retry}

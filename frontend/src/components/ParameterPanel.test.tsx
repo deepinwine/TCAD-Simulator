@@ -138,6 +138,47 @@ const maskInitView = (): InitView => ({
 });
 
 describe('ParameterPanel 掩膜控件', () => {
+  it('按稳定步骤名和参数键本地化帮助，未知帮助在中文下不泄露英文', async () => {
+    const exposure = step(2, {
+      name: 'Mask Exposure',
+      params: {advanced_enable: 0, opc_enable: 1, future_option: 1},
+      parameterSpecs: [
+        {key: 'advanced_enable', label: 'Advanced', type: 'enum', choices: [[0, 'Off'], [1, 'On']], tooltip: 'When disabled, optical/dose/OPC override parameters are ignored.'},
+        {key: 'opc_enable', label: 'OPC', type: 'enum', choices: [[0, 'Off'], [1, 'On']], tooltip: 'Lightweight OPC-style bias applied to procedural masks.'},
+        {key: 'future_option', label: 'Future', type: 'float', tooltip: 'Future third-party technical help.'},
+      ],
+    });
+    render(
+      <AppStateProvider api={apiStub(init([exposure]))}>
+        <ParameterPanel step={exposure} collapsed={false} />
+      </AppStateProvider>,
+    );
+    expect(await screen.findByText('关闭时将忽略光学、剂量和 OPC 覆盖参数。')).toBeVisible();
+    expect(screen.getByText('对程序化掩膜应用轻量级 OPC 偏置。')).toBeVisible();
+    expect(screen.getByText('查看技术参数说明')).toBeVisible();
+    expect(screen.queryByText('Future third-party technical help.')).not.toBeInTheDocument();
+  });
+
+  it('覆盖真实 SOI 与 Etch 稳定 tooltip 键', async () => {
+    const etch = step(3, {
+      name: 'Etch',
+      params: {rate_model: 'Advanced', rate_override: 0, stop_on_material: ''},
+      parameterSpecs: [
+        {key: 'rate_model', label: 'Rate model', type: 'enum', choices: [['Advanced', 'Advanced']], tooltip: 'Advanced uses the built-in plasma proxy model.'},
+        {key: 'rate_override', label: 'Override rate', type: 'float', tooltip: 'Optional: directly specify vertical etch rate.'},
+        {key: 'stop_on_material', label: 'Stop', type: 'enum', choices: [['', 'None']], tooltip: 'If set, the etch will never remove this material.'},
+      ],
+    });
+    render(
+      <AppStateProvider api={apiStub(init([etch]))}>
+        <ParameterPanel step={etch} collapsed={false} />
+      </AppStateProvider>,
+    );
+    expect(await screen.findByText(/Advanced 使用内置等离子体代理模型/)).toBeVisible();
+    expect(screen.getByText(/直接指定垂直刻蚀速率/)).toBeVisible();
+    expect(screen.getByText(/刻蚀不会移除此材料/)).toBeVisible();
+  });
+
   it('含 mask_mode 的步骤显示掩膜控件并触发上传', async () => {
     const exposure = step(2, {
       name: 'Mask Exposure',

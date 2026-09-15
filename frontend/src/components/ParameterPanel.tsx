@@ -4,6 +4,7 @@ import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/typ
 import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
 import {type I18nContextValue, useI18n} from '../i18n/I18nContext';
+import type {TranslationKey} from '../i18n/catalogs';
 import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
@@ -16,6 +17,7 @@ interface ParameterPanelProps {
 
 interface ParameterFieldProps {
   stepIndex: number;
+  stepName: string;
   spec: ParameterSpecView;
   serverValue: unknown;
   disabled: boolean;
@@ -31,6 +33,7 @@ interface ParameterControlProps {
   disabled: boolean;
   hasError: boolean;
   describedBy?: string;
+  tooltip?: string;
   onUpdate(raw: unknown, display: DisplayValue): void;
   onFlush(): void;
 }
@@ -79,9 +82,30 @@ function initialDisplayValue(spec: ParameterSpecView, value: unknown, t: Transla
   return safeText(value, t);
 }
 
-function parameterDescription(spec: ParameterSpecView, t: Translate): string {
+const tooltipKeys: Record<string, TranslationKey> = {
+  'Initialize Wafer.box_thickness_nm': 'parameter.tooltip.initializeWafer.boxThickness',
+  'Etch.rate_model': 'parameter.tooltip.etch.rateModel',
+  'Etch.rate_override': 'parameter.tooltip.etch.rateOverride',
+  'Etch.stop_on_material': 'parameter.tooltip.etch.stopOnMaterial',
+  'Mask Exposure.advanced_enable': 'parameter.tooltip.maskExposure.advancedEnable',
+  'Mask Exposure.opc_enable': 'parameter.tooltip.maskExposure.opcEnable',
+};
+
+function resolvedTooltip(
+  stepName: string,
+  spec: ParameterSpecView,
+  locale: I18nContextValue['locale'],
+  t: Translate,
+): string | undefined {
+  if (!spec.tooltip) return undefined;
+  const key = tooltipKeys[`${stepName}.${spec.key}`];
+  if (key !== undefined) return t(key);
+  return locale === 'en' ? spec.tooltip : t('parameter.technicalHelp');
+}
+
+function parameterDescription(spec: ParameterSpecView, tooltip: string | undefined, t: Translate): string {
   const parts: string[] = [];
-  if (spec.tooltip) parts.push(spec.tooltip);
+  if (tooltip) parts.push(tooltip);
   if (spec.minimum !== undefined || spec.maximum !== undefined) {
     const minimum = spec.minimum === undefined ? t('parameter.unbounded') : String(spec.minimum);
     const maximum = spec.maximum === undefined ? t('parameter.unbounded') : String(spec.maximum);
@@ -120,6 +144,7 @@ function ParameterControl({
   disabled,
   hasError,
   describedBy,
+  tooltip,
   onUpdate,
   onFlush,
 }: ParameterControlProps) {
@@ -143,6 +168,7 @@ function ParameterControl({
       <select
         id={inputId}
         value={typeof displayValue === 'string' ? displayValue : ''}
+        title={tooltip}
         {...accessibility}
         onChange={event => {
           const selectedIndex = Number(event.currentTarget.value);
@@ -166,6 +192,7 @@ function ParameterControl({
         id={inputId}
         type="checkbox"
         checked={displayValue === true}
+        title={tooltip}
         {...accessibility}
         onChange={event => onUpdate(event.currentTarget.checked, event.currentTarget.checked)}
         onBlur={onFlush}
@@ -179,7 +206,7 @@ function ParameterControl({
         id={inputId}
         value={typeof displayValue === 'string' ? displayValue : ''}
         {...accessibility}
-        title={spec.tooltip}
+        title={tooltip}
         onChange={event => onUpdate(event.currentTarget.value, event.currentTarget.value)}
         onBlur={onFlush}
         onKeyDown={handleKeyDown}
@@ -195,7 +222,7 @@ function ParameterControl({
       inputMode={numeric ? 'decimal' : 'text'}
       value={typeof displayValue === 'string' ? displayValue : ''}
       {...accessibility}
-      title={spec.tooltip}
+      title={tooltip}
       onChange={event => onUpdate(event.currentTarget.value, event.currentTarget.value)}
       onBlur={onFlush}
       onKeyDown={handleKeyDown}
@@ -205,13 +232,14 @@ function ParameterControl({
 
 function ParameterField({
   stepIndex,
+  stepName,
   spec,
   serverValue,
   disabled,
   serverError,
 }: ParameterFieldProps) {
   const {state, actions} = useAppState();
-  const {t} = useI18n();
+  const {locale, t} = useI18n();
   const key = parameterDraftKey(stepIndex, spec.key);
   const draft = state.drafts[key];
   const inputId = `parameter-${stepIndex}-${spec.key}`;
@@ -227,7 +255,8 @@ function ParameterField({
   );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validDraftRef = useRef(false);
-  const description = parameterDescription(spec, t);
+  const tooltip = resolvedTooltip(stepName, spec, locale, t);
+  const description = parameterDescription(spec, tooltip, t);
   const clientError = draft?.validation.status === 'invalid'
     ? validationMessage(draft.validation.message, spec, t)
     : undefined;
@@ -315,6 +344,7 @@ function ParameterField({
         disabled={disabled}
         hasError={hasError}
         describedBy={uniqueDescriptions}
+        tooltip={tooltip}
         onUpdate={update}
         onFlush={flush}
       />
@@ -388,6 +418,7 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
                   <ParameterField
                     key={`${step.index}:${spec.key}`}
                     stepIndex={step.index}
+                    stepName={step.name}
                     spec={spec}
                     serverValue={serverValue}
                     disabled={disabled}
