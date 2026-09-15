@@ -1,6 +1,7 @@
 import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {Vector3} from 'three';
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import {TcadApiError} from '../api/client';
 import type {TcadApi} from '../api/types';
 import {ThreeViewer, type ViewerRuntime, type StandardView} from './ThreeViewer';
 import type {PickHit} from './picking';
@@ -51,16 +52,33 @@ const apiStub = {} as TcadApi;
 afterEach(() => cleanup());
 
 describe('ThreeViewer', () => {
-  it('显示部分加载警告，重试成功后更新材料列表并清除警告', async () => {
+  it('部分加载失败仅显示本地化摘要，重试成功后更新材料列表并清除错误', async () => {
     const loadMeshes = vi.fn()
-      .mockResolvedValueOnce({warnings: ['SiO2 下载失败'], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
+      .mockResolvedValueOnce({warnings: ['SiO2: Authorization: Bearer secret-token'], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
       .mockResolvedValueOnce({warnings: [], materials: [{matId: 2, name: 'SiO2', visible: true, opacity: 1}]});
     const {runtime} = fakeViewerRuntime({loadMeshes});
     render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={() => runtime} />);
-    expect(await screen.findByText('SiO2 下载失败')).toBeVisible();
+    expect(await screen.findByText('部分材料加载失败')).toBeVisible();
+    expect(screen.queryByText(/Authorization: Bearer/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', {name: '重试加载几何'}));
     expect(await screen.findByText('SiO2')).toBeVisible();
-    expect(screen.queryByText('SiO2 下载失败')).not.toBeInTheDocument();
+    expect(screen.queryByText('部分材料加载失败')).not.toBeInTheDocument();
+  });
+
+  it('网格加载的已知 API 错误码使用本地化正文而不显示原始消息', async () => {
+    const {runtime} = fakeViewerRuntime({
+      loadMeshes: vi.fn(async () => {
+        throw new TcadApiError('Authorization: Bearer secret-token', {
+          status: 404,
+          code: 'missing_mesh',
+        });
+      }),
+    });
+    render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={() => runtime} />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('缺少所需的几何网格。');
+    expect(alert).not.toHaveTextContent('Authorization: Bearer');
   });
 
   it('manifest 失败保留材料列表并标示旧几何', async () => {

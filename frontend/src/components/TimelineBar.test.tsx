@@ -155,7 +155,8 @@ describe('TimelineBar', () => {
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Timeline 暂不可用');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('Timeline 暂不可用');
     fireEvent.click(screen.getByRole('button', {name: '重试 Timeline'}));
 
     expect(await screen.findByRole('button', {name: '恢复步骤 1'})).toBeEnabled();
@@ -193,6 +194,22 @@ describe('TimelineBar', () => {
     expect(api.runStep).not.toHaveBeenCalled();
     expect(api.runTo).not.toHaveBeenCalled();
     expect(api.runAll).not.toHaveBeenCalled();
+  });
+
+  it('未知 Timeline 状态显示本地化安全兜底，而不渲染服务端原文', async () => {
+    const withUnknownState: TimelineView = {
+      current: 0,
+      items: [{
+        index: 0,
+        state: 'Authorization: Bearer secret-token',
+        runtimeStatus: 'ready',
+        snapshotValid: true,
+      }],
+    };
+    render(<App api={apiStub({getTimeline: vi.fn(async () => withUnknownState)})} viewerRuntimeFactory={stubViewerRuntime} />);
+
+    expect(await screen.findByText('#1 未知状态')).toBeVisible();
+    expect(screen.queryByText(/Authorization: Bearer/)).not.toBeInTheDocument();
   });
 
   it('Next 跳过无效节点，成功后显示历史快照并刷新 Viewer', async () => {
@@ -247,9 +264,10 @@ describe('TimelineBar', () => {
     fireEvent.click(screen.getByRole('button', {name: '恢复步骤 1'}));
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('快照恢复失败');
-    expect(alert).toHaveTextContent('请选择其他有效快照');
-    expect(screen.getByText('#2 current').closest('li')).toHaveAttribute('aria-current', 'step');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('快照恢复失败');
+    expect(alert).not.toHaveTextContent('请选择其他有效快照');
+    expect(screen.getByText('#2 当前').closest('li')).toHaveAttribute('aria-current', 'step');
     // restore 失败不刷新几何：仍只有初始加载
     expect(viewerRuntime.loadedTokens).toEqual([1]);
   });
@@ -285,7 +303,7 @@ describe('TimelineBar', () => {
     const duplicate = await screen.findAllByRole('button', {name: '恢复步骤 2'});
     expect(duplicate).toHaveLength(1);
     expect(duplicate[0]).toBeDisabled();
-    expect(screen.getByText('#2 first-invalid').closest('li')).toHaveAttribute(
+    expect(screen.getByText('#2 未知状态').closest('li')).toHaveAttribute(
       'aria-current',
       'step',
     );
@@ -299,7 +317,7 @@ describe('TimelineBar', () => {
     ));
   });
 
-  it('底栏错误使用紧凑容器渲染，超长消息不丢失且 retry 可达', async () => {
+  it('底栏错误使用紧凑容器渲染，超长原始消息不泄露且 retry 可达', async () => {
     const longMessage = 'x'.repeat(600);
     const getTimeline = vi.fn()
       .mockRejectedValue(new TcadApiError(longMessage, {status: 500}));
@@ -310,7 +328,8 @@ describe('TimelineBar', () => {
     const compact = alert.closest('.timeline-error');
     expect(compact).not.toBeNull();
     expect(alert).toHaveTextContent('Timeline 加载失败');
-    expect(alert).toHaveTextContent(longMessage);
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent(longMessage);
     const retry = screen.getByRole('button', {name: '重试 Timeline'});
     expect(retry).toBeEnabled();
     expect(compact).toContainElement(retry);

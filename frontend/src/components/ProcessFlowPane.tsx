@@ -1,5 +1,7 @@
 import {useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
 import type {StepView} from '../api/types';
+import {useI18n} from '../i18n/I18nContext';
+import {zhCN} from '../i18n/catalogs';
 import {StatusBadge} from './StatusBadge';
 
 interface ProcessFlowPaneProps {
@@ -34,9 +36,12 @@ function summarizeValue(value: unknown, depth = 0): string {
   return '—';
 }
 
-export function summarizeParams(params: Record<string, unknown>): string {
+export function summarizeParams(
+  params: Record<string, unknown>,
+  emptyLabel: string = zhCN['process.noParams'],
+): string {
   const entries = Object.entries(params).slice(0, 2);
-  if (entries.length === 0) return '无参数';
+  if (entries.length === 0) return emptyLabel;
   const summary = entries
     .map(([key, value]) => `${compactText(key, 16)}=${summarizeValue(value)}`)
     .join(' · ');
@@ -45,6 +50,7 @@ export function summarizeParams(params: Record<string, unknown>): string {
 }
 
 export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}: ProcessFlowPaneProps) {
+  const {t} = useI18n();
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
   const pendingFocusRef = useRef<number | null>(null);
   const [activeStepIndex, setActiveStepIndex] = useState<number | null>(() => {
@@ -98,18 +104,18 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}:
   }
 
   return (
-    <section className="workspace-pane process-pane" aria-label="Process Flow">
+    <section className="workspace-pane process-pane" aria-label={t('process.region')}>
       <header className="pane-header">
         <div>
-          <span className="pane-kicker">Recipe</span>
-          <h2>Process Flow</h2>
+          <span className="pane-kicker">{t('process.kicker')}</span>
+          <h2>{t('process.title')}</h2>
         </div>
-        <span className="pane-count" aria-label={`${recipe.length} 个步骤`}>{recipe.length}</span>
+        <span className="pane-count" aria-label={t('process.stepCount', {count: recipe.length})}>{recipe.length}</span>
       </header>
       {recipe.length === 0 ? (
-        <p className="pane-empty">当前配方没有工艺步骤</p>
+        <p className="pane-empty">{t('process.empty')}</p>
       ) : (
-        <div className="process-list" role="listbox" aria-label="Process Flow">
+        <div className="process-list" role="listbox" aria-label={t('process.region')}>
           {recipe.map((step, position) => (
             <button
               key={step.index}
@@ -133,9 +139,9 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}:
               <span className="step-content">
                 <span className="step-heading-row">
                   <strong className="step-title">{step.instanceName}</strong>
-                  {!step.enabled && <span className="disabled-copy">已禁用</span>}
+                  {!step.enabled && <span className="disabled-copy">{t('process.disabled')}</span>}
                 </span>
-                <span className="step-subtitle">{step.name} · {summarizeParams(step.params)}</span>
+                <span className="step-subtitle">{step.name} · {summarizeParams(step.params, t('process.noParams'))}</span>
                 <StatusBadge status={step.runtimeStatus} />
               </span>
             </button>

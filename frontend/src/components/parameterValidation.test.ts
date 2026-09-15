@@ -24,21 +24,21 @@ describe('validateParameter', () => {
   it.each(['', '   ', 'NaN', 'Infinity', '-Infinity'])('数值拒绝空值或非有限值 %j', raw => {
     expect(validateParameter(spec({type: 'float'}), raw)).toEqual({
       ok: false,
-      message: '请输入有限数值',
+      messageKey: 'validation.finite',
     });
   });
 
   it('整数拒绝带小数部分的值', () => {
     expect(validateParameter(spec({type: 'int'}), '12.5')).toEqual({
       ok: false,
-      message: '请输入整数',
+      messageKey: 'validation.integer',
     });
   });
 
   it('整数拒绝超过 JavaScript 安全范围的值', () => {
     expect(validateParameter(spec({type: 'int'}), '9007199254740992')).toEqual({
       ok: false,
-      message: '请输入安全整数',
+      messageKey: 'validation.safeInteger',
     });
   });
 
@@ -48,11 +48,11 @@ describe('validateParameter', () => {
     expect(validateParameter(bounded, '500')).toEqual({ok: true, value: 500});
     expect(validateParameter(bounded, '-0.1')).toEqual({
       ok: false,
-      message: '必须大于或等于 0',
+      messageKey: 'validation.minimum',
     });
     expect(validateParameter(bounded, '500.1')).toEqual({
       ok: false,
-      message: '必须小于或等于 500',
+      messageKey: 'validation.maximum',
     });
   });
 
@@ -70,7 +70,7 @@ describe('validateParameter', () => {
   it.each(['', 'yes', 1, null])('bool 拒绝不明确的值 %j', raw => {
     expect(validateParameter(spec({type: 'bool'}), raw)).toEqual({
       ok: false,
-      message: '请选择开启或关闭',
+      messageKey: 'validation.boolean',
     });
   });
 
@@ -85,7 +85,7 @@ describe('validateParameter', () => {
     expect(validateParameter(choice, null)).toEqual({ok: true, value: null});
     expect(validateParameter(choice, 'true')).toEqual({
       ok: false,
-      message: '请选择列表中的有效选项',
+      messageKey: 'validation.choice',
     });
   });
 
@@ -94,7 +94,7 @@ describe('validateParameter', () => {
     expect(validateParameter(enumSpec, 1)).toEqual({ok: true, value: 1});
     expect(validateParameter(enumSpec, '1')).toEqual({
       ok: false,
-      message: '请选择列表中的有效选项',
+      messageKey: 'validation.choice',
     });
   });
 

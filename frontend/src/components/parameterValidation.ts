@@ -2,7 +2,16 @@ import type {ParameterChoiceValue, ParameterSpecView} from '../api/types';
 
 export type ParameterValidationResult =
   | {ok: true; value: unknown}
-  | {ok: false; message: string};
+  | {ok: false; messageKey: ParameterValidationMessageKey};
+
+export type ParameterValidationMessageKey =
+  | 'validation.finite'
+  | 'validation.integer'
+  | 'validation.safeInteger'
+  | 'validation.minimum'
+  | 'validation.maximum'
+  | 'validation.boolean'
+  | 'validation.choice';
 
 const decimalNumberPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
@@ -13,19 +22,19 @@ function validateNumber(
 ): ParameterValidationResult {
   const text = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.trim() : '';
   if (text === '' || !decimalNumberPattern.test(text)) {
-    return {ok: false, message: '请输入有限数值'};
+    return {ok: false, messageKey: 'validation.finite'};
   }
   const value = Number(text);
-  if (!Number.isFinite(value)) return {ok: false, message: '请输入有限数值'};
-  if (integer && !Number.isInteger(value)) return {ok: false, message: '请输入整数'};
+  if (!Number.isFinite(value)) return {ok: false, messageKey: 'validation.finite'};
+  if (integer && !Number.isInteger(value)) return {ok: false, messageKey: 'validation.integer'};
   if (integer && !Number.isSafeInteger(value)) {
-    return {ok: false, message: '请输入安全整数'};
+    return {ok: false, messageKey: 'validation.safeInteger'};
   }
   if (spec.minimum !== undefined && value < spec.minimum) {
-    return {ok: false, message: `必须大于或等于 ${spec.minimum}`};
+    return {ok: false, messageKey: 'validation.minimum'};
   }
   if (spec.maximum !== undefined && value > spec.maximum) {
-    return {ok: false, message: `必须小于或等于 ${spec.maximum}`};
+    return {ok: false, messageKey: 'validation.maximum'};
   }
   return {ok: true, value};
 }
@@ -37,13 +46,13 @@ function validateBoolean(raw: unknown): ParameterValidationResult {
     if (value === 'true' || value === '1') return {ok: true, value: true};
     if (value === 'false' || value === '0') return {ok: true, value: false};
   }
-  return {ok: false, message: '请选择开启或关闭'};
+  return {ok: false, messageKey: 'validation.boolean'};
 }
 
 function validateChoice(spec: ParameterSpecView, raw: unknown): ParameterValidationResult {
   const match = spec.choices?.find(([value]) => Object.is(value, raw));
   return match === undefined
-    ? {ok: false, message: '请选择列表中的有效选项'}
+    ? {ok: false, messageKey: 'validation.choice'}
     : {ok: true, value: match[0] satisfies ParameterChoiceValue};
 }
 

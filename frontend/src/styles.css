@@ -131,6 +131,31 @@ button:focus-visible,
   gap: 10px;
 }
 
+.language-switcher {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid #32475d;
+  border-radius: 5px;
+  background: #101a25;
+}
+
+.language-switcher-button {
+  min-height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 3px;
+  color: #8ea2b8;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.language-switcher-button[aria-pressed="true"] {
+  color: #e2edf7;
+  background: #24425a;
+}
+
 .toolbar-run-group {
   min-width: 0;
   gap: 6px;
@@ -778,6 +803,20 @@ button:focus-visible,
 
 .error-notice button {
   padding: 0 12px;
+}
+
+.error-details {
+  margin: 6px 0 10px;
+  color: #c3a9ad;
+  font-size: 10px;
+}
+
+.error-details pre {
+  max-width: 100%;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 1100px) {

@@ -1,5 +1,6 @@
 import {useRef, useState} from 'react';
 import {useAppState} from '../state/AppStateContext';
+import {useI18n} from '../i18n/I18nContext';
 
 /**
  * Exposure 步骤的掩膜控件：上传（multipart）+ 服务端预览图。
@@ -15,28 +16,29 @@ export function MaskControl({
   disabled: boolean;
 }) {
   const {actions} = useAppState();
+  const {t} = useI18n();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [previewNonce, setPreviewNonce] = useState(0);
   const [previewFailed, setPreviewFailed] = useState(false);
   const hasMask = maskName !== undefined && maskName !== '';
 
   return (
-    <div className="mask-control" role="group" aria-label="掩膜">
+    <div className="mask-control" role="group" aria-label={t('mask.group')}>
       <div className="mask-current">
-        当前掩膜：<strong>{hasMask ? maskName : '未设置（将自动生成）'}</strong>
+        {t('mask.current')}<strong>{hasMask ? maskName : t('mask.unset')}</strong>
       </div>
       <button
         type="button"
         disabled={disabled}
         onClick={() => inputRef.current?.click()}
       >
-        上传掩膜
+        {t('mask.upload')}
       </button>
       <input
         ref={inputRef}
         type="file"
         accept="image/png,image/jpeg,.png,.jpg,.jpeg,.bmp,.npy"
-        aria-label="掩膜文件"
+        aria-label={t('mask.file')}
         className="visually-hidden"
         onChange={event => {
           const file = event.target.files?.[0];
@@ -52,13 +54,13 @@ export function MaskControl({
       {hasMask && !previewFailed && (
         <img
           className="mask-preview"
-          alt={`步骤 ${stepIndex + 1} 掩膜预览`}
+          alt={t('mask.previewAlt', {step: stepIndex + 1})}
           src={`/api/mask/preview_step?step_index=${stepIndex}&t=${previewNonce}`}
           onError={() => setPreviewFailed(true)}
         />
       )}
       {hasMask && previewFailed && (
-        <p className="mask-preview-error" role="status">掩膜预览暂不可用</p>
+        <p className="mask-preview-error" role="status">{t('mask.previewUnavailable')}</p>
       )}
     </div>
   );

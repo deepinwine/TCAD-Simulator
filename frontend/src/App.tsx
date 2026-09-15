@@ -8,6 +8,7 @@ import {RecipeAssistant} from './components/RecipeAssistant';
 import {StepStructureBar} from './components/StepStructureBar';
 import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
+import {I18nProvider, useI18n} from './i18n/I18nContext';
 import {AppStateProvider, useAppState} from './state/AppStateContext';
 import {ThreeViewer} from './viewer/ThreeViewer';
 import type {ViewerRuntime} from './viewer/viewerRuntime';
@@ -19,6 +20,7 @@ interface AppProps {
 
 function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFactory?: (api: TcadApi) => ViewerRuntime}) {
   const {state, actions} = useAppState();
+  const {t} = useI18n();
   const [parametersCollapsed, setParametersCollapsed] = useState(false);
   const selectedStep = useMemo(
     () => state.recipe.find(step => step.index === state.selectedStepIndex) ?? null,
@@ -30,7 +32,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       <main className="launch-screen">
         <h1>TCAD Studio</h1>
         <p role="status" aria-live="polite" aria-busy="true">
-          正在连接现有 Process CAD Session…
+          {t('app.connecting')}
         </p>
       </main>
     );
@@ -41,9 +43,10 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       <main className="launch-screen">
         <h1>TCAD Studio</h1>
         <ErrorNotice
-          title="无法加载 TCAD Session"
-          message="请确认 TCAD 服务已启动，然后重试连接。"
-          actionLabel="重试连接"
+          title={t('app.loadErrorTitle')}
+          error={state.globalError ?? undefined}
+          message={t('app.loadErrorMessage')}
+          actionLabel={t('app.retryConnection')}
           onAction={() => void actions.bootstrap()}
         />
       </main>
@@ -63,14 +66,15 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       {state.globalError !== null && state.globalError !== state.timelineError && (
         <div className="global-error-strip">
           <ErrorNotice
-            title="操作失败"
-            message={state.globalError.message}
+            title={t('error.operationTitle')}
+            error={state.globalError}
             parameterPath={state.globalError.parameterPath}
             suggestion={state.globalError.code === 'network_error'
-              ? '服务端可能仍在执行（长工艺无响应期间连接可能被断开）。点击重新同步以服务端状态为准。'
+              ? t('error.networkSuggestion')
               : state.globalError.suggestion}
+            trustedSuggestion={state.globalError.code === 'network_error'}
             rolledBack={state.globalError.rolledBack}
-            actionLabel={state.globalError.code === 'network_error' ? '重新同步' : undefined}
+            actionLabel={state.globalError.code === 'network_error' ? t('error.reconcile') : undefined}
             onAction={state.globalError.code === 'network_error'
               ? () => void actions.reconcile()
               : undefined}
@@ -99,8 +103,10 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
 export function App({api, viewerRuntimeFactory}: AppProps) {
   const resolvedApi = useMemo(() => api ?? createTcadApi(), [api]);
   return (
-    <AppStateProvider api={resolvedApi}>
-      <StudioShell api={resolvedApi} viewerRuntimeFactory={viewerRuntimeFactory} />
-    </AppStateProvider>
+    <I18nProvider>
+      <AppStateProvider api={resolvedApi}>
+        <StudioShell api={resolvedApi} viewerRuntimeFactory={viewerRuntimeFactory} />
+      </AppStateProvider>
+    </I18nProvider>
   );
 }

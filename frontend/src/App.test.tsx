@@ -70,6 +70,22 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
   };
 }
 
+function stubViewerRuntime() {
+  return {
+    backend: 'WebGL2',
+    mount: () => {},
+    setStandardView: () => {},
+    setProjection: () => {},
+    setClipping: () => {},
+    setMaterialDisplay: () => {},
+    pickAt: () => null,
+    setMeasureMarkers: () => {},
+    fit: () => {},
+    loadMeshes: async () => ({warnings: [], materials: []}),
+    dispose: () => {},
+  };
+}
+
 describe('App shell', () => {
   it('bootstrap 后同时显示三栏与 Timeline', async () => {
     render(<App api={apiStub()} />);
@@ -129,6 +145,21 @@ describe('App shell', () => {
     expect(init).toHaveBeenCalledTimes(2);
   });
 
+  it('启动阶段的已知 API 错误码使用本地化安全正文', async () => {
+    render(<App api={apiStub({
+      init: vi.fn(async () => {
+        throw new TcadApiError('raw server connection detail', {
+          status: 0,
+          code: 'network_error',
+        });
+      }),
+    })} />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('无法连接 TCAD 服务。');
+    expect(alert).not.toHaveTextContent('raw server connection detail');
+  });
+
   it('Parameters 折叠按钮同步 class、hidden 与 aria-expanded', async () => {
     render(<App api={apiStub()} />);
     const button = await screen.findByRole('button', {name: '折叠 Parameters'});
@@ -162,6 +193,60 @@ describe('App shell', () => {
     await waitFor(() => expect(api.init).toHaveBeenCalledTimes(1));
   });
 
+  it('切换语言保留未失焦草稿、选中步骤与 Viewer runtime，且不请求工艺 API', async () => {
+    const api = apiStub({
+      init: vi.fn(async () => initView([
+        step(0, {instanceName: 'Substrate'}),
+        step(1, {
+          instanceName: 'Etch',
+          params: {dose: 5},
+          parameterSpecs: [{
+            key: 'dose',
+            label: 'Dose',
+            type: 'float',
+            minimum: 0,
+          }],
+        }),
+      ])),
+    });
+    const runtime = {
+      backend: 'WebGL2',
+      mount: vi.fn(),
+      setStandardView: vi.fn(),
+      setProjection: vi.fn(),
+      setClipping: vi.fn(),
+      setMaterialDisplay: vi.fn(),
+      pickAt: vi.fn(() => null),
+      setMeasureMarkers: vi.fn(),
+      fit: vi.fn(),
+      loadMeshes: vi.fn(async () => ({warnings: [], materials: []})),
+      dispose: vi.fn(),
+    };
+    const runtimeFactory = vi.fn(() => runtime);
+    render(<App api={api} viewerRuntimeFactory={runtimeFactory} />);
+
+    const etch = await screen.findByRole('option', {name: /Etch/});
+    fireEvent.click(etch);
+    const dose = screen.getByRole('textbox', {name: 'Dose'});
+    fireEvent.change(dose, {target: {value: '-1'}});
+    fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+
+    expect(screen.getByRole('textbox', {name: 'Dose'})).toHaveValue('-1');
+    expect(screen.getByText('Must be greater than or equal to 0')).toBeVisible();
+    expect(screen.getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('button', {name: 'Run All'})).toBeVisible();
+    expect(window.localStorage.getItem('tcad.locale.v1')).toBe('en');
+    expect(api.init).toHaveBeenCalledTimes(1);
+    expect(api.setStep).not.toHaveBeenCalled();
+    expect(api.runStep).not.toHaveBeenCalled();
+    expect(api.runTo).not.toHaveBeenCalled();
+    expect(api.runAll).not.toHaveBeenCalled();
+    expect(api.getTimeline).toHaveBeenCalledTimes(1);
+    expect(runtimeFactory).toHaveBeenCalledTimes(1);
+    expect(runtime.loadMeshes).toHaveBeenCalledTimes(1);
+    expect(runtime.dispose).not.toHaveBeenCalled();
+  });
+
   it('run 网络失败后可重新同步服务端权威状态', async () => {
     const api = apiStub({
       runAll: vi.fn(async () => {
@@ -188,7 +273,7 @@ describe('App shell', () => {
     await screen.findByRole('region', {name: 'Process Flow'});
     const getTimelineCallsBefore = (api.getTimeline as ReturnType<typeof vi.fn>).mock.calls.length;
 
-    fireEvent.click(screen.getByRole('button', {name: '运行全部'}));
+    fireEvent.click(screen.getByRole('button', {name: '全部运行'}));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('无法连接 TCAD 服务');
 
@@ -198,5 +283,69 @@ describe('App shell', () => {
         .toBeGreaterThan(getTimelineCallsBefore);
     });
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('已知错误码显示当前语言文案而不暴露原始消息', async () => {
+    const api = apiStub({
+      runAll: vi.fn(async () => {
+        throw new TcadApiError('raw server connection detail', {
+          status: 0,
+          code: 'network_error',
+        });
+      }),
+    });
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '全部运行'});
+    fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+    fireEvent.click(screen.getByRole('button', {name: 'Run All'}));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Unable to connect');
+    expect(alert).not.toHaveTextContent('raw server connection detail');
+  });
+
+  it('未知错误只显示通用文案与受限诊断元数据', async () => {
+    const api = apiStub({
+      runAll: vi.fn(async () => {
+        throw new TcadApiError('safe diagnostic message', {
+          status: 500,
+          code: 'unregistered_error',
+          details: {stepIndex: 0, secret: '/private/secret-database-path'},
+          parameterPath: 'path=/private/secret-database-path',
+          suggestion: 'Authorization: Bearer secret-token',
+        });
+      }),
+    });
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '全部运行'});
+    fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+    fireEvent.click(screen.getByRole('button', {name: 'Run All'}));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('An unexpected error occurred.');
+    expect(alert).toHaveTextContent('code: unregistered_error');
+    expect(alert).toHaveTextContent('stepIndex: 0');
+    expect(alert).not.toHaveTextContent('safe diagnostic message');
+    expect(alert).not.toHaveTextContent('secret-database-path');
+    expect(alert).not.toHaveTextContent('Authorization: Bearer');
+  });
+
+  it('未知错误的诊断详情不会泄露不安全的错误码', async () => {
+    const api = apiStub({
+      runAll: vi.fn(async () => {
+        throw new TcadApiError('safe diagnostic message', {
+          status: 500,
+          code: '/private/secret-database-path',
+        });
+      }),
+    });
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    await screen.findByRole('button', {name: '全部运行'});
+    fireEvent.click(screen.getByRole('button', {name: '全部运行'}));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('safe diagnostic message');
+    expect(alert).not.toHaveTextContent('secret-database-path');
   });
 });

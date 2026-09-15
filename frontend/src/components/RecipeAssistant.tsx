@@ -1,5 +1,7 @@
 import {useCallback, useRef, useState} from 'react';
 import {useAppState} from '../state/AppStateContext';
+import {useI18n} from '../i18n/I18nContext';
+import type {TranslationKey} from '../i18n/catalogs';
 
 interface PlannedStepView {
   type: string;
@@ -36,12 +38,13 @@ interface ValidationView {
  */
 export function RecipeAssistant() {
   const {actions} = useAppState();
+  const {t} = useI18n();
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState<DraftView | null>(null);
   const [validation, setValidation] = useState<ValidationView | null>(null);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{key: TranslationKey} | {message: string} | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const generate = useCallback(async () => {
@@ -74,10 +77,12 @@ export function RecipeAssistant() {
         setDraft(data.draft);
         setValidation(data.validation);
       } else {
-        setError(data.error ?? '解析失败');
+        setError(data.error === undefined
+          ? {key: 'recipeAssistant.parseFailed'}
+          : {message: data.error});
       }
     } else {
-      setError('Recipe 解析服务不可用（需启动 FastAPI /api/v2）');
+      setError({key: 'recipeAssistant.unavailable'});
     }
     setBusy(false);
   }, [input, busy, applying]);
@@ -102,28 +107,28 @@ export function RecipeAssistant() {
         setValidation(null);
         setInput('');
       } else {
-        setError('Recipe 未应用，工艺描述和草稿已保留。请检查错误或未保存的参数后重试。');
+        setError({key: 'recipeAssistant.notApplied'});
       }
     } catch {
-      setError('Recipe 导入失败，工艺描述和草稿已保留，请重试。');
+      setError({key: 'recipeAssistant.importFailed'});
     } finally {
       setApplying(false);
     }
   }, [draft, validation, actions, busy, applying]);
 
   return (
-    <section className="recipe-assistant" aria-label="Recipe Assistant">
+    <section className="recipe-assistant" aria-label={t('recipeAssistant.region')}>
       <header className="pane-header">
         <div>
-          <span className="pane-kicker">AI</span>
-          <h2>Recipe Assistant</h2>
+          <span className="pane-kicker">{t('recipeAssistant.kicker')}</span>
+          <h2>{t('recipeAssistant.title')}</h2>
         </div>
       </header>
       <textarea
         ref={inputRef}
         className="recipe-input"
-        aria-label="工艺描述"
-        placeholder={'描述你的半导体工艺…\n例：初始化硅衬底200nm，沉积100nm SiO2，涂胶100nm，光刻100nm孔，显影，刻蚀SiO2 30秒，去胶'}
+        aria-label={t('recipeAssistant.inputLabel')}
+        placeholder={t('recipeAssistant.placeholder')}
         value={input}
         disabled={busy || applying}
         onChange={event => setInput(event.target.value)}
@@ -141,7 +146,7 @@ export function RecipeAssistant() {
           disabled={busy || applying || input.trim() === ''}
           onClick={() => void generate()}
         >
-          {busy ? '解析中…' : '生成 Recipe'}
+          {busy ? t('recipeAssistant.parsing') : t('recipeAssistant.generate')}
         </button>
         {draft !== null && validation?.ok && (
           <button
@@ -150,31 +155,33 @@ export function RecipeAssistant() {
             disabled={busy || applying || draft.steps.length === 0}
             onClick={() => void apply()}
           >
-            {applying ? '应用中…' : '应用到 Process Flow'}
+            {applying ? t('recipeAssistant.applying') : t('recipeAssistant.apply')}
           </button>
         )}
       </div>
       {error !== null && (
-        <p className="recipe-error" role="alert">{error}</p>
+        <p className="recipe-error" role="alert">
+          {'key' in error ? t(error.key) : error.message}
+        </p>
       )}
       {draft !== null && (
-        <div className="recipe-draft" role="region" aria-label="Proposed Recipe">
-          <h3>Proposed Recipe</h3>
+        <div className="recipe-draft" role="region" aria-label={t('recipeAssistant.proposed')}>
+          <h3>{t('recipeAssistant.proposed')}</h3>
           {validation !== null && validation.errors.length > 0 && (
             <div className="recipe-error" role="alert">
-              <h4>验证错误</h4>
+              <h4>{t('recipeAssistant.validationErrors')}</h4>
               <ul>{validation.errors.map((message, index) => <li key={index}>{message}</li>)}</ul>
             </div>
           )}
           {(draft.warnings.length > 0 || (validation?.warnings.length ?? 0) > 0) && (
             <div className="recipe-warnings" role="status">
-              <h4>警告</h4>
+              <h4>{t('recipeAssistant.warnings')}</h4>
               <ul>{[...draft.warnings, ...(validation?.warnings ?? [])].map((message, index) => (
                 <li key={index}>{message}</li>
               ))}</ul>
             </div>
           )}
-          {draft.steps.length === 0 && <p role="alert">草稿没有可应用的步骤，请补充工艺描述。</p>}
+          {draft.steps.length === 0 && <p role="alert">{t('recipeAssistant.noSteps')}</p>}
           <ol className="recipe-steps">
             {draft.steps.map((step, index) => (
               <li key={index} className={`recipe-step ${step.isDefault ? 'is-default' : ''}`}>
@@ -188,10 +195,12 @@ export function RecipeAssistant() {
                       .join(' · ')}
                   </span>
                   {step.isDefault && (
-                    <span className="default-badge">自动填充默认值</span>
+                    <span className="default-badge">{t('recipeAssistant.defaultValue')}</span>
                   )}
                   {step.confidence < 0.7 && (
-                    <span className="low-confidence">置信度 {(step.confidence * 100).toFixed(0)}%</span>
+                    <span className="low-confidence">
+                      {t('recipeAssistant.lowConfidence', {percent: (step.confidence * 100).toFixed(0)})}
+                    </span>
                   )}
                   {step.warnings.map((warning, warningIndex) => (
                     <span key={warningIndex} className="step-warning">⚠ {warning}</span>
@@ -202,7 +211,7 @@ export function RecipeAssistant() {
           </ol>
           {draft.ambiguities.length > 0 && (
             <div className="recipe-ambiguities" role="alert">
-              <h4>歧义</h4>
+              <h4>{t('recipeAssistant.ambiguities')}</h4>
               <ul>
                 {draft.ambiguities.map((ambiguity, index) => (
                   <li key={index}>{ambiguity}</li>
@@ -212,12 +221,12 @@ export function RecipeAssistant() {
           )}
           {validation !== null && validation.mode_recommendations.length > 0 && (
             <div className="mode-recommendations">
-              <h4>仿真模式建议</h4>
+              <h4>{t('recipeAssistant.modeRecommendations')}</h4>
               <ul>
                 {validation.mode_recommendations.map((rec, index) => (
                   <li key={index}>
                     <strong>{rec.step}</strong>: {rec.recommended_mode}
-                    <span className="mode-reason">（{rec.reason}）</span>
+                    <span className="mode-reason">{t('recipeAssistant.modeReason', {reason: rec.reason})}</span>
                   </li>
                 ))}
               </ul>

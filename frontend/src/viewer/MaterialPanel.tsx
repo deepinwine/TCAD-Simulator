@@ -1,3 +1,5 @@
+import {useI18n} from '../i18n/I18nContext';
+
 export interface MaterialDisplayState {
   visible: boolean;
   opacity: number;
@@ -21,9 +23,10 @@ interface MaterialPanelProps {
  * 纯浏览器本地显示状态，不回写后端。
  */
 export function MaterialPanel({materials, display, onChange, disabled = false}: MaterialPanelProps) {
+  const {t} = useI18n();
   if (materials.length === 0) return null;
   return (
-    <div className="viewer-material-panel" role="group" aria-label="材料显示控制">
+    <div className="viewer-material-panel" role="group" aria-label={t('viewer.materialControl')}>
       {materials.map(({matId, name}) => {
         const state = display[matId];
         if (state === undefined) return null;
@@ -34,7 +37,7 @@ export function MaterialPanel({materials, display, onChange, disabled = false}: 
                 type="checkbox"
                 checked={state.visible}
                 disabled={disabled}
-                aria-label={`${name} 可见`}
+                aria-label={t('viewer.materialVisible', {name})}
                 onChange={() => onChange(matId, {...state, visible: !state.visible})}
               />
               {name}
@@ -46,7 +49,7 @@ export function MaterialPanel({materials, display, onChange, disabled = false}: 
               step={0.05}
               value={state.opacity}
               disabled={disabled}
-              aria-label={`${name} 透明度`}
+              aria-label={t('viewer.materialOpacity', {name})}
               onChange={event => onChange(matId, {
                 ...state,
                 opacity: Number(event.target.value),

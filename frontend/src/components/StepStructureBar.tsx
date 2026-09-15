@@ -1,5 +1,6 @@
 import {useState} from 'react';
 import {useAppState} from '../state/AppStateContext';
+import {useI18n} from '../i18n/I18nContext';
 
 /**
  * 步骤结构编辑条：添加（工厂选择）、上移/下移/复制/删除、重命名（1–80 字符）。
@@ -7,6 +8,7 @@ import {useAppState} from '../state/AppStateContext';
  */
 export function StepStructureBar() {
   const {state, actions} = useAppState();
+  const {t} = useI18n();
   const [addChoice, setAddChoice] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const busy = state.phase === 'running' || state.activeMutation !== null;
@@ -21,14 +23,14 @@ export function StepStructureBar() {
   const renameValid = renameTrimmed.length >= 1 && renameTrimmed.length <= 80;
 
   return (
-    <div className="step-structure-bar" role="group" aria-label="步骤结构编辑">
+    <div className="step-structure-bar" role="group" aria-label={t('structure.group')}>
       <select
-        aria-label="添加步骤类型"
+        aria-label={t('structure.addType')}
         value={addChoice}
         disabled={busy || state.factories.length === 0}
         onChange={event => setAddChoice(event.target.value)}
       >
-        <option value="">-- 步骤类型 --</option>
+        <option value="">{t('structure.selectType')}</option>
         {state.factories.map(factory => (
           <option key={factory} value={factory}>{factory}</option>
         ))}
@@ -41,40 +43,40 @@ export function StepStructureBar() {
           setAddChoice('');
         }}
       >
-        添加步骤
+        {t('structure.add')}
       </button>
       <button
         type="button"
         disabled={busy || !canMoveUp}
         onClick={() => void actions.moveStep('up')}
       >
-        上移
+        {t('structure.moveUp')}
       </button>
       <button
         type="button"
         disabled={busy || !canMoveDown}
         onClick={() => void actions.moveStep('down')}
       >
-        下移
+        {t('structure.moveDown')}
       </button>
       <button
         type="button"
         disabled={busy || selectedIndex === null}
         onClick={() => void actions.duplicateStep()}
       >
-        复制
+        {t('structure.duplicate')}
       </button>
       <button
         type="button"
         disabled={busy || selectedIndex === null || state.recipe.length <= 1}
         onClick={() => void actions.removeStep()}
       >
-        删除
+        {t('structure.remove')}
       </button>
       <input
         type="text"
-        aria-label="步骤重命名"
-        placeholder={selected?.instanceName ?? '新步骤名'}
+        aria-label={t('structure.rename')}
+        placeholder={selected?.instanceName ?? t('structure.newName')}
         value={renameValue}
         disabled={busy || selectedIndex === null}
         onChange={event => setRenameValue(event.target.value)}
@@ -87,7 +89,7 @@ export function StepStructureBar() {
           setRenameValue('');
         }}
       >
-        应用重命名
+        {t('structure.applyRename')}
       </button>
     </div>
   );

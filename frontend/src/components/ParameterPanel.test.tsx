@@ -239,7 +239,7 @@ describe('ParameterPanel', () => {
     unmount();
   });
 
-  it('保存失败保留原始文本并显示 parameter path 与 suggestion', async () => {
+  it('保存失败保留输入 draft 并显示安全 parameter path', async () => {
     vi.useFakeTimers();
     const initial = init();
     const error = new TcadApiError('剂量不符合服务端约束', {
@@ -261,9 +261,10 @@ describe('ParameterPanel', () => {
     expect(input).toHaveValue('125.');
     expect(input).toHaveAttribute('aria-invalid', 'true');
     expect(input.getAttribute('aria-describedby')).toContain('parameter-server-error-0-dose');
-    expect(screen.getByText('剂量不符合服务端约束')).toBeInTheDocument();
+    expect(screen.getByText('发生未预期的错误。')).toBeInTheDocument();
+    expect(screen.queryByText(/剂量不符合服务端约束/)).not.toBeInTheDocument();
     expect(screen.getByText('参数路径：params["dose"]')).toBeInTheDocument();
-    expect(screen.getByText('建议：请输入经校准的剂量')).toBeInTheDocument();
+    expect(screen.queryByText('建议：请输入经校准的剂量')).not.toBeInTheDocument();
     unmount();
   });
 
@@ -283,7 +284,8 @@ describe('ParameterPanel', () => {
     fireEvent.click(screen.getByRole('button', {name: '选择步骤 0'}));
 
     expect(screen.getByLabelText('Dose')).toHaveValue('125.');
-    expect(screen.getByText('剂量不符合服务端约束')).toBeInTheDocument();
+    expect(screen.getByText('发生未预期的错误。')).toBeInTheDocument();
+    expect(screen.queryByText(/剂量不符合服务端约束/)).not.toBeInTheDocument();
     unmount();
   });
 
@@ -297,10 +299,11 @@ describe('ParameterPanel', () => {
 
     fireEvent.change(input, {target: {value: '125'}});
     await act(async () => vi.advanceTimersByTimeAsync(350));
-    expect(screen.getByText('旧剂量错误')).toBeInTheDocument();
+    expect(screen.getByText('发生未预期的错误。')).toBeInTheDocument();
+    expect(screen.queryByText(/旧剂量错误/)).not.toBeInTheDocument();
 
     fireEvent.change(input, {target: {value: '126'}});
-    expect(screen.queryByText('旧剂量错误')).not.toBeInTheDocument();
+    expect(screen.queryByText('发生未预期的错误。')).not.toBeInTheDocument();
     expect(input).toHaveAttribute('aria-invalid', 'false');
     unmount();
   });

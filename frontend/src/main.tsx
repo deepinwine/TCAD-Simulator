@@ -8,7 +8,7 @@ import './styles.css';
 const rootElement = document.getElementById('root');
 
 if (!rootElement) {
-  throw new Error('缺少 #root 挂载节点');
+  throw new Error('Missing #root mount element');
 }
 
 createRoot(rootElement).render(

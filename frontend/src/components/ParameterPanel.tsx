@@ -3,6 +3,7 @@ import type {TcadApiError} from '../api/client';
 import type {ParameterChoiceValue, ParameterSpecView, StepView} from '../api/types';
 import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
+import {type I18nContextValue, useI18n} from '../i18n/I18nContext';
 import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
@@ -34,7 +35,9 @@ interface ParameterControlProps {
   onFlush(): void;
 }
 
-function safeText(value: unknown): string {
+type Translate = I18nContextValue['t'];
+
+function safeText(value: unknown, t: Translate): string {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
@@ -44,7 +47,7 @@ function safeText(value: unknown): string {
     const serialized = JSON.stringify(value);
     return serialized ?? '';
   } catch {
-    return '无法显示的复杂值';
+    return t('parameter.unavailableValue');
   }
 }
 
@@ -64,7 +67,7 @@ function choiceIndex(
   return index < 0 ? '' : String(index);
 }
 
-function initialDisplayValue(spec: ParameterSpecView, value: unknown): DisplayValue {
+function initialDisplayValue(spec: ParameterSpecView, value: unknown, t: Translate): DisplayValue {
   if (isChoice(spec)) return choiceIndex(spec.choices, value);
   if (isBoolean(spec)) {
     if (value === true || value === 1) return true;
@@ -73,20 +76,41 @@ function initialDisplayValue(spec: ParameterSpecView, value: unknown): DisplayVa
     }
     return false;
   }
-  return safeText(value);
+  return safeText(value, t);
 }
 
-function parameterDescription(spec: ParameterSpecView): string {
+function parameterDescription(spec: ParameterSpecView, t: Translate): string {
   const parts: string[] = [];
   if (spec.tooltip) parts.push(spec.tooltip);
   if (spec.minimum !== undefined || spec.maximum !== undefined) {
-    const minimum = spec.minimum === undefined ? '不限' : String(spec.minimum);
-    const maximum = spec.maximum === undefined ? '不限' : String(spec.maximum);
-    parts.push(`范围 ${minimum} 至 ${maximum}`);
+    const minimum = spec.minimum === undefined ? t('parameter.unbounded') : String(spec.minimum);
+    const maximum = spec.maximum === undefined ? t('parameter.unbounded') : String(spec.maximum);
+    parts.push(t('parameter.range', {minimum, maximum}));
   }
-  if (spec.step !== undefined) parts.push(`步进 ${spec.step}`);
-  if (spec.decimals !== undefined) parts.push(`显示精度 ${spec.decimals} 位小数`);
-  return parts.join('；');
+  if (spec.step !== undefined) parts.push(t('parameter.step', {step: spec.step}));
+  if (spec.decimals !== undefined) parts.push(t('parameter.decimals', {decimals: spec.decimals}));
+  return parts.join(t('common.listSeparator'));
+}
+
+function validationMessage(
+  messageKey: string | undefined,
+  spec: ParameterSpecView,
+  t: Translate,
+): string {
+  switch (messageKey) {
+    case 'validation.finite':
+    case 'validation.integer':
+    case 'validation.safeInteger':
+    case 'validation.boolean':
+    case 'validation.choice':
+      return t(messageKey);
+    case 'validation.minimum':
+      return t(messageKey, {minimum: spec.minimum ?? ''});
+    case 'validation.maximum':
+      return t(messageKey, {maximum: spec.maximum ?? ''});
+    default:
+      return t('parameter.invalid');
+  }
 }
 
 function ParameterControl({
@@ -99,6 +123,7 @@ function ParameterControl({
   onUpdate,
   onFlush,
 }: ParameterControlProps) {
+  const {t} = useI18n();
   const handleKeyDown = (
     event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
   ) => {
@@ -127,9 +152,9 @@ function ParameterControl({
         onBlur={onFlush}
         onKeyDown={handleKeyDown}
       >
-        <option value="" disabled>请选择</option>
+        <option value="" disabled>{t('parameter.choicePlaceholder')}</option>
         {spec.choices?.map(([value, label], index) => (
-          <option key={index} value={String(index)}>{label || safeText(value)}</option>
+          <option key={index} value={String(index)}>{label || safeText(value, t)}</option>
         ))}
       </select>
     );
@@ -186,6 +211,7 @@ function ParameterField({
   serverError,
 }: ParameterFieldProps) {
   const {state, actions} = useAppState();
+  const {t} = useI18n();
   const key = parameterDraftKey(stepIndex, spec.key);
   const draft = state.drafts[key];
   const inputId = `parameter-${stepIndex}-${spec.key}`;
@@ -197,13 +223,13 @@ function ParameterField({
     : `parameter-server-error-${stepIndex}-${spec.key}`;
   const initialValue = serverValue === undefined ? spec.defaultValue : serverValue;
   const [displayValue, setDisplayValue] = useState<DisplayValue>(
-    () => draft?.rawValue ?? initialDisplayValue(spec, initialValue),
+    () => draft?.rawValue ?? initialDisplayValue(spec, initialValue, t),
   );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validDraftRef = useRef(false);
-  const description = parameterDescription(spec);
+  const description = parameterDescription(spec, t);
   const clientError = draft?.validation.status === 'invalid'
-    ? draft.validation.message ?? '参数值无效'
+    ? validationMessage(draft.validation.message, spec, t)
     : undefined;
   const hasError = clientError !== undefined || serverErrorId !== undefined;
   const describedBy = [
@@ -228,9 +254,9 @@ function ParameterField({
       validDraftRef.current = draft.validation.status === 'valid';
       return;
     }
-    setDisplayValue(initialDisplayValue(spec, initialValue));
+    setDisplayValue(initialDisplayValue(spec, initialValue, t));
     validDraftRef.current = false;
-  }, [draft, initialValue, spec]);
+  }, [draft, initialValue, spec, t]);
 
   useEffect(() => {
     if (disabled) clearTimer();
@@ -249,7 +275,7 @@ function ParameterField({
         stepIndex,
         spec.key,
         raw,
-        {status: 'invalid', message: validation.message},
+        {status: 'invalid', message: validation.messageKey},
         display,
       );
       return;
@@ -295,10 +321,14 @@ function ParameterField({
       {description && <p id={descriptionId} className="parameter-help">{description}</p>}
       {clientError && <p id={validationId} className="parameter-error">{clientError}</p>}
       {serverError !== undefined && (
-        <div id={serverErrorId} className="parameter-server-error" role="alert">
-          <strong>{serverError.message}</strong>
-          {serverError.parameterPath && <span>参数路径：{serverError.parameterPath}</span>}
-          {serverError.suggestion && <span>建议：{serverError.suggestion}</span>}
+        <div id={serverErrorId} className="parameter-server-error">
+          <ErrorNotice
+            title={t('parameter.saveErrorTitle')}
+            error={serverError}
+            parameterPath={serverError.parameterPath}
+            suggestion={serverError.suggestion}
+            rolledBack={serverError.rolledBack}
+          />
         </div>
       )}
     </div>
@@ -307,6 +337,7 @@ function ParameterField({
 
 export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
   const {state} = useAppState();
+  const {t} = useI18n();
   const disabled = state.phase === 'running' || state.activeMutation !== null;
   const runError = step === null ? undefined : state.stepErrors[step.index];
 
@@ -314,23 +345,23 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
     <section
       id="parameter-panel"
       className="workspace-pane parameter-pane"
-      aria-label="Parameters"
+      aria-label={t('parameter.region')}
       aria-busy={disabled}
       hidden={collapsed}
     >
       <header className="pane-header">
         <div>
-          <span className="pane-kicker">Inspector</span>
-          <h2>Parameters</h2>
+          <span className="pane-kicker">{t('parameter.kicker')}</span>
+          <h2>{t('parameter.title')}</h2>
         </div>
       </header>
       {step === null ? (
-        <p className="pane-empty">选择一个工艺步骤以查看参数</p>
+        <p className="pane-empty">{t('parameter.empty')}</p>
       ) : (
         <div className="parameter-summary">
           <div className="selected-step-heading">
             <div>
-              <span className="selection-label">当前步骤</span>
+              <span className="selection-label">{t('parameter.currentStep')}</span>
               <h3>{step.instanceName}</h3>
               <p>{step.name}</p>
             </div>
@@ -338,15 +369,15 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
           </div>
           {runError !== undefined && (
             <ErrorNotice
-              title="步骤执行失败"
-              message={runError.message}
+              title={t('parameter.runErrorTitle')}
+              error={runError}
               parameterPath={runError.parameterPath}
               suggestion={runError.suggestion}
               rolledBack={runError.rolledBack}
             />
           )}
           {step.parameterSpecs.length === 0 ? (
-            <p className="pane-empty">此步骤没有可编辑参数</p>
+            <p className="pane-empty">{t('parameter.noEditable')}</p>
           ) : (
             <form className="parameter-form" onSubmit={event => event.preventDefault()}>
               {step.parameterSpecs.map(spec => {

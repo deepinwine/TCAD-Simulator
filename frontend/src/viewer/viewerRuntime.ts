@@ -205,7 +205,6 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       container = host;
       canvas = document.createElement('canvas');
       canvas.className = 'viewer-canvas';
-      canvas.setAttribute('aria-label', '3D 工艺结构预览');
       canvas.setAttribute('role', 'img');
       host.appendChild(canvas);
       try {

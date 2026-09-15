@@ -214,7 +214,7 @@ describe('Toolbar undo/redo', () => {
   it('撤销与重做按钮触发对应 API 调用', async () => {
     const api = apiStub();
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
-    await screen.findByRole('button', {name: '运行全部'});
+    await screen.findByRole('button', {name: '全部运行'});
 
     fireEvent.click(screen.getByRole('button', {name: '撤销'}));
     await waitFor(() => expect(api.undo).toHaveBeenCalledTimes(1));
@@ -226,15 +226,15 @@ describe('Toolbar undo/redo', () => {
     const pending = new Promise<never>(() => undefined);
     const api = apiStub({runAll: vi.fn(() => pending)});
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
-    await screen.findByRole('button', {name: '运行全部'});
-    fireEvent.click(screen.getByRole('button', {name: '运行全部'}));
+    await screen.findByRole('button', {name: '全部运行'});
+    fireEvent.click(screen.getByRole('button', {name: '全部运行'}));
     await waitFor(() => expect(screen.getByRole('button', {name: '撤销'})).toBeDisabled());
     expect(screen.getByRole('button', {name: '重做'})).toBeDisabled();
   });
 });
 
 describe('Toolbar 执行操作', () => {
-  it('三个运行按钮分别调用选中步骤、运行至步骤和运行全部', async () => {
+  it('三个运行按钮分别调用选中步骤、运行至步骤和全部运行', async () => {
     const api = apiStub();
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
     await screen.findByRole('button', {name: '运行选中步骤'});
@@ -243,7 +243,7 @@ describe('Toolbar 执行操作', () => {
     await waitFor(() => expect(api.runStep).toHaveBeenCalledWith(0, expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole('button', {name: '运行至选中步骤'}));
     await waitFor(() => expect(api.runTo).toHaveBeenCalledWith(0, expect.any(AbortSignal)));
-    fireEvent.click(screen.getByRole('button', {name: '运行全部'}));
+    fireEvent.click(screen.getByRole('button', {name: '全部运行'}));
     await waitFor(() => expect(api.runAll).toHaveBeenCalledWith(expect.any(AbortSignal)));
   });
 
@@ -252,7 +252,7 @@ describe('Toolbar 执行操作', () => {
     const api = apiStub({runAll: vi.fn(() => pending.promise)});
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
-    const runAll = await screen.findByRole('button', {name: '运行全部'});
+    const runAll = await screen.findByRole('button', {name: '全部运行'});
     fireEvent.click(runAll);
     fireEvent.click(runAll);
 
@@ -275,7 +275,7 @@ describe('Toolbar 执行操作', () => {
 
     expect(await screen.findByRole('button', {name: '运行选中步骤'})).toBeDisabled();
     expect(screen.getByRole('button', {name: '运行至选中步骤'})).toBeDisabled();
-    expect(screen.getByRole('button', {name: '运行全部'})).toBeEnabled();
+    expect(screen.getByRole('button', {name: '全部运行'})).toBeEnabled();
   });
 
   it('存在未保存 draft 时禁用全部运行与恢复，并解释处理方式', async () => {
@@ -288,7 +288,7 @@ describe('Toolbar 执行操作', () => {
 
     const guidance = screen.getByText('请先保存或修正参数');
     expect(guidance).toBeVisible();
-    for (const label of ['运行选中步骤', '运行至选中步骤', '运行全部']) {
+    for (const label of ['运行选中步骤', '运行至选中步骤', '全部运行']) {
       const button = screen.getByRole('button', {name: label});
       expect(button).toBeDisabled();
       expect(button).toHaveAttribute('aria-describedby', guidance.id);
@@ -303,7 +303,7 @@ describe('Toolbar 执行操作', () => {
   it.each([
     [false, '模型未回滚，状态可能已改变'],
     [true, '服务端报告：本次失败已回滚'],
-  ] as const)('步骤错误显示结构字段和 rolledBack=%s', async (rolledBack, rollbackCopy) => {
+  ] as const)('步骤错误显示安全结构字段和 rolledBack=%s', async (rolledBack, rollbackCopy) => {
     const api = apiStub({
       runStep: vi.fn(async () => {
         throw new TcadApiError('沉积失败', {
@@ -320,9 +320,11 @@ describe('Toolbar 执行操作', () => {
     fireEvent.click(screen.getByRole('button', {name: '运行选中步骤'}));
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('沉积失败');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('沉积失败');
     expect(alert).toHaveTextContent('参数路径：params.dose');
-    expect(alert).toHaveTextContent('建议：减小剂量后重试');
+    expect(alert).not.toHaveTextContent('建议：减小剂量后重试');
+    expect(alert).toHaveTextContent('stepIndex: 1');
     expect(alert).toHaveTextContent(rollbackCopy);
     expect(screen.getByRole('option', {name: /Step 2/})).toHaveTextContent('Error');
   });
@@ -357,12 +359,12 @@ describe('Toolbar 执行操作', () => {
     await waitFor(() => expect(getTimeline).toHaveBeenCalledTimes(2));
     await waitFor(() => {
       expect(screen.getByRole('navigation', {name: 'Process Timeline'}))
-        .toHaveTextContent('#2 current');
+        .toHaveTextContent('#2 当前');
     });
     await waitFor(() => expect(viewerRuntime.loadedTokens).toEqual([1, 2]));
   });
 
-  it('Run All 的无步骤结构化错误显示为全局错误', async () => {
+  it('Run All 的未知结构化错误显示为安全全局错误', async () => {
     const api = apiStub({
       runAll: vi.fn(async () => {
         throw new TcadApiError('全局执行失败', {
@@ -373,11 +375,12 @@ describe('Toolbar 执行操作', () => {
       }),
     });
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
-    fireEvent.click(await screen.findByRole('button', {name: '运行全部'}));
+    fireEvent.click(await screen.findByRole('button', {name: '全部运行'}));
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('全局执行失败');
-    expect(alert).toHaveTextContent('检查 Worker 日志');
+    expect(alert).toHaveTextContent('发生未预期的错误。');
+    expect(alert).not.toHaveTextContent('全局执行失败');
+    expect(alert).not.toHaveTextContent('检查 Worker 日志');
     expect(alert).toHaveTextContent('模型未回滚，状态可能已改变');
   });
 
@@ -386,18 +389,18 @@ describe('Toolbar 执行操作', () => {
     const api = apiStub({runAll: vi.fn(() => pending.promise)});
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
 
-    const runAll = await screen.findByRole('button', {name: '运行全部'});
+    const runAll = await screen.findByRole('button', {name: '全部运行'});
     expect(screen.getByText('已连接 Connected')).toBeInTheDocument();
     fireEvent.click(runAll);
 
-    const announcement = await screen.findByText('正在运行：运行全部…');
+    const announcement = await screen.findByText('正在运行：全部运行…');
     const liveRegion = announcement.closest('[role="status"]');
     expect(liveRegion).not.toBeNull();
     expect(liveRegion).toHaveAttribute('aria-live', 'polite');
     expect(screen.getByText('运行中 Running')).toBeInTheDocument();
 
     pending.resolve({});
-    await waitFor(() => expect(screen.queryByText('正在运行：运行全部…')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('正在运行：全部运行…')).toBeNull());
     expect(screen.getByText('已连接 Connected')).toBeInTheDocument();
     expect(runAll).toBeEnabled();
   });

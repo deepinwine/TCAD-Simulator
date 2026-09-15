@@ -1,7 +1,10 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import type {PointerEvent as ReactPointerEvent} from 'react';
+import {TcadApiError} from '../api/client';
 import type {TcadApi} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
+import {useI18n} from '../i18n/I18nContext';
+import type {TranslationKey} from '../i18n/catalogs';
 import {clipStateAllOff, type ClipAxis, type ClipState} from './clipping';
 import {MaterialPanel, type MaterialDisplayState} from './MaterialPanel';
 import {measureDistance, type PickHit} from './picking';
@@ -17,14 +20,14 @@ interface ThreeViewerProps {
   runtimeFactory?: (api: TcadApi) => ViewerRuntime;
 }
 
-const STANDARD_VIEWS: ReadonlyArray<{view: StandardView; label: string}> = [
-  {view: 'iso', label: 'ISO 视图'},
-  {view: 'top', label: '顶视图'},
-  {view: 'bottom', label: '底视图'},
-  {view: 'front', label: '前视图'},
-  {view: 'back', label: '后视图'},
-  {view: 'left', label: '左视图'},
-  {view: 'right', label: '右视图'},
+const STANDARD_VIEWS: ReadonlyArray<{view: StandardView; key: TranslationKey}> = [
+  {view: 'iso', key: 'viewer.view.iso'},
+  {view: 'top', key: 'viewer.view.top'},
+  {view: 'bottom', key: 'viewer.view.bottom'},
+  {view: 'front', key: 'viewer.view.front'},
+  {view: 'back', key: 'viewer.view.back'},
+  {view: 'left', key: 'viewer.view.left'},
+  {view: 'right', key: 'viewer.view.right'},
 ];
 
 const CLIP_AXES: ReadonlyArray<{axis: ClipAxis; label: string}> = [
@@ -34,11 +37,12 @@ const CLIP_AXES: ReadonlyArray<{axis: ClipAxis; label: string}> = [
 ];
 
 export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProps) {
+  const {t} = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<ViewerRuntime | null>(null);
   const [backend, setBackend] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [orthoActive, setOrthoActive] = useState(false);
@@ -73,6 +77,10 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   }, [api, runtimeFactory]);
 
   useEffect(() => {
+    containerRef.current?.querySelector('canvas')?.setAttribute('aria-label', t('viewer.canvas'));
+  }, [backend, t]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     if (runtime === null) return;
     let cancelled = false;
@@ -88,7 +96,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
       ])));
     }).catch(error => {
       if (cancelled) return;
-      setLoadError(error instanceof Error ? error.message : String(error));
+      setLoadError(error);
     });
     return () => {
       cancelled = true;
@@ -174,16 +182,16 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
   };
 
   return (
-    <section className="workspace-pane viewer-pane" aria-label="3D Viewer">
+    <section className="workspace-pane viewer-pane" aria-label={t('viewer.region')}>
       <header className="pane-header viewer-header">
         <div>
-          <span className="pane-kicker">Geometry</span>
-          <h2>3D Viewer</h2>
+          <span className="pane-kicker">{t('viewer.kicker')}</span>
+          <h2>{t('viewer.title')}</h2>
         </div>
         {backend !== null && <span className="viewer-backend-badge">{backend}</span>}
       </header>
-      <div className="viewer-toolbar" role="group" aria-label="标准视图">
-        {STANDARD_VIEWS.map(({view, label}) => (
+      <div className="viewer-toolbar" role="group" aria-label={t('viewer.standardViews')}>
+        {STANDARD_VIEWS.map(({view, key}) => (
           <button
             key={view}
             type="button"
@@ -191,7 +199,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
             disabled={initError !== null}
             onClick={() => runtimeRef.current?.setStandardView(view)}
           >
-            {label}
+            {t(key)}
           </button>
         ))}
         <button
@@ -200,7 +208,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           disabled={initError !== null}
           onClick={() => runtimeRef.current?.fit()}
         >
-          适应窗口
+          {t('viewer.fit')}
         </button>
         <button
           type="button"
@@ -209,7 +217,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           disabled={initError !== null}
           onClick={toggleProjection}
         >
-          正交视图
+          {t('viewer.orthographic')}
         </button>
         <button
           type="button"
@@ -218,10 +226,10 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           disabled={initError !== null}
           onClick={toggleMeasureMode}
         >
-          测量模式
+          {t('viewer.measureMode')}
         </button>
       </div>
-      <div className="viewer-clip-group" role="group" aria-label="裁剪平面">
+      <div className="viewer-clip-group" role="group" aria-label={t('viewer.clipPlanes')}>
         {CLIP_AXES.map(({axis, label}) => (
           <div key={axis} className="viewer-clip-row">
             <label className="viewer-clip-axis">
@@ -229,7 +237,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
                 type="checkbox"
                 checked={clip[axis].enabled}
                 disabled={initError !== null}
-                aria-label={`启用 ${label} 裁剪`}
+                aria-label={t('viewer.enableClip', {axis: label})}
                 onChange={() => toggleClipAxis(axis)}
               />
               {label}
@@ -241,7 +249,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
               step={0.01}
               value={clip[axis].position}
               disabled={initError !== null || !clip[axis].enabled}
-              aria-label={`${label} 裁剪位置`}
+              aria-label={t('viewer.clipPosition', {axis: label})}
               onChange={event => moveClipAxis(axis, Number(event.target.value))}
             />
           </div>
@@ -261,36 +269,41 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
         />
         {selection !== null && (
           <div className="viewer-selection-bar" role="status">
-            {selection.name} · 命中点 ({selection.point.toArray().map(v => v.toFixed(3)).join(', ')})
+            {t('viewer.hitPoint', {
+              name: selection.name,
+              point: selection.point.toArray().map(v => v.toFixed(3)).join(', '),
+            })}
           </div>
         )}
         {distance !== null && (
           <div className="viewer-measure-readout" role="status" aria-live="polite">
-            距离 {distance.toFixed(4)} µm（再点击重新测量）
+            {t('viewer.distance', {distance: distance.toFixed(4)})}
           </div>
         )}
         {initError !== null && (
           <ErrorNotice
-            title="无法初始化 3D Viewer"
+            title={t('viewer.initError')}
             message={initError}
-            suggestion="请检查浏览器 WebGL2 支持后重试。"
+            suggestion={t('viewer.initSuggestion')}
           />
         )}
         {initError === null && loadError !== null && (
           <ErrorNotice
-            title="几何加载失败"
-            message={loadError}
-            suggestion={materials.length > 0 ? '仍显示上次加载的几何，可能与当前模型不同。请重试。' : undefined}
-            actionLabel="重试加载几何"
+            title={t('viewer.loadError')}
+            error={loadError instanceof TcadApiError ? loadError : undefined}
+            message={loadError instanceof TcadApiError
+              ? undefined
+              : loadError instanceof Error ? loadError.message : String(loadError)}
+            suggestion={materials.length > 0 ? t('viewer.staleSuggestion') : undefined}
+            actionLabel={t('viewer.retry')}
             onAction={retry}
           />
         )}
         {initError === null && loadError === null && loadWarnings.length > 0 && (
           <ErrorNotice
-            title="部分材料加载失败"
-            message={loadWarnings.join('；')}
-            suggestion="当前几何不完整，请重试加载缺失材料。"
-            actionLabel="重试加载几何"
+            title={t('viewer.partialError')}
+            suggestion={t('viewer.partialSuggestion')}
+            actionLabel={t('viewer.retry')}
             onAction={retry}
           />
         )}
