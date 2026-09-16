@@ -234,7 +234,10 @@ class ProcessCadFacade:
 
         warnings: List[str] = []
         blob = self._blobs[position]
-        blob_params = dict(blob.get("params", {}) or {})
+        raw = blob.get("params_raw")
+        # Use precisely the non-empty raw source preferred by deserialization;
+        # an inactive legacy mirror must never overwrite effective user values.
+        blob_params = dict(raw if isinstance(raw, dict) and raw else blob.get("params", {}) or {})
         if params is not None:
             from recipe_planner.schema import normalize_params
             try:
@@ -261,6 +264,9 @@ class ProcessCadFacade:
                 except ValueError as exc:
                     raise ProcessCadError(str(exc), code=getattr(exc, "code", "invalid_parameter"), step_index=position, parameter_path=getattr(exc, "parameter", None)) from exc
             blob["params"] = blob_params
+            if isinstance(raw, dict):
+                # Keep the compatibility mirror synchronized, including nulls.
+                blob["params_raw"] = dict(blob_params)
         if enabled is not None:
             blob["enabled"] = bool(enabled)
         if loop is not None:

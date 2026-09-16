@@ -1,5 +1,6 @@
 export type Dimension = 'length' | 'time' | 'angle' | 'rate';
 export type DisplayUnit = 'nm' | 'µm' | 'ms' | 's' | 'min' | '°' | 'rad' | 'nm/s' | 'µm/min';
+export const canonicalUnits: Record<Dimension, string> = {length: 'nm', time: 's', angle: 'degree', rate: 'nm/s'};
 export class UnitConversionError extends Error {
   constructor(readonly code: 'invalid_unit' | 'nonfinite_value' | 'invalid_decimals') {
     super(code);

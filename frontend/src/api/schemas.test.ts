@@ -45,6 +45,20 @@ const validInit = {
 };
 
 describe('parseInitEnvelope', () => {
+  it.each([
+    [{dimension: 'length', canonical_unit: 's', display_units: ['nm']}, 'canonical_unit'],
+    [{dimension: 'nonsense', canonical_unit: 'nm', display_units: ['nm']}, 'dimension'],
+    [{dimension: 'length', canonical_unit: 'nm', display_units: ['s']}, 'display_units[0]'],
+    [{dimension: 'angle', canonical_unit: 'degree', display_units: ['°', 'nm']}, 'display_units[1]'],
+    [{dimension: 'length', canonical_unit: 'nm', display_units: ['bogus']}, 'display_units[0]'],
+  ])('rejects contradictory unit metadata at its exact JSON path', (metadata, field) => {
+    const payload = {...validInit, result: {...validInit.result, recipe: [{...validStep,
+      parameter_specs: [{key: 'value', label: 'Value', type: 'float', ...metadata}],
+    }]}};
+    expect(() => parseInitEnvelope(payload)).toThrow(ApiContractError);
+    expect(() => parseInitEnvelope(payload)).toThrow(expect.objectContaining({path: `result.recipe[0].parameter_specs[0].${field}`}));
+  });
+
   it('maps optional unit metadata and backend capabilities while accepting old specs', () => {
     const parsed = parseInitEnvelope({...validInit, result: {...validInit.result,
       backend_capabilities: {'etch.target_depth': 'estimated', 'etch.incidence_angle': 'unsupported'},
@@ -54,6 +68,26 @@ describe('parseInitEnvelope', () => {
     expect(parsed.backendCapabilities).toEqual({'etch.target_depth': 'estimated', 'etch.incidence_angle': 'unsupported'});
     expect(parsed.recipe[0].parameterSpecs[0]).toMatchObject({defaultValue: null, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm'], capabilityKey: 'etch.target_depth'});
     expect(parseInitEnvelope(validInit).recipe[0].parameterSpecs[0].dimension).toBeUndefined();
+  });
+  it('keeps old static units when additive unit fields are null or absent', () => {
+    for (const metadata of [{}, {dimension: null, canonical_unit: null, display_units: []}]) {
+      const parsed = parseInitEnvelope({...validInit, result: {...validInit.result, recipe: [{...validStep,
+        parameter_specs: [{key: 'dose', label: 'Dose', type: 'float', units: 'mJ/cm²', ...metadata}],
+      }]}});
+      expect(parsed.recipe[0].parameterSpecs[0].units).toBe('mJ/cm²');
+      expect(parsed.recipe[0].parameterSpecs[0].dimension).toBeUndefined();
+    }
+  });
+  it.each([
+    ['length', 'nm', ['nm', 'µm']],
+    ['time', 's', ['ms', 's', 'min']],
+    ['angle', 'degree', ['°', 'rad']],
+    ['rate', 'nm/s', ['nm/s', 'µm/min']],
+  ])('accepts consistent %s metadata', (dimension, canonical_unit, display_units) => {
+    const parsed = parseInitEnvelope({...validInit, result: {...validInit.result, recipe: [{...validStep,
+      parameter_specs: [{key: 'value', label: 'Value', type: 'float', dimension, canonical_unit, display_units}],
+    }]}});
+    expect(parsed.recipe[0].parameterSpecs[0]).toMatchObject({dimension, canonicalUnit: canonical_unit, displayUnits: display_units});
   });
   it('接受 additive 字段并明确映射 snake_case', () => {
     const parsed = parseInitEnvelope({

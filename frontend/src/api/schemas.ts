@@ -20,6 +20,7 @@ import type {
   TimelineView,
   Vec3,
 } from './types';
+import {canonicalUnits, toCanonical, type Dimension, type DisplayUnit} from '../units/units';
 
 export class ApiContractError extends Error {
   constructor(
@@ -219,6 +220,21 @@ function parseParameterSpec(value: unknown, path: string): ParameterSpecView {
   if (capabilityKey !== undefined) parsed.capabilityKey = capabilityKey;
   if (source.display_units !== undefined && source.display_units !== null) {
     parsed.displayUnits = parseStringArray(source.display_units, `${path}.display_units`);
+  }
+  // Null metadata and an empty unit list are emitted for unannotated legacy
+  // specs. A declared unit contract, however, must be internally consistent.
+  if (dimension !== undefined || canonicalUnit !== undefined || parsed.displayUnits?.length) {
+    if (dimension === undefined || !Object.hasOwn(canonicalUnits, dimension)) {
+      throw new ApiContractError(`${path}.dimension`, 'length, time, angle, or rate');
+    }
+    const validatedDimension = dimension as Dimension;
+    if (canonicalUnit !== canonicalUnits[validatedDimension]) {
+      throw new ApiContractError(`${path}.canonical_unit`, canonicalUnits[validatedDimension]);
+    }
+    parsed.displayUnits?.forEach((unit, index) => {
+      try { toCanonical(0, validatedDimension, unit as DisplayUnit); }
+      catch { throw new ApiContractError(`${path}.display_units[${index}]`, `display unit for ${dimension}`); }
+    });
   }
   return parsed;
 }

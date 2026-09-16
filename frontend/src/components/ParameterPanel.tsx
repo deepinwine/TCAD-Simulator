@@ -9,7 +9,7 @@ import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
-import {toCanonical, fromCanonical, formatDisplayValue, type Dimension, type DisplayUnit} from '../units/units';
+import {canonicalUnits, toCanonical, fromCanonical, formatDisplayValue, type Dimension, type DisplayUnit} from '../units/units';
 
 interface ParameterPanelProps {
   step: StepView | null;
@@ -44,7 +44,6 @@ type Translate = I18nContextValue['t'];
 function conversionSpec(spec: ParameterSpecView): {dimension: Dimension; units: DisplayUnit[]; preferred: DisplayUnit} | null {
   if (!['float', 'int', 'integer'].includes(spec.type) || !spec.dimension || !spec.canonicalUnit || !spec.displayUnits?.length) return null;
   const dimension = spec.dimension as Dimension;
-  const canonicalUnits: Record<Dimension, string> = {length: 'nm', time: 's', angle: 'degree', rate: 'nm/s'};
   if (!Object.hasOwn(canonicalUnits, dimension) || canonicalUnits[dimension] !== spec.canonicalUnit) return null;
   const units = spec.displayUnits as DisplayUnit[];
   const canonicalDisplay = spec.canonicalUnit === 'degree' ? '°' : spec.canonicalUnit;

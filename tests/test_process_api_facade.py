@@ -344,6 +344,48 @@ def _find_choice_spec(step: StepView):
 
 
 class FacadeSetStepTests(unittest.TestCase):
+    def test_effective_raw_parameters_stay_consistent_through_edit_execute_and_export(self):
+        from copy import deepcopy
+        import tcad_simulator as tcad
+        facade = ProcessCadFacade(grid=8)
+        self.addCleanup(lambda: facade._model.parallel.shutdown())
+        facade.load_recipe_blob({"steps": [{"name": "Etch", "params": {"sidewall": 74, "time": 9000},
+            "params_raw": {"sidewall": 74, "rf_bias": 321.0, "time": 17.0}}]})
+        for patch, expected_angle, expected_depth, expected_rate in [
+            ({"sidewall_angle_deg": 80, "target_depth_nm": 120, "nominal_rate_nm_s": 4}, 80, 120, 4),
+            ({"sidewall": 76}, 76, 120, 4),
+            ({"target_depth_nm": None, "nominal_rate_nm_s": None}, 76, None, None),
+        ]:
+            edited = facade.set_step(0, params=patch)
+            self.assertEqual(edited.step.params["sidewall_angle_deg"], expected_angle)
+            self.assertEqual(edited.step.params["target_depth_nm"], expected_depth)
+            self.assertEqual(edited.step.params["nominal_rate_nm_s"], expected_rate)
+            self.assertEqual(edited.step.params["rf_bias"], 321)
+            self.assertEqual(edited.step.params["time"], 17)
+            self.assertEqual(edited.step.params, facade.recipe()[0].params)
+            executed = facade._deserialize(0)
+            executed.execute(facade._model)
+            self.assertEqual(executed.last_metrics["target_depth_nm"], expected_depth)
+            self.assertEqual(executed.last_metrics["duration_mode"], "time" if expected_depth is None else "estimated")
+            self.assertEqual(executed.last_metrics["time_s"], 17 if expected_depth is None else 30)
+            self.assertEqual(executed.last_metrics["rate_nm_s"], expected_rate)
+            exported = tcad._webui_export_step_blob_compat(deepcopy(facade._blobs[0]), facade._database)
+            restored = ProcessCadFacade(grid=8)
+            try:
+                restored.load_recipe_blob({"steps": [exported]})
+                self.assertEqual(restored.recipe()[0].params, facade.recipe()[0].params)
+                replay = restored._deserialize(0)
+                replay.execute(restored._model)
+                self.assertEqual(replay.last_metrics, executed.last_metrics)
+            finally:
+                restored._model.parallel.shutdown()
+        before = deepcopy(facade._blobs)
+        statuses = [step.runtimeStatus for step in facade.recipe()]
+        with self.assertRaises(ProcessCadError):
+            facade.set_step(0, params={"sidewall": 74, "sidewall_angle_deg": 80})
+        self.assertEqual(facade._blobs, before)
+        self.assertEqual([step.runtimeStatus for step in facade.recipe()], statuses)
+
     def test_set_step_updates_params_and_cascades_dirty(self) -> None:
         facade = make_facade()
         target = facade.recipe()[1]
