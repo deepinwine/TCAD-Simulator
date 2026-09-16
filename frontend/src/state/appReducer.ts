@@ -25,6 +25,7 @@ export interface ParameterValidation {
 export interface ParameterDraft {
   value: unknown;
   rawValue?: string | boolean;
+  displayUnit?: string;
   sequence: number;
   validation: ParameterValidation;
 }
@@ -54,10 +55,12 @@ export interface AppState {
   factories: string[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
+  backendCapabilities: Record<string, string>;
   demoRecipes: Record<string, DemoRecipeView>;
 }
 
 export type AppAction =
+  | {type: 'parameter/displayChanged'; index: number; key: string; rawValue: string | boolean; displayUnit: string}
   | {type: 'bootstrap/started'}
   | {type: 'bootstrap/succeeded'; payload: InitView}
   | {type: 'bootstrap/failed'; error: TcadApiError}
@@ -68,6 +71,7 @@ export type AppAction =
     key: string;
     value: unknown;
     rawValue?: string | boolean;
+    displayUnit?: string;
     sequence: number;
     validation: ParameterValidation;
   }
@@ -123,6 +127,7 @@ export const initialAppState: AppState = {
   factories: [],
   materials: [],
   uiState: {},
+  backendCapabilities: {},
   demoRecipes: {},
 };
 
@@ -233,12 +238,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         factories: action.payload.factories,
         materials: action.payload.materials,
         uiState: action.payload.uiState,
+        backendCapabilities: action.payload.backendCapabilities ?? {},
         demoRecipes: action.payload.demoRecipes ?? {},
       };
     case 'bootstrap/failed':
       return {...state, phase: 'fatal', activeMutation: null, globalError: action.error};
     case 'step/selected':
       return {...state, selectedStepIndex: action.index};
+    case 'parameter/displayChanged': {
+      const key = parameterDraftKey(action.index, action.key);
+      const draft = state.drafts[key];
+      return draft === undefined ? state : {...state, drafts: {...state.drafts, [key]: {
+        ...draft, rawValue: action.rawValue, displayUnit: action.displayUnit,
+      }}};
+    }
     case 'parameter/draftChanged': {
       const draftKey = parameterDraftKey(action.index, action.key);
       return {
@@ -248,6 +261,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           [draftKey]: {
             value: action.value,
             ...(action.rawValue === undefined ? {} : {rawValue: action.rawValue}),
+            ...(action.displayUnit === undefined ? {} : {displayUnit: action.displayUnit}),
             sequence: action.sequence,
             validation: action.validation,
           },

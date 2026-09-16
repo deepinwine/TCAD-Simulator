@@ -11,6 +11,7 @@ export type ParameterValidationMessageKey =
   | 'validation.minimum'
   | 'validation.maximum'
   | 'validation.boolean'
+  | 'validation.unsupported'
   | 'validation.choice';
 
 const decimalNumberPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -20,12 +21,16 @@ function validateNumber(
   raw: unknown,
   integer: boolean,
 ): ParameterValidationResult {
+  if (spec.defaultValue === null && (raw === null || raw === '')) return {ok: true, value: null};
   const text = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.trim() : '';
   if (text === '' || !decimalNumberPattern.test(text)) {
     return {ok: false, messageKey: 'validation.finite'};
   }
   const value = Number(text);
   if (!Number.isFinite(value)) return {ok: false, messageKey: 'validation.finite'};
+  if (spec.capabilityKey === 'etch.incidence_angle' && value !== 0) {
+    return {ok: false, messageKey: 'validation.unsupported'};
+  }
   if (integer && !Number.isInteger(value)) return {ok: false, messageKey: 'validation.integer'};
   if (integer && !Number.isSafeInteger(value)) {
     return {ok: false, messageKey: 'validation.safeInteger'};

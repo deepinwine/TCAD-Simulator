@@ -211,6 +211,15 @@ function parseParameterSpec(value: unknown, path: string): ParameterSpecView {
   if (step !== undefined) parsed.step = step;
   if (units !== undefined) parsed.units = units;
   if (tooltip !== undefined) parsed.tooltip = tooltip;
+  const dimension = optionalString(source.dimension, `${path}.dimension`);
+  const canonicalUnit = optionalString(source.canonical_unit, `${path}.canonical_unit`);
+  const capabilityKey = optionalString(source.capability_key, `${path}.capability_key`);
+  if (dimension !== undefined) parsed.dimension = dimension;
+  if (canonicalUnit !== undefined) parsed.canonicalUnit = canonicalUnit;
+  if (capabilityKey !== undefined) parsed.capabilityKey = capabilityKey;
+  if (source.display_units !== undefined && source.display_units !== null) {
+    parsed.displayUnits = parseStringArray(source.display_units, `${path}.display_units`);
+  }
   return parsed;
 }
 
@@ -292,6 +301,12 @@ export function parseInitEnvelope(payload: unknown): InitView {
   }
   if (result.current_recipe !== undefined) {
     view.currentRecipe = parseCurrentRecipe(result.current_recipe);
+  }
+  if (result.backend_capabilities !== undefined) {
+    const capabilities = requireRecord(result.backend_capabilities, 'result.backend_capabilities');
+    view.backendCapabilities = Object.fromEntries(Object.entries(capabilities).map(([key, value]) => [
+      key, requireString(value, `result.backend_capabilities.${key}`),
+    ]));
   }
   return view;
 }

@@ -75,7 +75,7 @@ send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 | Endpoint | Method | Request (minimal) | Response |
 | --- | --- | --- | --- |
 | `/api/health` | GET | — | JSON |
-| `/api/init` | GET | — | JSON; `result`: `recipe`、`model`、`recipe_factories`、`materials`、`demo_recipes`、`recipes`、`ui_state` |
+| `/api/init` | GET | — | JSON; `result`: `recipe`、`model`、`recipe_factories`、`materials`、`demo_recipes`、`recipes`、`ui_state`、`backend_capabilities`（加法能力矩阵）；`recipe[].parameter_specs[]` 的加法字段：`dimension`、`canonical_unit`、`display_units`、`capability_key` |
 | `/api/status` | GET | — | JSON |
 | `/api/log` | GET | — | JSON |
 | `/api/history` | GET | — | JSON（历史清单） |
@@ -119,6 +119,14 @@ send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 | `/api/save` | POST | `{}` | JSON |
 | `/api/export` | POST | 导出选项 JSON | JSON |
 | `/api/export/download` | GET | query `file` | **binary** attachment |
+
+加法参数契约（ADR-025）：元数据声明的 canonical 单位为 length=nm、time=s、angle=degree、rate=nm/s；
+`display_units` 是显示单位列表，`capability_key` 对应 `backend_capabilities` 的字段。
+Fast/voxel 声明 `etch.target_depth=estimated`、`etch.sidewall_angle=approximate`、
+`etch.incidence_angle=unsupported`；非零入射角在编辑、导入和执行路径均返回
+`code="unsupported_parameter"` 与 `parameter_path`，拒绝时不改变模型或配方。
+optional 数值的默认值与未设置参数保留 JSON `null`。旧响应缺少加法元数据时，React 仍按 `units` 静态显示，
+不猜测能力或换算。M4 视图仅将上述字段名映射为 camelCase，不改变物理含义。
 
 Rules:
 

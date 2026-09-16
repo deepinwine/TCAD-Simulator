@@ -1042,6 +1042,43 @@ class M2ApiContractTests(unittest.TestCase):
                     self.assertIn(key, result, f"/api/init missing {key}")
                 self.assertIsInstance(result["recipe"], list)
                 self.assertIsInstance(result["model"], dict)
+                self.assertEqual(result["backend_capabilities"], {
+                    "etch.target_depth": "estimated", "etch.sidewall_angle": "approximate", "etch.incidence_angle": "unsupported",
+                })
+                etch = next(step for step in result["recipe"] if step["name"] == "Etch")
+                specs = {spec["key"]: spec for spec in etch["parameter_specs"]}
+                depth = specs["target_depth_nm"]
+                self.assertEqual([depth[key] for key in ("dimension", "canonical_unit", "display_units", "capability_key")],
+                                 ["length", "nm", ["nm", "µm"], "etch.target_depth"])
+                for key in ("target_depth_nm", "nominal_rate_nm_s"):
+                    self.assertIsNone(specs[key]["default"])
+                    self.assertIsNone(etch["params"][key])
+            finally:
+                manager.stop()
+
+    def test_unsupported_etch_import_keeps_code_and_active_session_over_http(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                _session, cookie = manager.create_session()
+                status, _headers, raw = self._request(manager.url, cookie, "GET", "/api/init")
+                self.assertEqual(status, 200)
+                before = json.loads(raw)["result"]
+                status, _headers, raw = self._request(manager.url, cookie, "POST", "/api/recipe/import", {
+                    "recipe": {"steps": [{"name": "Etch", "params": {"incidence_angle_deg": 5}}]},
+                })
+                self.assertEqual(status, 200)
+                refused = json.loads(raw)
+                self.assertFalse(refused["ok"])
+                self.assertEqual(refused.get("code"), "unsupported_parameter")
+                self.assertEqual(refused.get("parameter_path"), "incidence_angle_deg")
+                status, _headers, raw = self._request(manager.url, cookie, "GET", "/api/init")
+                self.assertEqual(status, 200)
+                after = json.loads(raw)["result"]
+                self.assertEqual(after["recipe"], before["recipe"])
+                self.assertEqual(after["model"], before["model"])
             finally:
                 manager.stop()
 

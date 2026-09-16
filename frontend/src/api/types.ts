@@ -17,6 +17,10 @@ export interface ParameterSpecView {
   step?: number;
   units?: string;
   tooltip?: string;
+  dimension?: string;
+  canonicalUnit?: string;
+  displayUnits?: string[];
+  capabilityKey?: string;
 }
 
 export interface StepView {
@@ -52,6 +56,7 @@ export interface InitView {
   factories: string[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
+  backendCapabilities?: Record<string, string>;
   demoRecipes?: Record<string, DemoRecipeView>;
   currentRecipe?: {name: string; id: string};
 }

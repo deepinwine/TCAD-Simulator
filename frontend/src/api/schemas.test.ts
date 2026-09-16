@@ -45,6 +45,16 @@ const validInit = {
 };
 
 describe('parseInitEnvelope', () => {
+  it('maps optional unit metadata and backend capabilities while accepting old specs', () => {
+    const parsed = parseInitEnvelope({...validInit, result: {...validInit.result,
+      backend_capabilities: {'etch.target_depth': 'estimated', 'etch.incidence_angle': 'unsupported'},
+      recipe: [{...validStep, parameter_specs: [{key: 'depth', label: 'Depth', type: 'float', default: null,
+        dimension: 'length', canonical_unit: 'nm', display_units: ['nm', 'µm'], capability_key: 'etch.target_depth'}]}],
+    }});
+    expect(parsed.backendCapabilities).toEqual({'etch.target_depth': 'estimated', 'etch.incidence_angle': 'unsupported'});
+    expect(parsed.recipe[0].parameterSpecs[0]).toMatchObject({defaultValue: null, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm'], capabilityKey: 'etch.target_depth'});
+    expect(parseInitEnvelope(validInit).recipe[0].parameterSpecs[0].dimension).toBeUndefined();
+  });
   it('接受 additive 字段并明确映射 snake_case', () => {
     const parsed = parseInitEnvelope({
       ...validInit,

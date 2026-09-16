@@ -149,3 +149,16 @@ Rules:
 - 工艺自定义名称、材料名、Recipe 名称、原始日志与其他技术名称不强制翻译。
 - 语言状态只影响呈现；切换语言不得改变 Recipe、未保存草稿、相机、Timeline、
   undo/redo 状态或单位偏好，也不得触发重新 bootstrap 或工艺 API 请求。
+
+ADR-025 — 参数值使用 canonical 单位，显示单位属于浏览器逐字段偏好（2026-09-16）。
+Reason: 换单位不能改变工艺定义或累积舍入误差；界面必须明确当前后端的能力边界。
+Rules:
+- Recipe、Python 与 API 参数仅保存 canonical 值：length=nm、time=s、angle=degree、rate=nm/s。
+  React 从 canonical 草稿或服务端值换算显示；显示舍入结果不作为后续换算源。
+- 显示单位不写入 Recipe；偏好以 `tcad.unit.v1:<step-name>:<parameter-key>` 保存在 localStorage。
+- ParameterSpec 加法元数据和 backend capabilities 经 M2 snake_case / M4 camelCase 契约透传。
+  后端声明 exact、approximate、estimated 或 unsupported，旧 API 没有声明时不推测能力。
+- Fast/voxel 的目标深度只按名义/覆盖/材料库速率估算执行时间（estimated），侧墙为 approximate，
+  入射角为 unsupported。非零入射角必须在模型变更前显式拒绝，不得执行或静默忽略。
+- 旧 Etch time 模式保持兼容；sidewall 显式迁移为 sidewall_angle_deg，冲突必须拒绝。
+  target_depth_nm 未设置时仍使用 time；不把旧 depth_nm 猜测为时间，也不声称按实测深度反馈停止。

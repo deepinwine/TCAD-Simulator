@@ -5683,6 +5683,26 @@ class ParameterSpec:
     step: Optional[float] = None
     units: str = ""
     tooltip: str = ""
+    dimension: Optional[str] = None
+    canonical_unit: Optional[str] = None
+    display_units: Sequence[str] = ()
+    capability_key: Optional[str] = None
+
+
+def _format_optional_number(value: Optional[float]) -> str:
+    """Empty is unset, never a numeric zero (shared by optional Qt controls)."""
+    return "" if value is None else str(value)
+
+
+def _parse_optional_number(text: str, spec: ParameterSpec) -> Optional[float]:
+    if not text.strip():
+        return None
+    value = float(text)
+    if (not math.isfinite(value)
+            or (spec.minimum is not None and value < spec.minimum)
+            or (spec.maximum is not None and value > spec.maximum)):
+        raise ValueError(f"{spec.key}: 请输入范围内的有限数值 / Enter a finite value within bounds")
+    return value
 
 
 class MaterialDatabase:
@@ -19848,9 +19868,93 @@ class ThinningStep(ProcessStep):
         return f"Thinning {material_name}: removed {removed} voxels from backside"
 
 
+VOXEL_BACKEND_CAPABILITIES = {
+    "etch.target_depth": "estimated",
+    "etch.sidewall_angle": "approximate",
+    "etch.incidence_angle": "unsupported",
+}
+
+
+class EtchParameterError(ValueError):
+    def __init__(self, message: str, *, code: str = "invalid_parameter", parameter: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.parameter = parameter
+
+
+@dataclass(frozen=True)
+class EtchExecutionPlan:
+    time_s: float
+    sidewall_angle_deg: float
+    duration_mode: str
+    target_depth_nm: Optional[float] = None
+    rate_nm_s: Optional[float] = None
+
+
+def _etch_sidewall_angle(params: Dict[str, Any], default: float = 88.0) -> float:
+    """One canonical-first, conflict-checking boundary for old/new callers."""
+    from numbers import Real
+    from recipe_planner.schema import normalize_params
+    value = normalize_params("Etch", params).get("sidewall_angle_deg", default)
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or not 0 < value <= 90:
+        raise EtchParameterError("sidewall_angle_deg 必须满足 0 < angle <= 90", parameter="sidewall_angle_deg")
+    return float(value)
+
+
+def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabase) -> EtchExecutionPlan:
+    """Validate before touching geometry; target depth estimates a duration only."""
+    from numbers import Real
+    from recipe_planner.schema import normalize_params
+    params = normalize_params("Etch", params)
+
+    def finite(value: Any) -> bool:
+        return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+
+    if "depth_nm" in params:
+        raise EtchParameterError("Etch 不接受旧 depth_nm；请使用 time 或 target_depth_nm", parameter="depth_nm")
+    nominal = params.get("nominal_rate_nm_s")
+    if nominal is not None and (not finite(nominal) or nominal <= 0):
+        raise EtchParameterError("nominal_rate_nm_s 必须为有限正数或 None", parameter="nominal_rate_nm_s")
+    incidence = params.get("incidence_angle_deg", 0.0)
+    if not finite(incidence) or incidence != 0:
+        raise EtchParameterError("unsupported_parameter: voxel 仅支持 incidence_angle_deg=0", code="unsupported_parameter", parameter="incidence_angle_deg")
+    sidewall = _etch_sidewall_angle(params)
+    depth = params.get("target_depth_nm")
+    if depth is None:
+        duration = params.get("time", 30.0)
+        if not finite(duration) or duration < 0:
+            raise EtchParameterError("time 必须是有限非负数", parameter="time")
+        return EtchExecutionPlan(float(duration), float(sidewall), "time")
+    if not finite(depth) or depth <= 0:
+        raise EtchParameterError("target_depth_nm 必须是有限正数", parameter="target_depth_nm")
+    override = params.get("rate_override")
+    name = _resolve_material_name_any(material_db, params.get("material")) or "Silicon"
+    material = material_db.material(material_db.id_for(name))
+    table_rate = material.etch_rates_nm_min.get(params.get("chemistry", "Dry"))
+    # Material records store (vertical_nm_min, lateral_ratio).
+    if isinstance(table_rate, (tuple, list)):
+        table_rate = table_rate[0] if table_rate else None
+    rates = [nominal, override / 600 if finite(override) else None,
+             table_rate / 60 if finite(table_rate) else None]
+    rate = next((float(value) for value in rates if finite(value) and value > 0), None)
+    if rate is None:
+        raise EtchParameterError("target_depth_nm 需要可用的有限正刻蚀速率", parameter="nominal_rate_nm_s")
+    duration = depth / rate
+    if not math.isfinite(duration) or duration <= 0:
+        raise EtchParameterError("估计 time_s 必须是有限正数", parameter="target_depth_nm")
+    return EtchExecutionPlan(float(duration), float(sidewall), "estimated", float(depth), rate)
+
+
 class EtchStep(ProcessStep):
     name = "Etch"
     group = "Etch"
+
+    def __init__(self, material_db: MaterialDatabase) -> None:
+        super().__init__(material_db)
+        # Absence means the spec default. Legacy direct callers can still update
+        # `sidewall` without colliding with an implicitly inserted canonical 88.
+        self.params.pop("sidewall_angle_deg", None)
+        self.last_metrics: Dict[str, Any] = {}
 
     def parameter_specs(self) -> Sequence[ParameterSpec]:
         materials = [(name, name) for name in self.material_db.names() if name not in {"Void"}]
@@ -19878,7 +19982,9 @@ class EtchStep(ProcessStep):
                 ],
                 tooltip="Advanced uses the built-in plasma proxy model. RateTable scales the dry-etch kernel so the mean vertical rate matches Material.etch_rates_nm_min[chemistry] when available (keeps geometry effects).",
             ),
-            ParameterSpec("time", "Etch time", "float", 30.0, 0.0, 10000.0, units="s"),
+            ParameterSpec("time", "Etch time", "float", 30.0, 0.0, 10000.0, units="s", dimension="time", canonical_unit="s", display_units=("ms", "s", "min")),
+            ParameterSpec("target_depth_nm", "Target depth", "float", None, minimum=math.nextafter(0.0, 1.0), dimension="length", canonical_unit="nm", display_units=("nm", "µm"), capability_key="etch.target_depth"),
+            ParameterSpec("nominal_rate_nm_s", "Nominal rate", "float", None, minimum=math.nextafter(0.0, 1.0), dimension="rate", canonical_unit="nm/s", display_units=("nm/s", "µm/min"), capability_key="etch.target_depth"),
             ParameterSpec("bias", "Etch bias", "float", 0.0, -1000.0, 1000.0, units="nm"),
             ParameterSpec(
                 "rate_override",
@@ -19891,7 +19997,8 @@ class EtchStep(ProcessStep):
                 tooltip="Optional: directly specify vertical etch rate in Å/min (0 = use material database).",
             ),
             ParameterSpec("selectivity", "Selectivity to resist", "float", 4.0, 0.01, 500.0),
-            ParameterSpec("sidewall", "Sidewall angle", "float", 88.0, 30.0, 90.0, units="°"),
+            ParameterSpec("sidewall_angle_deg", "Sidewall angle", "float", 88.0, minimum=math.nextafter(0.0, 1.0), maximum=90.0, dimension="angle", canonical_unit="degree", display_units=("°", "rad"), capability_key="etch.sidewall_angle"),
+            ParameterSpec("incidence_angle_deg", "Incidence angle", "float", 0.0, minimum=0.0, maximum=89.999999, dimension="angle", canonical_unit="degree", display_units=("°", "rad"), capability_key="etch.incidence_angle"),
             ParameterSpec(
                 "co_materials",
                 "Multi-material selectivity",
@@ -19914,17 +20021,18 @@ class EtchStep(ProcessStep):
         )
 
     def execute(self, model: ProcessModel) -> str:
+        plan = _prepare_etch_execution(self.params, self.material_db)
         mat_name = _resolve_material_name_any(model.material_db, self.params.get("material")) or "Silicon"
         additional = parse_selectivity(self.params.get("co_materials", ""), self.material_db)
         stop_on = self.params.get("stop_on_material", "")
         model.etch_material(
             mat_name,
             self.params["chemistry"],
-            self.params["time"],
+            plan.time_s,
             self.params["bias"],
             self.params.get("rate_override", 0.0),
             self.params["selectivity"],
-            self.params["sidewall"],
+            plan.sidewall_angle_deg,
             co_material_selectivity=additional,
             pressure_mtorr=self.params["pressure"],
             bias_voltage_v=self.params["rf_bias"],
@@ -19933,6 +20041,9 @@ class EtchStep(ProcessStep):
             rate_model=self.params.get("rate_model", "Advanced"),
             stop_on_material=stop_on,
         )
+        self.last_metrics = {"target_depth_nm": plan.target_depth_nm, "duration_mode": plan.duration_mode,
+                             "time_s": plan.time_s, "rate_nm_s": plan.rate_nm_s,
+                             "capability": "estimated" if plan.duration_mode == "estimated" else "time"}
         return f"Etch {mat_name}"
 
 
@@ -20290,6 +20401,8 @@ def _headless_deserialize_step(step_blob: Dict[str, Any], material_db: MaterialD
     params_raw = step_blob.get("params_raw", None)
     params = params_raw if isinstance(params_raw, dict) and params_raw else step_blob.get("params", {})
     if isinstance(params, dict):
+        from recipe_planner.schema import normalize_params
+        params = normalize_params(name, params)
         step.params.update(params)
     step.enabled = bool(step_blob.get("enabled", True))
     if isinstance(step, ExposureStep):
@@ -21583,7 +21696,7 @@ class ProcessPhysicsDB:
         chem = str(transfer_ctx.get("chemistry") or "").strip()
         method = str(transfer_ctx.get("method") or transfer_ctx.get("etch_method") or "").strip().lower()
         t_s = ProcessPhysicsDB._f(transfer_ctx.get("time")) or ProcessPhysicsDB._f(transfer_ctx.get("time_s")) or 0.0
-        sw = ProcessPhysicsDB._f(transfer_ctx.get("sidewall")) or 90.0
+        sw = _etch_sidewall_angle(transfer_ctx)
         ro = ProcessPhysicsDB._f(transfer_ctx.get("rate_override")) or 0.0  # Å/min in our schema
 
         rate_nm_min = 0.0
@@ -23224,6 +23337,22 @@ class ParameterEditor(QtWidgets.QWidget):
         key = spec.key
         value = step.params.get(key, spec.default)
         if spec.type == "float":
+            if spec.default is None:
+                widget = QtWidgets.QLineEdit(_format_optional_number(value))
+                widget.setProperty("optionalNumber", True)
+                widget.setPlaceholderText("未设置 / Unset")
+
+                def commit_optional_number() -> None:
+                    try:
+                        parsed = _parse_optional_number(widget.text(), spec)
+                    except ValueError as exc:
+                        widget.setToolTip(str(exc))
+                        return
+                    widget.setToolTip(spec.tooltip)
+                    self._update_param(key, parsed)
+
+                widget.editingFinished.connect(commit_optional_number)
+                return widget
             widget = QtWidgets.QDoubleSpinBox()
             widget.setDecimals(spec.decimals)
             widget.setRange(spec.minimum if spec.minimum is not None else -1e9, spec.maximum if spec.maximum is not None else 1e9)
@@ -23275,7 +23404,7 @@ class ParameterEditor(QtWidgets.QWidget):
             return
         if isinstance(widget, QtWidgets.QLineEdit):
             widget.blockSignals(True)
-            widget.setText(str(value))
+            widget.setText(_format_optional_number(value) if widget.property("optionalNumber") else str(value))
             widget.blockSignals(False)
         elif isinstance(widget, QtWidgets.QComboBox):
             index = widget.findData(value)
@@ -26569,6 +26698,9 @@ class SimulatorController:
 
     def _serialize_step(self, step: ProcessStep) -> Dict[str, Any]:
         raw_params = dict(step.params) if isinstance(getattr(step, "params", None), dict) else {}
+        if isinstance(step, EtchStep):
+            from recipe_planner.schema import normalize_params
+            raw_params = normalize_params(step.name, raw_params)
         legacy_params = _recipe_params_legacy_material_names(self.material_db, raw_params)
         data: Dict[str, Any] = {
             "name": step.name,
@@ -26596,6 +26728,8 @@ class SimulatorController:
         params_raw = data.get("params_raw", None)
         params = params_raw if isinstance(params_raw, dict) and params_raw else data.get("params", {})
         if isinstance(params, dict):
+            from recipe_planner.schema import normalize_params
+            params = normalize_params(name, params)
             step.params.update(params)
         step.enabled = bool(data.get("enabled", True))
         if isinstance(step, ExposureStep):
@@ -32152,6 +32286,10 @@ def _webui_serialize_parameter_spec(spec: ParameterSpec) -> Dict[str, Any]:
         "step": spec.step,
         "units": spec.units,
         "tooltip": spec.tooltip,
+        "dimension": spec.dimension,
+        "canonical_unit": spec.canonical_unit,
+        "display_units": list(spec.display_units),
+        "capability_key": spec.capability_key,
     }
 
 
@@ -32275,6 +32413,7 @@ def _run_model_transaction(model: ProcessModel, operation: Callable[[], Any]) ->
             "error": str(exc),
             "error_type": type(exc).__name__,
             "rolled_back": False,
+            **({"code": exc.code, "parameter_path": exc.parameter} if isinstance(exc, EtchParameterError) else {}),
         }
         try:
             model.restore_state(before)
@@ -32294,9 +32433,10 @@ def _webui_step_execution_error(step: ProcessStep, step_index: int, transaction:
         "step_type": str(step.name),
         "error": str(transaction.get("error", "Step execution failed.")),
         "error_type": str(transaction.get("error_type", "Exception")),
-        "parameter_path": "",
+        "parameter_path": str(transaction.get("parameter_path", "")),
         "suggestion": "Review the step parameters and retry.",
         "rolled_back": bool(transaction.get("rolled_back", False)),
+        **({"code": transaction["code"]} if "code" in transaction else {}),
     }
     if transaction.get("rollback_error"):
         response["rollback_error"] = str(transaction["rollback_error"])
@@ -32304,13 +32444,14 @@ def _webui_step_execution_error(step: ProcessStep, step_index: int, transaction:
 
 
 def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
+    from recipe_planner.schema import normalize_params
     data: Dict[str, Any] = {
         "name": step.name,
         "instance_name": _normalize_step_instance_name(getattr(step, "instance_name", None), step.name),
         "group": getattr(step, "group", ""),
         "loop": getattr(step, "loop", ""),
         "enabled": bool(step.enabled),
-        "params": dict(step.params),
+        "params": normalize_params(step.name, step.params) if isinstance(step, EtchStep) else dict(step.params),
         "parameter_specs": [_webui_serialize_parameter_spec(spec) for spec in step.parameter_specs()],
     }
     if isinstance(step, ExposureStep):
@@ -42142,6 +42283,7 @@ def _webui_worker_main(
                     "time",
                     "rate_override",
                     "sidewall",
+                    "sidewall_angle_deg",
                     "passivation",
                     "rf_bias",
                     "pressure",
@@ -42194,7 +42336,7 @@ def _webui_worker_main(
         if nm in {"Deposition", "Selective Epitaxy"}:
             meaningful = {"directionality", "gap_fill_bias", "method", "temperature", "coverage", "material"}
         elif nm == "Etch":
-            meaningful = {"sidewall", "passivation", "rf_bias", "pressure", "chemistry", "stop_on_material", "rate_override"}
+            meaningful = {"sidewall", "sidewall_angle_deg", "passivation", "rf_bias", "pressure", "chemistry", "stop_on_material", "rate_override"}
         elif nm == "CMP":
             meaningful = {"selectivity", "selectivity_pairs", "target"}
         # If no meaningful knob moved, require multiple parameter edits to qualify.
@@ -42206,6 +42348,9 @@ def _webui_worker_main(
         """Return (score, compared_keys) where score∈[0,1]."""
         if not (isinstance(defs, dict) and isinstance(target, dict) and defs and target):
             return 0.0, 0
+        from recipe_planner.schema import normalize_params
+        defs = normalize_params("Etch", defs)
+        target = normalize_params("Etch", target)
         keys = [k for k in defs.keys() if k in target]
         if not keys:
             return 0.0, 0
@@ -42234,7 +42379,7 @@ def _webui_worker_main(
                     tol = 0.06
                 elif "gap_fill_bias" in kl:
                     tol = 1.5
-                elif kl in {"sidewall"}:
+                elif kl in {"sidewall", "sidewall_angle_deg"}:
                     tol = 1.2
                 elif kl in {"rf_bias"}:
                     tol = 8.0
@@ -44082,7 +44227,7 @@ def _webui_worker_main(
         cd_err = float(actual_cd) - float(target_cd_nm)
         params = step_blob.get("params") if isinstance(step_blob.get("params"), dict) else {}
         # Prefer probe-estimated sidewall (from CD(top/bot)); fall back to knob value.
-        sidewall = _f_run(run_step.get("probe_sidewall_deg"), params.get("sidewall", 90.0))
+        sidewall = _f_run(run_step.get("probe_sidewall_deg"), _etch_sidewall_angle(params))
         if not math.isfinite(float(sidewall)):
             sidewall = 90.0
         # Etch signature (material/chemistry/mask density): reduces non-stationarity across different stacks.
@@ -45565,7 +45710,7 @@ def _webui_worker_main(
                 mat = str(params.get("material", "") or "").strip() or "Material"
                 chem = str(params.get("chemistry", "") or "").strip()
                 t = _f(params.get("time"))
-                sw = _f(params.get("sidewall"))
+                sw = _etch_sidewall_angle(params)
                 bits = [b for b in [mat, (f"{t:.1f}s" if t is not None else ""), chem] if b]
                 m["purpose"] = "Etch " + " ".join(bits)
                 if sw is not None and sw > 0:
@@ -48137,9 +48282,10 @@ def _webui_worker_main(
                     ctx: Dict[str, Any] = {"name": nmj, "index": int(j + 1)}
                     # Keep compact but structured.
                     if nmj == "Etch":
-                        for k in ("material", "chemistry", "rate_model", "time", "sidewall", "selectivity", "rate_override", "pressure", "rf_bias", "bias"):
+                        for k in ("material", "chemistry", "rate_model", "time", "selectivity", "rate_override", "pressure", "rf_bias", "bias"):
                             if k in tp:
                                 ctx[k] = tp.get(k)
+                        ctx["sidewall_angle_deg"] = _etch_sidewall_angle(tp)
                         # Derive a coarse "method" for physics bias (wet vs dry/RIE/ICP).
                         try:
                             chem = str(tp.get("chemistry", "") or "").strip().lower()
@@ -62236,6 +62382,7 @@ def _webui_worker_main(
                     "present_material_ids": _present_material_ids(),
                     "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
+                    "backend_capabilities": dict(VOXEL_BACKEND_CAPABILITIES),
                     "demo_recipes": load_demo_flows(material_db),
                     "history": history_index,
                     "recipes": history_index,
@@ -68298,9 +68445,10 @@ def _webui_worker_main(
                         tp = transfer_step.params if isinstance(getattr(transfer_step, "params", None), dict) else {}
                         transfer_ctx = {"name": str(getattr(transfer_step, "name", "") or ""), "index": int(transfer_idx + 1)}
                         if transfer_ctx["name"] == "Etch":
-                            for k in ("material", "chemistry", "time", "sidewall", "selectivity", "rate_override", "pressure", "rf_bias"):
+                            for k in ("material", "chemistry", "time", "selectivity", "rate_override", "pressure", "rf_bias"):
                                 if k in tp:
                                     transfer_ctx[k] = tp.get(k)
+                            transfer_ctx["sidewall_angle_deg"] = _etch_sidewall_angle(tp)
                         elif transfer_ctx["name"] == "Ion Implant":
                             for k in ("species", "dose", "energy", "tilt", "rotation"):
                                 if k in tp:
@@ -68395,7 +68543,7 @@ def _webui_worker_main(
                                     lat_ratio = 0.0
                             depth_nm = float(max(0.0, rate_nm_min) * max(0.0, t_s) / 60.0)
                             try:
-                                sw = float(transfer_ctx.get("sidewall") or 90.0)
+                                sw = _etch_sidewall_angle(transfer_ctx)
                             except Exception:
                                 sw = 90.0
                             taper_nm = 0.0
@@ -71072,6 +71220,14 @@ def _webui_worker_main(
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
                 step = steps[idx]
+                # Validate the complete Etch candidate before changing even UI
+                # metadata; both old and new clients edit the same canonical step.
+                etch_params = None
+                if isinstance(step, EtchStep) and isinstance(payload.get("params"), dict):
+                    from recipe_planner.schema import normalize_params
+                    etch_params = normalize_params("Etch", step.params)
+                    etch_params.update(normalize_params("Etch", payload["params"]))
+                    _prepare_etch_execution(etch_params, material_db)
                 if "loop" in payload:
                     try:
                         step.loop = str(payload.get("loop", "") or "").strip()[:80]
@@ -71087,7 +71243,10 @@ def _webui_worker_main(
                     step.enabled = bool(payload["enabled"])
                 params = payload.get("params")
                 if isinstance(params, dict):
-                    step.params.update(params)
+                    if etch_params is not None:
+                        step.params = etch_params
+                    else:
+                        step.params.update(params)
                     if isinstance(step, ExposureStep) and "mask_file" in params:
                         # Switching to an image-based mask should clear any previously set custom/designer mask,
                         # otherwise the old mask would silently override the new mask_file.
@@ -72659,7 +72818,8 @@ def _webui_worker_main(
 
             conn.send({"ok": False, "error": f"Unknown command: {cmd}", "rid": rid})
         except Exception as exc:
-            conn.send({"ok": False, "error": str(exc), "rid": rid})
+            conn.send({"ok": False, "error": str(exc), "rid": rid,
+                       **({"code": exc.code, "parameter_path": exc.parameter} if isinstance(exc, EtchParameterError) else {})})
 
 
 _TCAD_THREAD_CONN_EOF = object()
@@ -92075,7 +92235,10 @@ function renderParams() {
       input.value = (step.params && step.params[spec.key] !== undefined) ? step.params[spec.key] : (spec.default ?? '');
       input.addEventListener('input', () => {
         const raw = input.value;
-        if (spec.type === 'float') {
+        if (spec.type === 'float' && spec.default === null && raw.trim() === '') {
+          step.params[spec.key] = null;
+          scheduleApplyParams(220);
+        } else if (spec.type === 'float') {
           const v = parseFloat(raw);
           if (!Number.isNaN(v)) { step.params[spec.key] = v; scheduleApplyParams(220); }
         } else if (spec.type === 'int') {

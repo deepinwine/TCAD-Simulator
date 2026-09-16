@@ -13,7 +13,9 @@ def step_schema(material_db=None):
             spec.key: {"type": spec.type, "default": spec.default,
                        "minimum": spec.minimum, "maximum": spec.maximum,
                        "choices": list(dict.fromkeys([choice[0] for choice in spec.choices or []] + ([spec.default] if spec.type == "enum" else []))),
-                       "units": spec.units}
+                       "units": spec.units, "dimension": spec.dimension,
+                       "canonical_unit": spec.canonical_unit, "display_units": list(spec.display_units),
+                       "capability_key": spec.capability_key}
             for spec in factory(db).parameter_specs()
         }
         for name, factory in tcad.PROCESS_STEP_FACTORIES.items()
@@ -30,6 +32,8 @@ def normalize_params(name, params):
         raise ValueError("params 必须是对象")
     result = dict(params)
     aliases = {}
+    if name == "Etch":
+        aliases["sidewall"] = "sidewall_angle_deg"
     if name in ("Deposition", "Selective Epitaxy"):
         aliases["thickness_nm"] = "thickness"
     if name == "Mask Exposure":
@@ -60,6 +64,8 @@ def parameter_errors(name, params, schema=None, material_db=None):
                 errors.append(f"未知参数 {key}")
             continue
         if spec["type"] in ("float", "int"):
+            if value is None and spec["default"] is None:
+                continue
             if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
                 errors.append(f"参数 {key} 必须是有限数值")
                 continue
@@ -92,6 +98,12 @@ def parameter_errors(name, params, schema=None, material_db=None):
                     ratio = pair.get("ratio")
                     if isinstance(ratio, bool) or not isinstance(ratio, Real) or not math.isfinite(ratio) or ratio < 0:
                         errors.append(f"参数 {key} 的 ratio 必须是有限非负数")
+    if name == "Etch":
+        import tcad_simulator as tcad
+        try:
+            tcad._prepare_etch_execution(params, material_db or tcad.MaterialDatabase())
+        except ValueError as exc:
+            errors.append(str(exc))
     return errors
 
 
@@ -174,6 +186,11 @@ def validate_import(blob, material_db):
         checked = params
         if name == "Initialize Wafer":
             validate_wafer_stack(checked, capacity_nm=capacity_nm)
+        if name == "Etch":
+            import tcad_simulator as tcad
+            # Preserve capability refusal as a structured domain exception;
+            # parameter_errors remains the legacy list-of-messages contract.
+            tcad._prepare_etch_execution(checked, material_db)
         errors = parameter_errors(name, checked, schema, material_db)
         if errors:
             raise ValueError(f"步骤 {i+1} ({name}): {'; '.join(errors)}")

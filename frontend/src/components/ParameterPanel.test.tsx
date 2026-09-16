@@ -11,6 +11,7 @@ import type {
 } from '../api/types';
 import {AppStateProvider, useAppState} from '../state/AppStateContext';
 import {ParameterPanel} from './ParameterPanel';
+import {I18nProvider, useI18n} from '../i18n/I18nContext';
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
@@ -127,6 +128,108 @@ async function mount(initial: InitView, api = apiStub(initial), strict = false) 
 afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
+  localStorage.clear();
+});
+
+describe('per-field canonical units', () => {
+  it.each(['s', 'µm', 'bogus'])('does not convert inconsistent length canonical unit %s', async canonicalUnit => {
+    await mount(init([step(0, {params: {value: 1000}, parameterSpecs: [{key: 'value', label: 'Value', type: 'float', units: canonicalUnit, dimension: 'length', canonicalUnit, displayUnits: ['nm', 'µm']}]})]));
+    expect(screen.queryByRole('combobox', {name: 'Value 单位'})).toBeNull();
+    expect(screen.getByLabelText('Value')).toHaveValue('1000');
+  });
+
+  it('validates integer bounds after conversion and unit changes cancel pending autosave', async () => {
+    vi.useFakeTimers();
+    const initial = init([step(0, {params: {value: 1000}, parameterSpecs: [{key: 'value', label: 'Value', type: 'int', minimum: 1, maximum: 2000, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]})]);
+    const {api} = await mount(initial);
+    const input = screen.getByLabelText('Value');
+    const unit = screen.getByRole('combobox', {name: 'Value 单位'});
+    fireEvent.change(unit, {target: {value: 'µm'}});
+    fireEvent.change(input, {target: {value: '0.5'}});
+    expect(input).toHaveAttribute('aria-invalid', 'false');
+    fireEvent.blur(input, {relatedTarget: unit});
+    fireEvent.focus(unit);
+    fireEvent.change(unit, {target: {value: 'nm'}});
+    await act(async () => vi.advanceTimersByTimeAsync(400));
+    expect(api.setStep).not.toHaveBeenCalled();
+    expect(input).toHaveValue('500.00');
+    fireEvent.blur(input);
+    await act(async () => Promise.resolve());
+    expect(api.setStep).toHaveBeenCalledWith(expect.objectContaining({params: {value: 500}}), expect.anything());
+  });
+
+  it('does not display unrecognized capability values', async () => {
+    const initial = {...init([step(0, {parameterSpecs: [{key: 'dose', label: 'Dose', type: 'float', capabilityKey: 'future'}]})]), backendCapabilities: {future: 'toString'}};
+    await mount(initial);
+    expect(screen.getByLabelText('Dose')).toBeVisible();
+    expect(document.querySelector('.parameter-capability')).toBeNull();
+  });
+  it.each([
+    ['length', 'nm', ['nm', 'µm'], 'µm', '1', 1000],
+    ['time', 's', ['ms', 's', 'min'], 'min', '2', 120],
+    ['angle', 'degree', ['°', 'rad'], 'rad', String(Math.PI), 180],
+    ['rate', 'nm/s', ['nm/s', 'µm/min'], 'µm/min', '0.6', 10],
+  ])('saves %s canonically', async (dimension, canonicalUnit, displayUnits, selectedUnit, raw, expected) => {
+    const initial = init([step(0, {params: {value: 0}, parameterSpecs: [{key: 'value', label: 'Value', type: 'float', dimension: dimension as string, canonicalUnit: canonicalUnit as string, displayUnits: displayUnits as string[]}]})]);
+    const {api} = await mount(initial);
+    const selector = screen.getByRole('combobox', {name: 'Value 单位'});
+    fireEvent.change(selector, {target: {value: selectedUnit}});
+    expect(api.setStep).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Value'), {target: {value: raw}});
+    fireEvent.blur(screen.getByLabelText('Value'));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalled());
+    const sent = vi.mocked(api.setStep).mock.calls[0][0].params?.value;
+    expect(sent).toBeCloseTo(expected as number, 10);
+    expect(localStorage.getItem('tcad.unit.v1:step-0:value')).toBe(selectedUnit);
+  });
+
+  it('retains independent units and drafts across language changes, failed saves, and remounts', async () => {
+    const initial = init([step(0, {params: {a: 1000, b: 2000}, parameterSpecs: ['a', 'b'].map(key => ({key, label: key, type: 'float', dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm'], decimals: 3}))}), step(1)]);
+    const api = apiStub(initial, {setStep: vi.fn(async () => {throw new TcadApiError('failed', {status: 400});})});
+    function LocaleSwitch() { const {setLocale} = useI18n(); return <button onClick={() => setLocale('en')}>English</button>; }
+    localStorage.setItem('tcad.locale.v1', 'zh-CN');
+    render(<I18nProvider><AppStateProvider api={api}><LocaleSwitch /><Harness /></AppStateProvider></I18nProvider>);
+    const a = await screen.findByLabelText('a');
+    fireEvent.change(screen.getByRole('combobox', {name: 'a 单位'}), {target: {value: 'µm'}});
+    expect(a).toHaveValue('1.000');
+    expect(screen.getByRole('combobox', {name: 'b 单位'})).toHaveValue('nm');
+    fireEvent.change(a, {target: {value: '1.23456789'}});
+    fireEvent.blur(a);
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText('English'));
+    expect(a).toHaveValue('1.23456789');
+    expect(screen.getByRole('combobox', {name: 'a unit'})).toHaveValue('µm');
+    fireEvent.click(screen.getByText('选择步骤 1'));
+    fireEvent.click(screen.getByText('选择步骤 0'));
+    expect(screen.getByLabelText('a')).toHaveValue('1.23456789');
+    fireEvent.change(screen.getByRole('combobox', {name: 'a unit'}), {target: {value: 'nm'}});
+    fireEvent.change(screen.getByRole('combobox', {name: 'a unit'}), {target: {value: 'µm'}});
+    expect(screen.getByLabelText('a')).toHaveValue('1.235');
+    expect(api.setStep).toHaveBeenCalledTimes(1);
+    fireEvent.blur(screen.getByLabelText('a'));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.setStep).mock.calls[1][0].params?.a).toBeCloseTo(1234.56789, 10);
+  });
+
+  it('shows unsupported capability and rejects nonzero incidence while keeping field editable', async () => {
+    const initial = {...init([step(0, {params: {incidence: 0}, parameterSpecs: [{key: 'incidence', label: 'Incidence', type: 'float', dimension: 'angle', canonicalUnit: 'degree', displayUnits: ['°', 'rad'], capabilityKey: 'etch.incidence_angle'}]})]), backendCapabilities: {'etch.incidence_angle': 'unsupported'}};
+    const {api} = await mount(initial);
+    expect(screen.getByText('不支持')).toBeVisible();
+    const input = screen.getByLabelText('Incidence');
+    expect(input).toBeEnabled();
+    fireEvent.change(input, {target: {value: '3'}});
+    fireEvent.blur(input);
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(api.setStep).not.toHaveBeenCalled();
+  });
+
+  it('allows clearing optional target depth to restore time mode', async () => {
+    const initial = init([step(0, {params: {depth: 10}, parameterSpecs: [{key: 'depth', label: 'Depth', type: 'float', defaultValue: null, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]})]);
+    const {api} = await mount(initial);
+    fireEvent.change(screen.getByLabelText('Depth'), {target: {value: ''}});
+    fireEvent.blur(screen.getByLabelText('Depth'));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith(expect.objectContaining({params: {depth: null}}), expect.anything()));
+  });
 });
 
 const maskInitView = (): InitView => ({

@@ -5,6 +5,21 @@ from __future__ import annotations
 import os
 import unittest
 
+
+class EtchSchemaTests(unittest.TestCase):
+    def test_strictly_positive_parameters_have_no_arbitrary_lower_cutoff(self):
+        from recipe_planner.schema import parameter_errors
+        self.assertEqual(parameter_errors("Etch", {"target_depth_nm": 1e-10, "nominal_rate_nm_s": 1e-13, "sidewall_angle_deg": 1e-10}), [])
+
+    def test_metadata_alias_and_optional_depth(self):
+        from recipe_planner.schema import step_schema, normalize_params, parameter_errors
+        schema = step_schema()
+        self.assertEqual(schema["Etch"]["target_depth_nm"]["canonical_unit"], "nm")
+        self.assertEqual(normalize_params("Etch", {"sidewall": 76}), {"sidewall_angle_deg": 76})
+        self.assertEqual(parameter_errors("Etch", {"time": 30, "target_depth_nm": None, "nominal_rate_nm_s": None}), [])
+        self.assertTrue(parameter_errors("Etch", {"incidence_angle_deg": 5}))
+        self.assertTrue(parameter_errors("Etch", {"target_depth_nm": 10, "chemistry": "O2", "material": "Void", "nominal_rate_nm_s": 0}))
+
 os.environ.setdefault("TCAD_SKIP_QT", "1")
 
 from recipe_planner import (

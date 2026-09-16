@@ -33,6 +33,51 @@ def make_facade() -> ProcessCadFacade:
 class SchemaShapeTests(unittest.TestCase):
     """序列化键名必须与冻结契约（frontend/src/api/types.ts）逐字段一致。"""
 
+    def test_optional_numeric_defaults_remain_explicit_null_in_typed_view(self):
+        facade = make_facade()
+        etch = next(s for s in facade.recipe() if s.name == "Etch")
+        for key in ("target_depth_nm", "nominal_rate_nm_s"):
+            spec = next(s for s in etch.parameterSpecs if s.key == key).to_json()
+            self.assertIn("defaultValue", spec)
+            self.assertIsNone(spec["defaultValue"])
+
+
+    def test_unit_metadata_and_capabilities(self):
+        import tcad_simulator as tcad
+        spec = tcad.ParameterSpec("depth", "Depth", "float", None, dimension="length", canonical_unit="nm", display_units=("nm", "µm"), capability_key="etch.target_depth")
+        legacy = tcad._webui_serialize_parameter_spec(spec)
+        self.assertEqual([legacy[k] for k in ("dimension", "canonical_unit", "display_units", "capability_key")], ["length", "nm", ["nm", "µm"], "etch.target_depth"])
+        view = ParameterSpecView(key=spec.key, label=spec.label, type=spec.type, dimension=spec.dimension, canonical_unit=spec.canonical_unit, display_units=spec.display_units, capability_key=spec.capability_key)
+        self.assertEqual(view.to_json()["displayUnits"], ["nm", "µm"])
+        facade = make_facade()
+        self.assertEqual(facade.init().to_json()["backendCapabilities"]["etch.incidence_angle"], "unsupported")
+        etch = next(s for s in facade.recipe() if s.name == "Etch")
+        depth = next(s for s in etch.parameterSpecs if s.key == "target_depth_nm")
+        self.assertEqual(depth.to_json()["canonicalUnit"], "nm")
+
+    def test_unsupported_incidence_is_stable_error_without_model_mutation(self):
+        import numpy as np
+        facade = make_facade()
+        index = next(s.index for s in facade.recipe() if s.name == "Etch")
+        before = facade._model.grid.copy()
+        with self.assertRaises(ProcessCadError) as error:
+            facade.set_step(index, params={"incidence_angle_deg": 5})
+        self.assertEqual(error.exception.code, "unsupported_parameter")
+        np.testing.assert_array_equal(before, facade._model.grid)
+
+    def test_import_unsupported_incidence_preserves_code_and_session(self):
+        import numpy as np
+        facade = make_facade()
+        self.addCleanup(facade._model.parallel.shutdown)
+        before = facade._model.grid.copy()
+        recipe = [step.to_json() for step in facade.recipe()]
+        with self.assertRaises(ProcessCadError) as error:
+            facade.load_recipe_blob({"steps": [{"name": "Etch", "params": {"incidence_angle_deg": 5}}]})
+        self.assertEqual(error.exception.code, "unsupported_parameter")
+        self.assertEqual(error.exception.parameter_path, "incidence_angle_deg")
+        np.testing.assert_array_equal(before, facade._model.grid)
+        self.assertEqual(recipe, [step.to_json() for step in facade.recipe()])
+
     def test_step_view_json_keys(self) -> None:
         step = StepView(
             index=0,

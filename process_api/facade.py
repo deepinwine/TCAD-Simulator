@@ -127,7 +127,9 @@ class ProcessCadFacade:
                 {"steps": candidate_blobs, "domain": {"grid_shape": list(shape), "voxel_size_nm": voxel_nm}},
                 self._database, grid_shape=shape, voxel_size_nm=voxel_nm)
         except (ValueError, TypeError, MemoryError, OverflowError) as exc:
-            raise ProcessCadError(str(exc), code="invalid_recipe") from exc
+            unsupported = getattr(exc, "code", None) == "unsupported_parameter"
+            raise ProcessCadError(str(exc), code="unsupported_parameter" if unsupported else "invalid_recipe",
+                                  parameter_path=getattr(exc, "parameter", None)) from exc
 
         self._blobs = candidate_blobs
         self._grid_shape = shape
@@ -164,6 +166,7 @@ class ProcessCadFacade:
             factories=self.factories(),
             materials=self.materials(),
             uiState={},
+            backendCapabilities=dict(self._tcad.VOXEL_BACKEND_CAPABILITIES),
         )
 
     def recipe(self) -> List[StepView]:
@@ -233,6 +236,12 @@ class ProcessCadFacade:
         blob = self._blobs[position]
         blob_params = dict(blob.get("params", {}) or {})
         if params is not None:
+            from recipe_planner.schema import normalize_params
+            try:
+                params = normalize_params(step.name, dict(params))
+                blob_params = normalize_params(step.name, blob_params)
+            except ValueError as exc:
+                raise ProcessCadError(str(exc), code="invalid_parameter", step_index=position) from exc
             specs = {spec.key: spec for spec in step.parameter_specs()}
             for key, value in params.items():
                 spec = specs.get(str(key))
@@ -246,6 +255,11 @@ class ProcessCadFacade:
                     )
                 self._validate_parameter(position, str(key), value, spec)
                 blob_params[str(key)] = value
+            if step.name == "Etch":
+                try:
+                    self._tcad._prepare_etch_execution(blob_params, self._database)
+                except ValueError as exc:
+                    raise ProcessCadError(str(exc), code=getattr(exc, "code", "invalid_parameter"), step_index=position, parameter_path=getattr(exc, "parameter", None)) from exc
             blob["params"] = blob_params
         if enabled is not None:
             blob["enabled"] = bool(enabled)
@@ -278,6 +292,10 @@ class ProcessCadFacade:
     ) -> None:
         minimum = getattr(spec, "minimum", None)
         maximum = getattr(spec, "maximum", None)
+        if value is None and spec.default is None:
+            return
+        if getattr(spec, "capability_key", None) == "etch.incidence_angle" and value != 0:
+            raise ProcessCadError("voxel 仅支持 incidence_angle_deg=0", code="unsupported_parameter", step_index=position, parameter_path=key)
         if minimum is not None or maximum is not None:
             try:
                 number = float(value)
@@ -288,6 +306,9 @@ class ProcessCadFacade:
                     step_index=position,
                     parameter_path=key,
                 ) from None
+            import math
+            if not math.isfinite(number):
+                raise ProcessCadError(f"参数 {key} 必须是有限数值", code="invalid_parameter", step_index=position, parameter_path=key)
             if minimum is not None and number < float(minimum):
                 raise ProcessCadError(
                     f"参数 {key}={value!r} 低于最小值 {minimum}",
@@ -348,7 +369,7 @@ class ProcessCadFacade:
             self._statuses[position] = "error"
             raise ProcessCadError(
                 str(exc),
-                code="step_failed",
+                code=getattr(exc, "code", "step_failed"),
                 step_index=position,
                 suggestion="Review the step parameters and retry.",
             ) from exc
@@ -576,6 +597,10 @@ class ProcessCadFacade:
                 step=spec.step,
                 units=spec.units,
                 tooltip=spec.tooltip,
+                dimension=spec.dimension,
+                canonical_unit=spec.canonical_unit,
+                display_units=spec.display_units,
+                capability_key=spec.capability_key,
             )
             for spec in raw_specs
         ]

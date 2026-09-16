@@ -25,6 +25,7 @@ import {
 } from './appReducer';
 
 export interface AppStateActions {
+  updateDraftDisplay(index: number, key: string, rawValue: string | boolean, displayUnit: string): void;
   bootstrap(): Promise<void>;
   selectStep(index: number): void;
   updateDraft(
@@ -33,6 +34,7 @@ export interface AppStateActions {
     value: unknown,
     validation?: ParameterValidation,
     rawValue?: string | boolean,
+    displayUnit?: string,
   ): number;
   saveParameter(index: number, key: string): Promise<void>;
   runStep(index?: number): Promise<void>;
@@ -194,6 +196,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     value: unknown,
     validation: ParameterValidation = {status: 'valid'},
     rawValue?: string | boolean,
+    displayUnit?: string,
   ): number => {
     if (!mountedRef.current) return 0;
     const draftKey = parameterDraftKey(index, key);
@@ -209,10 +212,15 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       key,
       value,
       rawValue,
+      displayUnit,
       sequence,
       validation,
     });
     return sequence;
+  }, [dispatch]);
+
+  const updateDraftDisplay = useCallback((index: number, key: string, rawValue: string | boolean, displayUnit: string) => {
+    dispatch({type: 'parameter/displayChanged', index, key, rawValue, displayUnit});
   }, [dispatch]);
 
   const saveParameter = useCallback((index: number, key: string): Promise<void> => {
@@ -733,6 +741,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [bootstrap]);
 
   const actions = useMemo<AppStateActions>(() => ({
+    updateDraftDisplay,
     bootstrap,
     selectStep,
     updateDraft,
@@ -777,6 +786,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     selectStep,
     undo,
     updateDraft,
+    updateDraftDisplay,
   ]);
 
   const value = useMemo<AppStateContextValue>(() => ({state, actions}), [actions, state]);

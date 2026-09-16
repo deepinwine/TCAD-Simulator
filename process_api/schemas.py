@@ -25,9 +25,13 @@ class ParameterSpecView:
     step: Optional[float] = None
     units: Optional[str] = None
     tooltip: Optional[str] = None
+    dimension: Optional[str] = None
+    canonical_unit: Optional[str] = None
+    display_units: Optional[Sequence[str]] = None
+    capability_key: Optional[str] = None
 
     def to_json(self) -> Dict[str, Any]:
-        return _compact({
+        result = _compact({
             "key": self.key,
             "label": self.label,
             "type": self.type,
@@ -39,7 +43,15 @@ class ParameterSpecView:
             "step": self.step,
             "units": self.units,
             "tooltip": self.tooltip,
+            "dimension": self.dimension,
+            "canonicalUnit": self.canonical_unit,
+            "displayUnits": list(self.display_units) if self.display_units is not None else None,
+            "capabilityKey": self.capability_key,
         })
+        # Null is semantic for optional numbers, not an absent display default.
+        if self.type in ("float", "int", "integer") and self.default_value is None:
+            result["defaultValue"] = None
+        return result
 
 
 @dataclass(frozen=True)
@@ -109,6 +121,7 @@ class InitView:
     factories: Sequence[str]
     materials: Sequence[MaterialView]
     uiState: Mapping[str, Any] = field(default_factory=dict)
+    backendCapabilities: Optional[Mapping[str, str]] = None
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -117,6 +130,7 @@ class InitView:
             "factories": list(self.factories),
             "materials": [material.to_json() for material in self.materials],
             "uiState": dict(self.uiState),
+            **({"backendCapabilities": dict(self.backendCapabilities)} if self.backendCapabilities is not None else {}),
         }
 
 

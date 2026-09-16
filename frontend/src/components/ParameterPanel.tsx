@@ -9,6 +9,7 @@ import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
+import {toCanonical, fromCanonical, formatDisplayValue, type Dimension, type DisplayUnit} from '../units/units';
 
 interface ParameterPanelProps {
   step: StepView | null;
@@ -39,6 +40,24 @@ interface ParameterControlProps {
 }
 
 type Translate = I18nContextValue['t'];
+
+function conversionSpec(spec: ParameterSpecView): {dimension: Dimension; units: DisplayUnit[]; preferred: DisplayUnit} | null {
+  if (!['float', 'int', 'integer'].includes(spec.type) || !spec.dimension || !spec.canonicalUnit || !spec.displayUnits?.length) return null;
+  const dimension = spec.dimension as Dimension;
+  const canonicalUnits: Record<Dimension, string> = {length: 'nm', time: 's', angle: 'degree', rate: 'nm/s'};
+  if (!Object.hasOwn(canonicalUnits, dimension) || canonicalUnits[dimension] !== spec.canonicalUnit) return null;
+  const units = spec.displayUnits as DisplayUnit[];
+  const canonicalDisplay = spec.canonicalUnit === 'degree' ? '°' : spec.canonicalUnit;
+  try {
+    for (const unit of units) toCanonical(0, dimension, unit);
+    return {dimension, units, preferred: units.includes(canonicalDisplay as DisplayUnit) ? canonicalDisplay as DisplayUnit : units[0]};
+  } catch { return null; }
+}
+
+const capabilityKeys: Record<string, TranslationKey> = {
+  exact: 'capability.exact', approximate: 'capability.approximate',
+  estimated: 'capability.estimated', unsupported: 'capability.unsupported',
+};
 
 function safeText(value: unknown, t: Translate): string {
   if (value === undefined || value === null) return '';
@@ -127,6 +146,7 @@ function validationMessage(
     case 'validation.safeInteger':
     case 'validation.boolean':
     case 'validation.choice':
+    case 'validation.unsupported':
       return t(messageKey);
     case 'validation.minimum':
       return t(messageKey, {minimum: spec.minimum ?? ''});
@@ -224,7 +244,9 @@ function ParameterControl({
       {...accessibility}
       title={tooltip}
       onChange={event => onUpdate(event.currentTarget.value, event.currentTarget.value)}
-      onBlur={onFlush}
+      onBlur={event => {
+        if (event.relatedTarget?.getAttribute('data-unit-control') !== 'true') onFlush();
+      }}
       onKeyDown={handleKeyDown}
     />
   );
@@ -250,12 +272,27 @@ function ParameterField({
     ? undefined
     : `parameter-server-error-${stepIndex}-${spec.key}`;
   const initialValue = serverValue === undefined ? spec.defaultValue : serverValue;
+  const conversion = conversionSpec(spec);
+  const preferenceKey = `tcad.unit.v1:${stepName}:${spec.key}`;
+  const [displayUnit, setDisplayUnit] = useState<DisplayUnit | undefined>(() => {
+    if (!conversion) return undefined;
+    let stored: string | null = null;
+    try { stored = window.localStorage.getItem(preferenceKey); } catch { /* Session preference still works. */ }
+    const preferred = draft?.displayUnit ?? stored;
+    return conversion.units.includes(preferred as DisplayUnit) ? preferred as DisplayUnit : conversion.preferred;
+  });
+  const canonicalDisplay = (value: unknown, unit = displayUnit): DisplayValue => {
+    if (!conversion || unit === undefined || typeof value !== 'number') return initialDisplayValue(spec, value, t);
+    return formatDisplayValue(fromCanonical(value, conversion.dimension, unit), spec.decimals ?? 2);
+  };
   const [displayValue, setDisplayValue] = useState<DisplayValue>(
-    () => draft?.rawValue ?? initialDisplayValue(spec, initialValue, t),
+    () => draft?.rawValue ?? canonicalDisplay(initialValue),
   );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validDraftRef = useRef(false);
   const tooltip = resolvedTooltip(stepName, spec, locale, t);
+  const capability = spec.capabilityKey === undefined ? undefined : state.backendCapabilities[spec.capabilityKey];
+  const capabilityLabel = capability !== undefined && Object.hasOwn(capabilityKeys, capability) ? capabilityKeys[capability] : undefined;
   const description = parameterDescription(spec, tooltip, t);
   const clientError = draft?.validation.status === 'invalid'
     ? validationMessage(draft.validation.message, spec, t)
@@ -283,9 +320,9 @@ function ParameterField({
       validDraftRef.current = draft.validation.status === 'valid';
       return;
     }
-    setDisplayValue(initialDisplayValue(spec, initialValue, t));
+    setDisplayValue(canonicalDisplay(initialValue));
     validDraftRef.current = false;
-  }, [draft, initialValue, spec, t]);
+  }, [draft, initialValue, spec, t, displayUnit]);
 
   useEffect(() => {
     if (disabled) clearTimer();
@@ -297,7 +334,16 @@ function ParameterField({
     if (disabled) return;
     clearTimer();
     setDisplayValue(display);
-    const validation = validateParameter(spec, raw);
+    let validation = validateParameter(spec, raw);
+    if (conversion && displayUnit !== undefined) {
+      // Validate display syntax before converting; bounds belong to canonical units.
+      const syntax = validateParameter({...spec, type: 'float', minimum: undefined, maximum: undefined, capabilityKey: undefined}, raw);
+      if (syntax.ok && typeof syntax.value === 'number') {
+        try {
+          validation = validateParameter(spec, toCanonical(syntax.value, conversion.dimension, displayUnit));
+        } catch { validation = {ok: false, messageKey: 'validation.finite'}; }
+      } else { validation = syntax; }
+    }
     validDraftRef.current = validation.ok;
     if (!validation.ok) {
       actions.updateDraft(
@@ -306,6 +352,7 @@ function ParameterField({
         raw,
         {status: 'invalid', message: validation.messageKey},
         display,
+        displayUnit,
       );
       return;
     }
@@ -315,6 +362,7 @@ function ParameterField({
       validation.value,
       {status: 'valid'},
       display,
+      displayUnit,
     );
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
@@ -329,14 +377,26 @@ function ParameterField({
     }
   };
 
+  const changeUnit = (unit: DisplayUnit) => {
+    clearTimer();
+    const canonical = draft === undefined ? initialValue : draft.value;
+    const display = draft?.validation.status === 'invalid' ? displayValue : canonicalDisplay(canonical, unit);
+    setDisplayUnit(unit);
+    setDisplayValue(display);
+    if (draft !== undefined) actions.updateDraftDisplay(stepIndex, spec.key, display, unit);
+    try { window.localStorage.setItem(preferenceKey, unit); } catch { /* Keep preference in memory. */ }
+  };
+
   return (
     <div className={`parameter-field${hasError ? ' has-error' : ''}`}>
       <div className="parameter-label-row">
         <label htmlFor={inputId}>{spec.label || spec.key}</label>
-        {spec.units && (
+        {capabilityLabel !== undefined && <span className={`parameter-capability capability-${capability}`}>{t(capabilityLabel)}</span>}
+        {!conversion && spec.units && (
           <span id={unitsId} className="parameter-units">{spec.units}</span>
         )}
       </div>
+      <div className={conversion ? 'parameter-value-row' : undefined}>
       <ParameterControl
         spec={spec}
         inputId={inputId}
@@ -348,6 +408,16 @@ function ParameterField({
         onUpdate={update}
         onFlush={flush}
       />
+      {conversion && <select
+        aria-label={t('parameter.unit', {label: spec.label || spec.key})}
+        className="parameter-unit-select"
+        data-unit-control="true"
+        value={displayUnit}
+        disabled={disabled}
+        onFocus={clearTimer}
+        onChange={event => changeUnit(event.currentTarget.value as DisplayUnit)}
+      >{conversion.units.map(unit => <option key={unit} value={unit}>{unit}</option>)}</select>}
+      </div>
       {description && <p id={descriptionId} className="parameter-help">{description}</p>}
       {clientError && <p id={validationId} className="parameter-error">{clientError}</p>}
       {serverError !== undefined && (

@@ -1322,3 +1322,9 @@ button:focus-visible,
 .workspace-left .process-pane {
   border-right: 0;
 }
+/* Each numeric parameter owns its display unit. */
+.parameter-value-row { display: flex; gap: 6px; align-items: center; }
+.parameter-value-row input { min-width: 0; flex: 1; }
+.parameter-value-row .parameter-unit-select { width: auto; flex: 0 0 auto; }
+.parameter-capability { font-size: 11px; color: var(--text-secondary, #a7b0c2); }
+.parameter-capability.capability-unsupported { color: #d88d4b; }
