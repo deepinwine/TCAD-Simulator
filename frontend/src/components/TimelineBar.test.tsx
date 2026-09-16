@@ -212,6 +212,27 @@ describe('TimelineBar', () => {
     expect(screen.queryByText(/Authorization: Bearer/)).not.toBeInTheDocument();
   });
 
+  it.each(['constructor', 'toString', '__proto__'])
+    ('原型属性 Timeline 状态 %s 不会让工作台卸载，并在中英文显示未知状态', async state => {
+      const withPrototypeState: TimelineView = {
+        current: 0,
+        items: [{
+          index: 0,
+          state,
+          runtimeStatus: 'ready',
+          snapshotValid: true,
+        }],
+      };
+      render(<App api={apiStub({getTimeline: vi.fn(async () => withPrototypeState)})} viewerRuntimeFactory={stubViewerRuntime} />);
+
+      expect(await screen.findByText('#1 未知状态')).toBeVisible();
+      expect(screen.getByRole('region', {name: 'Process Flow'})).toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+      expect(await screen.findByText('#1 unknown state')).toBeVisible();
+      expect(screen.getByRole('region', {name: 'Process Flow'})).toBeVisible();
+    });
+
   it('Next 跳过无效节点，成功后显示历史快照并刷新 Viewer', async () => {
     const api = apiStub();
     const viewerRuntime = recordingViewerRuntime();

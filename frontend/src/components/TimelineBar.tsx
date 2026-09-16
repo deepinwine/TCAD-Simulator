@@ -116,7 +116,9 @@ export function TimelineBar() {
           <ol className="timeline-items">
             {timeline.items.map(item => {
               const current = item.index === timeline.current;
-              const stateKey = timelineStateKeys[item.state];
+              const stateKey = Object.hasOwn(timelineStateKeys, item.state)
+                ? timelineStateKeys[item.state]
+                : undefined;
               return (
                 <li
                   key={`${item.index}:${item.state}`}
