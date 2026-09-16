@@ -293,6 +293,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
             title={t('viewer.initError')}
             error={initError}
             suggestion={t('viewer.initSuggestion')}
+            trustedSuggestion
           />
         )}
         {initError === null && loadError !== null && (
@@ -300,6 +301,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
             title={t('viewer.loadError')}
             error={loadError}
             suggestion={materials.length > 0 ? t('viewer.staleSuggestion') : undefined}
+            trustedSuggestion
             actionLabel={t('viewer.retry')}
             onAction={retry}
           />
@@ -308,6 +310,7 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
           <ErrorNotice
             title={t('viewer.partialError')}
             suggestion={t('viewer.partialSuggestion')}
+            trustedSuggestion
             actionLabel={t('viewer.retry')}
             onAction={retry}
           />

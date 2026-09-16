@@ -3,6 +3,7 @@ import {Vector3} from 'three';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TcadApiError} from '../api/client';
 import type {TcadApi} from '../api/types';
+import {I18nProvider} from '../i18n/I18nContext';
 import {ThreeViewer, type ViewerRuntime, type StandardView} from './ThreeViewer';
 import type {PickHit} from './picking';
 
@@ -49,7 +50,10 @@ function fakeViewerRuntime(overrides: Partial<ViewerRuntime> = {}) {
 
 const apiStub = {} as TcadApi;
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 describe('ThreeViewer', () => {
   it('部分加载失败仅显示本地化摘要，重试成功后更新材料列表并清除错误', async () => {
@@ -123,6 +127,50 @@ describe('ThreeViewer', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('发生未预期的错误。');
     expect(screen.queryByText('manifest 离线')).not.toBeInTheDocument();
     expect(screen.getByText('Si')).toBeVisible();
+    expect(screen.getByText(/仍显示上次加载的几何，可能与当前模型不同/)).toBeVisible();
+  });
+
+  it('英文下可信的 WebGL 和旧几何建议可见，但服务端内容保持隐藏', async () => {
+    window.localStorage.setItem('tcad.locale.v1', 'en');
+    const initView = render(
+      <I18nProvider>
+        <ThreeViewer
+          api={apiStub}
+          refreshToken={1}
+          runtimeFactory={() => {
+            throw new TcadApiError('Authorization: Bearer secret-token', {
+              status: 404,
+              code: 'missing_mesh',
+              suggestion: 'server-suggestion-secret',
+            });
+          }}
+        />
+      </I18nProvider>,
+    );
+    const initAlert = await screen.findByRole('alert');
+    expect(initAlert).toHaveTextContent('Check WebGL2 support in the browser and try again.');
+    expect(initAlert).not.toHaveTextContent('Authorization: Bearer');
+    expect(initAlert).not.toHaveTextContent('server-suggestion-secret');
+
+    initView.unmount();
+    const loadMeshes = vi.fn()
+      .mockResolvedValueOnce({warnings: [], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})
+      .mockRejectedValueOnce(new Error('secret-database-path'));
+    const {runtime} = fakeViewerRuntime({loadMeshes});
+    const view = render(
+      <I18nProvider>
+        <ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={() => runtime} />
+      </I18nProvider>,
+    );
+    await screen.findByText('Si');
+    view.rerender(
+      <I18nProvider>
+        <ThreeViewer api={apiStub} refreshToken={2} runtimeFactory={() => runtime} />
+      </I18nProvider>,
+    );
+    const loadAlert = await screen.findByRole('alert');
+    expect(loadAlert).toHaveTextContent('The previously loaded geometry is still displayed and may not match the current model. Try again.');
+    expect(loadAlert).not.toHaveTextContent('secret-database-path');
   });
 
   it('相机操作不产生 API 请求，unmount 释放 runtime', async () => {
@@ -354,6 +402,7 @@ describe('ThreeViewer', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('发生未预期的错误。');
     expect(alert).not.toHaveTextContent('WebGL2 上下文创建失败');
+    expect(alert).toHaveTextContent('请检查浏览器 WebGL2 支持后重试。');
     expect(document.querySelector('canvas')).toBeNull();
     expect(screen.queryByText('WebGL2')).toBeNull();
     expect(screen.getByRole('button', {name: '正交视图'})).toBeDisabled();
