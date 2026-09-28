@@ -31,21 +31,45 @@ PARAMS = {
     'active_semiconductor_width_nm': 420, 'active_semiconductor_height_nm': 450,
 }
 
+# 每个采样密度对应一套掩膜。grid=64 为历史校准文件（字节不变）；grid=128 掩膜由
+# generate_line_mask 按体素边界生成：五条线等宽、组居中、无边缘截断。
+GRID_MASK_SUFFIX = {64: '', 128: '_128'}
+GRID128_MASK_START = {'bitline': 17, 'active': 14}
+
+
+def generate_line_mask(columns, *, start, pitch_nm, width_nm, count, voxel_nm):
+    """Return a 1D boolean column profile: True = 掩膜不透明（线条受保护）。"""
+    pitch = max(1, int(round(pitch_nm / voxel_nm)))
+    width = max(1, int(round(width_nm / voxel_nm)))
+    cols = np.zeros(int(columns), dtype=bool)
+    for k in range(int(count)):
+        i0 = int(start) + k * pitch
+        if i0 + width > cols.size:
+            raise ValueError(f'line {k+1} overruns mask domain ({i0}+{width} > {cols.size})')
+        cols[i0:i0 + width] = True
+    return cols
+
+
+def write_mask_pgm(path, cols):
+    body = '\n'.join(['P2', f'1 {len(cols)}', '255'] + ['0' if v else '255' for v in cols])
+    Path(path).write_text(body + '\n', encoding='ascii')
+
 
 def build_recipe(grid=64):
-    # The checked-in masks are calibrated at this sampling density. Resampling
-    # changes edge-line widths, so accepting another grid would return a
-    # deterministic but physically wrong structure.
-    if isinstance(grid, bool) or not isinstance(grid, int) or grid != 64:
-        raise ValueError('grid must be exactly 64 for the calibrated DRAM masks')
+    # grid=64 使用校准掩膜；grid=128 使用生成的等宽掩膜。其它采样密度会改变
+    # 边缘线宽，返回确定性但物理错误的结构，因此仍然拒绝。
+    allowed = tuple(GRID_MASK_SUFFIX)
+    if isinstance(grid, bool) or not isinstance(grid, int) or grid not in GRID_MASK_SUFFIX:
+        raise ValueError(f'grid must be one of {allowed} for the DRAM masks')
     p = dict(PARAMS)
     voxel = p['domain_y_nm'] / grid
     shape = [int(math.ceil(p['domain_x_nm']/voxel)), grid, int(math.ceil(2800/voxel))]
+    suffix = GRID_MASK_SUFFIX[grid]
     def step(name, label, **params):
         return {'name': name, 'instance_name': label, 'enabled': True, 'params': params}
 
     def pattern(width, name):
-        mask_name = 'dram_bitline_mask.pgm' if width == p['bitline_width_nm'] else 'dram_active_mask.pgm'
+        mask_name = f'dram_bitline_mask{suffix}.pgm' if width == p['bitline_width_nm'] else f'dram_active_mask{suffix}.pgm'
         exposure = step('Mask Exposure', name, advanced_enable=1, mask_mode='Custom',
                         mask_file=f'examples/{mask_name}', mask_name=name, dose=80.0)
         return [step('Spin Resist', 'Patterning resist', thickness_nm=250.0), exposure,
@@ -143,13 +167,28 @@ def validate_structure(model, recipe):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--grid', type=int, choices=(64,), default=64,
-                        help='Mask-calibrated sampling density (currently 64 only)')
+    parser.add_argument('--grid', type=int, choices=tuple(GRID_MASK_SUFFIX), default=64,
+                        help='Sampling density (64: calibrated masks; 128: generated equal-width masks)')
     parser.add_argument('--recipe', type=Path, help='Replay an exported full recipe JSON')
     parser.add_argument('--output', type=Path, help='Directory for recipe, measured report and final grid')
+    parser.add_argument('--regenerate-masks', action='store_true',
+                        help='Rewrite the generated grid=128 mask files from the design and exit')
     parser.add_argument('--no-viewer', action='store_true', help='Compatibility flag; this tool is headless')
     parser.add_argument('--validate-only', action='store_true', help='Execute and measure; never bypass execution')
     args = parser.parse_args()
+    if args.regenerate_masks:
+        voxel = PARAMS['domain_y_nm'] / 128
+        columns = int(math.ceil(PARAMS['domain_x_nm'] / voxel))
+        here = Path(__file__).resolve().parent
+        for kind, width_nm in (('bitline', PARAMS['bitline_width_nm']),
+                               ('active', PARAMS['active_semiconductor_width_nm'])):
+            cols = generate_line_mask(columns, start=GRID128_MASK_START[kind],
+                                      pitch_nm=PARAMS['bitline_pitch_nm'], width_nm=width_nm,
+                                      count=PARAMS['num_bitlines'], voxel_nm=voxel)
+            out = here / f'dram_{kind}_mask_128.pgm'
+            write_mask_pgm(out, cols)
+            print(f'wrote {out} ({int(cols.sum())} exposed-line columns of {columns})')
+        return 0
     recipe = json.loads(args.recipe.read_text()) if args.recipe else build_recipe(args.grid)
     model, recipe, snapshots = replay_recipe(recipe)
     try:
