@@ -227,7 +227,7 @@ class MaskAssetStoreTests(unittest.TestCase):
             self.assertEqual(caught.exception.params["references"], refs)
 
     def test_os_replace_failure_leaves_published_bytes_unchanged(self):
-        from mask_assets import MaskAssetService, MaskAssetStore
+        from mask_assets import MaskAssetError, MaskAssetService, MaskAssetStore
 
         with tempfile.TemporaryDirectory() as temp_dir:
             service = MaskAssetService(MaskAssetStore(Path(temp_dir)), adapter=_Adapter())
@@ -235,8 +235,10 @@ class MaskAssetStoreTests(unittest.TestCase):
             before = {p.relative_to(Path(temp_dir)).as_posix(): p.read_bytes()
                       for p in Path(temp_dir).rglob("*") if p.is_file()}
             with mock.patch("mask_assets.store.os.replace", side_effect=OSError("publish failed")):
-                with self.assertRaises(OSError):
+                with self.assertRaises(MaskAssetError) as caught:
                     service.save_candidate(dict(_candidate(), name="failed"))
+                self.assertEqual(caught.exception.code, 'mask_asset_apply_failed')
+                self.assertIsInstance(caught.exception.__cause__, OSError)
             after = {p.relative_to(Path(temp_dir)).as_posix(): p.read_bytes()
                      for p in Path(temp_dir).rglob("*") if p.is_file()}
             self.assertEqual(before, after)

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .model import MaskAsset, MaskAssetError, parse_candidate, validate_asset_id
+from .model import MaskAsset, MaskAssetError, parse_candidate, validate_asset_id, validate_revision
 from .transaction import atomic_bytes, fsync_directory
 
 
@@ -25,14 +25,29 @@ class MaskAssetStore:
     def __init__(self, session_root: Path) -> None:
         self.root = Path(session_root) / "mask_assets"
 
+    def _safe(self, path: Path) -> Path:
+        # Inspect lexical ancestors before any read, mkdir, replace, or unlink.
+        for item in (path, *path.parents):
+            if item.is_symlink():
+                raise MaskAssetError("mask_asset_store_unsafe", "Mask asset storage contains a symbolic link", status=500)
+            if item == self.root.parent:
+                break
+        return path
+
+    def _safe_tree(self, path: Path) -> None:
+        self._safe(path)
+        if path.exists():
+            for item in path.rglob('*'):
+                self._safe(item)
+
     def _asset_dir(self, asset_id: str) -> Path:
-        return self.root / validate_asset_id(asset_id)
+        return self._safe(self.root / validate_asset_id(asset_id))
 
     def _manifest_path(self, asset_id: str) -> Path:
-        return self._asset_dir(asset_id) / "manifest.json"
+        return self._safe(self._asset_dir(asset_id) / "manifest.json")
 
     def _revision_path(self, asset_id: str, revision: int) -> Path:
-        return self._asset_dir(asset_id) / "revisions" / f"{int(revision)}.json"
+        return self._safe(self._asset_dir(asset_id) / "revisions" / f"{validate_revision(revision)}.json")
 
     def current_revision(self, asset_id: str) -> int:
         path = self._manifest_path(asset_id)
@@ -40,13 +55,14 @@ class MaskAssetStore:
             return 0
         try:
             value = json.loads(path.read_text(encoding="utf-8")).get("current_revision", 0)
-            return int(value)
+            return validate_revision(value)
         except Exception as exc:
             raise MaskAssetError("mask_asset_store_corrupt", "Mask asset manifest is invalid", status=500) from exc
 
     def publish(self, asset: MaskAsset) -> MaskAsset:
         asset_dir = self._asset_dir(asset.id)
-        revisions = asset_dir / "revisions"
+        self._safe_tree(asset_dir)
+        revisions = self._safe(asset_dir / "revisions")
         revisions.mkdir(parents=True, exist_ok=True)
         revision_path = self._revision_path(asset.id, asset.revision)
         manifest_path = self._manifest_path(asset.id)
@@ -102,7 +118,9 @@ class MaskAssetStore:
         return path.read_bytes() if path.exists() else None
 
     def get(self, asset_id: str, revision: int | None = None) -> MaskAsset:
-        selected = self.current_revision(asset_id) if revision is None else int(revision)
+        selected = self.current_revision(asset_id) if revision is None else validate_revision(revision)
+        if selected <= 0:
+            raise MaskAssetError("mask_asset_not_found", "Mask asset revision was not found", status=404)
         path = self._revision_path(asset_id, selected)
         if selected <= 0 or not path.exists():
             raise MaskAssetError("mask_asset_not_found", "Mask asset revision was not found", status=404,
@@ -117,6 +135,7 @@ class MaskAssetStore:
         return asset
 
     def list(self) -> list[dict[str, Any]]:
+        self._safe_tree(self.root)
         if not self.root.exists():
             return []
         out = []
@@ -131,6 +150,7 @@ class MaskAssetStore:
 
     def delete(self, asset_id: str) -> None:
         asset_dir = self._asset_dir(asset_id)
+        self._safe_tree(asset_dir)
         if not asset_dir.exists():
             raise MaskAssetError("mask_asset_not_found", "Mask asset was not found", status=404, params={"id": asset_id})
         for path in sorted(asset_dir.rglob("*"), reverse=True):

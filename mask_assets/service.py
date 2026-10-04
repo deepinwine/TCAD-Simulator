@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -10,6 +11,25 @@ from layout import LayoutAdapter, LayoutGeometry, MaskPolygon
 
 from .model import MaskAsset, MaskAssetError, _shape_polygons, parse_candidate
 from .store import MaskAssetStore
+
+
+def _safe_operation(code: str, message: str, status: int = 500):
+    def decorate(operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            try:
+                return operation(*args, **kwargs)
+            except MaskAssetError:
+                raise
+            except (ImportError, ModuleNotFoundError) as exc:
+                raise MaskAssetError('dependency_missing', 'GDS support requires gdstk',
+                                     params={'dependency': 'gdstk'}) from exc
+            except Exception as exc:
+                if isinstance(exc, ValueError) and 'budget' in str(exc).lower():
+                    raise MaskAssetError('mask_asset_budget_exceeded', 'Mask geometry exceeds processing budget', status=413) from exc
+                raise MaskAssetError(code, message, status=status) from exc
+        return call
+    return decorate
 
 
 class MaskAssetService:
@@ -29,6 +49,7 @@ class MaskAssetService:
     def _raster_adapter(self):
         return self._adapter if self._adapter is not None else LayoutAdapter.normalized()
 
+    @_safe_operation('mask_asset_apply_failed', 'Mask asset save failed')
     def save_candidate(self, payload: Mapping[str, Any]) -> MaskAsset:
         candidate = parse_candidate(payload)
         revision = self.store.current_revision(candidate.id) + 1
@@ -37,12 +58,15 @@ class MaskAssetService:
         self._rasterize_asset(asset, shape=(64, 64), bounds=asset.bounds_nm)
         return self.store.publish(asset)
 
+    @_safe_operation('mask_asset_store_failed', 'Mask asset read failed')
     def get(self, asset_id: str, revision: int | None = None) -> MaskAsset:
         return self.store.get(asset_id, revision)
 
+    @_safe_operation('mask_asset_store_failed', 'Mask asset listing failed')
     def list(self) -> list[dict[str, Any]]:
         return self.store.list()
 
+    @_safe_operation('mask_asset_store_failed', 'Mask asset deletion failed')
     def delete(self, asset_id: str, *, references: Iterable[Mapping[str, Any]] = ()) -> None:
         refs = [dict(item) for item in references]
         if refs:
@@ -55,6 +79,7 @@ class MaskAssetService:
         return self._rasterize_asset(asset, shape=shape,
                                      bounds=asset.bounds_nm if bounds is None else bounds), asset
 
+    @_safe_operation('mask_asset_apply_failed', 'Mask asset rasterization failed')
     def _rasterize_asset(self, asset: MaskAsset, *, shape, bounds):
         """Union ordinary contours, subtract holes within their editable layer.
 
@@ -88,6 +113,7 @@ class MaskAssetService:
     def export_json(self, asset_id: str, revision: int) -> bytes:
         return json.dumps(self.get(asset_id, revision).to_mapping(), ensure_ascii=False, indent=2).encode("utf-8")
 
+    @_safe_operation('invalid_mask_asset_import', 'Mask asset layout import failed', 400)
     def import_gds(self, path: Path, *, asset_id: str, name: str) -> MaskAsset:
         adapter = self._layout_adapter()
         if hasattr(adapter, "read_with_metadata"):
@@ -108,6 +134,7 @@ class MaskAssetService:
         }
         return self.save_candidate(payload)
 
+    @_safe_operation('mask_asset_export_failed', 'Mask asset layout export failed')
     def export_gds(self, asset_id: str, revision: int, path: Path) -> None:
         asset = self.get(asset_id, revision)
         adapter = self._layout_adapter()

@@ -35,6 +35,12 @@ class MaskAssetError(ValueError):
         return out
 
 
+def validate_revision(value: Any) -> int:
+    if type(value) is not int or value <= 0:
+        raise MaskAssetError("invalid_mask_asset_reference", "Revision must be a positive integer")
+    return value
+
+
 def validate_asset_id(value: Any, path: str = "id") -> str:
     asset_id = str(value).strip()
     if not _ID_RE.fullmatch(asset_id):
