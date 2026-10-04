@@ -2,6 +2,16 @@
 
 The WebUI is built into `tcad_simulator.py`. It provides browser access to recipe editing, simulation, preview, history, library storage, export, mask design, Admin configuration, and optional Agent workflows.
 
+Mask Asset JSON save/delete requests enforce a 64 MiB body limit before reading
+the request stream, matching the multipart import limit. Invalid or negative
+Content-Length values return 400; oversized bodies and geometry processing
+budgets return 413. Asset revisions in Python/RPC must be positive integers
+(booleans, floats, and strings are rejected); HTTP queries accept only decimal
+digit strings. Asset execution and step previews load that exact revision.
+Existing symbolic links anywhere inside the session's asset storage are rejected
+before reads, publication, or deletion. Mask errors use stable code/params/error
+envelopes without raw filesystem paths or third-party exception text.
+
 ## Main Components
 
 - `WebUIServerManager`: starts/stops the user WebUI HTTP server.

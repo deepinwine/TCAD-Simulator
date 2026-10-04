@@ -19323,11 +19323,9 @@ class ExposureStep(ProcessStep):
         self.last_metrics = {}
         if mode == "Asset":
             from mask_assets import MaskAssetError
+            from mask_assets.model import validate_revision
             asset_id = str(self.params.get("mask_asset_id", "") or "").strip()
-            try:
-                revision = int(self.params.get("mask_asset_revision", 0) or 0)
-            except Exception:
-                revision = 0
+            revision = validate_revision(self.params.get("mask_asset_revision"))
             if not asset_id or revision <= 0:
                 raise MaskAssetError(
                     "invalid_mask_asset_reference",
@@ -71397,7 +71395,7 @@ def _webui_worker_main(
             if cmd == "mask_asset_get":
                 asset_id = str(payload.get("id", "") or "").strip()
                 revision_raw = payload.get("revision")
-                revision = int(revision_raw) if revision_raw is not None else None
+                revision = revision_raw
                 export_format = str(payload.get("format", "") or "").strip().lower()
                 asset = mask_asset_service.get(asset_id, revision)
                 if export_format == "json":
@@ -71410,7 +71408,9 @@ def _webui_worker_main(
                     })
                     continue
                 if export_format == "gds":
-                    export_path = paths["exports_dir"] / f"{asset.id}-r{asset.revision}-{secrets.token_hex(4)}.gds"
+                    fd, export_name = tempfile.mkstemp(prefix=".mask-export-", suffix=".gds", dir=paths["exports_dir"])
+                    os.close(fd)
+                    export_path = Path(export_name)
                     try:
                         mask_asset_service.export_gds(asset.id, asset.revision, export_path)
                         data = export_path.read_bytes()
@@ -71477,9 +71477,11 @@ def _webui_worker_main(
                         if suffix == ".json":
                             published_asset = mask_asset_service.import_json(bytes(file_data))
                         elif suffix in {".gds", ".oas"}:
-                            import_path = storage_dir / f".mask-import-{secrets.token_hex(6)}{suffix}"
+                            fd, import_name = tempfile.mkstemp(prefix=".mask-import-", suffix=suffix, dir=storage_dir)
+                            import_path = Path(import_name)
                             try:
-                                import_path.write_bytes(bytes(file_data))
+                                with os.fdopen(fd, "wb") as import_handle:
+                                    import_handle.write(bytes(file_data))
                                 published_asset = mask_asset_service.import_gds(
                                     import_path,
                                     asset_id=asset_id_hint,
@@ -72940,6 +72942,16 @@ def _webui_worker_main(
                 # without mutating the model state.
                 mode = str(params.get("mask_mode", "Procedural") or "Procedural")
                 mask_override: Optional[np.ndarray] = None
+                if mode == "Asset":
+                    from mask_assets.model import validate_revision
+                    revision = validate_revision(params.get("mask_asset_revision"))
+                    raster, _asset = mask_asset_service.rasterize(
+                        str(params.get("mask_asset_id", "") or "").strip(), revision,
+                        shape=tuple(int(v) for v in model.open_mask.shape),
+                        bounds=(0.0, 0.0, float(model.open_mask.shape[0]) * float(model.voxel_size_nm),
+                                float(model.open_mask.shape[1]) * float(model.voxel_size_nm)),
+                    )
+                    mask_override = resample_mask(np.asarray(raster, dtype=bool).T, model.open_mask.shape)
                 if mode in {"Custom", "Designer", "Image"}:
                     try:
                         cm = getattr(st, "custom_mask", None)
@@ -73171,6 +73183,11 @@ def _webui_worker_main(
                     "status": int(exc.status),
                     **({"detail": exc.detail} if exc.detail else {}),
                 }
+            elif str(cmd).startswith("mask_asset_"):
+                code = "mask_asset_export_failed" if cmd == "mask_asset_get" and payload.get("format") else "mask_asset_apply_failed"
+                conn.send({"ok": False, "error": "Mask asset operation failed", "code": code,
+                           "params": {}, "status": 500, "rid": rid})
+                continue
             conn.send({"ok": False, "error": str(exc), "rid": rid, **structured})
 
 
@@ -73652,6 +73669,41 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except Exception:
             return {}
+
+    def _read_mask_json(self) -> Dict[str, Any]:
+        from mask_assets import MaskAssetError
+        raw_length = self.headers.get("Content-Length", "0")
+        if not re.fullmatch(r"[0-9]+", str(raw_length)):
+            raise MaskAssetError("invalid_mask_asset_request", "Content-Length must be a nonnegative decimal integer")
+        limit = 64 * 1024 * 1024
+        decimal_length = str(raw_length).lstrip("0") or "0"
+        if len(decimal_length) > len(str(limit)) or (len(decimal_length) == len(str(limit)) and decimal_length > str(limit)):
+            raise MaskAssetError("mask_asset_request_size", "Mask asset request exceeds size limit", status=413,
+                                 params={"limit": limit})
+        length = int(decimal_length)
+        if length == 0:
+            raise MaskAssetError("invalid_mask_asset_request", "Mask asset JSON body is required")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception as exc:
+            raise MaskAssetError("invalid_mask_asset_request", "Mask asset JSON body is invalid") from exc
+        if not isinstance(payload, dict):
+            raise MaskAssetError("invalid_mask_asset_request", "Mask asset JSON body must be an object")
+        return payload
+
+    def _mask_rpc(self, session, command: str, payload: Dict[str, Any], *, timeout_s: float = 60.0):
+        from mask_assets import MaskAssetError
+        try:
+            response = session.rpc(command, payload, timeout_s=timeout_s)
+            if isinstance(response, dict) and (response.get("ok") is True or
+                    (isinstance(response.get("code"), str) and isinstance(response.get("params"), dict))):
+                return response
+        except MaskAssetError as exc:
+            return {**exc.envelope(), "status": exc.status}
+        except Exception:
+            pass
+        code = "mask_asset_export_failed" if payload.get("format") else "mask_asset_apply_failed"
+        return {"ok": False, "code": code, "params": {}, "error": "Mask asset operation failed", "status": 500}
 
     def _send_bytes(self, data: bytes, content_type: str, status: int = 200, extra_headers: Optional[Dict[str, str]] = None, set_cookie: Optional[str] = None) -> None:
         try:
@@ -74651,7 +74703,7 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/mask/assets":
-            resp = sess.rpc("mask_asset_list", {}, timeout_s=60.0)
+            resp = self._mask_rpc(sess, "mask_asset_list", {}, timeout_s=60.0)
             status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
             self._send_json(resp, status=status, set_cookie=set_cookie)
             return
@@ -74659,7 +74711,8 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/mask/asset":
             asset_id = str(query.get("id", [""])[0] or "").strip()
             try:
-                revision = int(query.get("revision", ["0"])[0])
+                revision_text = query.get("revision", ["0"])[0]
+                revision = int(revision_text) if re.fullmatch(r"[0-9]+", revision_text) else 0
             except Exception:
                 revision = 0
             if not asset_id or revision <= 0:
@@ -74669,7 +74722,7 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                     "error": "id and a positive revision are required",
                 }, status=400, set_cookie=set_cookie)
                 return
-            resp = sess.rpc("mask_asset_get", {"id": asset_id, "revision": revision}, timeout_s=60.0)
+            resp = self._mask_rpc(sess, "mask_asset_get", {"id": asset_id, "revision": revision}, timeout_s=60.0)
             status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
             self._send_json(resp, status=status, set_cookie=set_cookie)
             return
@@ -74678,7 +74731,8 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             asset_id = str(query.get("id", [""])[0] or "").strip()
             export_format = str(query.get("format", ["json"])[0] or "json").strip().lower()
             try:
-                revision = int(query.get("revision", ["0"])[0])
+                revision_text = query.get("revision", ["0"])[0]
+                revision = int(revision_text) if re.fullmatch(r"[0-9]+", revision_text) else 0
             except Exception:
                 revision = 0
             if not asset_id or revision <= 0 or export_format not in {"json", "gds"}:
@@ -74688,7 +74742,7 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                     "error": "A valid id, positive revision, and json or gds format are required",
                 }, status=400, set_cookie=set_cookie)
                 return
-            resp = sess.rpc(
+            resp = self._mask_rpc(sess,
                 "mask_asset_get", {"id": asset_id, "revision": revision, "format": export_format}, timeout_s=120.0,
             )
             if not isinstance(resp, dict) or not resp.get("ok"):
@@ -74772,9 +74826,10 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 rev = ""
             payload = {"step_index": int(step_index), "res": int(res), "rev": rev}
-            resp = sess.rpc("mask_preview_step", payload, timeout_s=60.0)
+            resp = self._mask_rpc(sess, "mask_preview_step", payload, timeout_s=60.0)
             if not isinstance(resp, dict) or not resp.get("ok"):
-                self._send_json(resp if isinstance(resp, dict) else {"ok": False, "error": "Mask preview failed"}, status=400, set_cookie=set_cookie)
+                status = int(resp.get("status", 400)) if isinstance(resp, dict) else 500
+                self._send_json(resp if isinstance(resp, dict) else {"ok": False, "error": "Mask preview failed"}, status=status, set_cookie=set_cookie)
                 return
             data = resp.get("data")
             if not isinstance(data, (bytes, bytearray)):
@@ -74848,15 +74903,25 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/mask/asset/save":
-            payload = self._read_json()
-            resp = sess.rpc("mask_asset_save_apply", payload, timeout_s=120.0)
+            from mask_assets import MaskAssetError
+            try:
+                payload = self._read_mask_json()
+            except MaskAssetError as exc:
+                self._send_json(exc.envelope(), status=exc.status, set_cookie=set_cookie)
+                return
+            resp = self._mask_rpc(sess, "mask_asset_save_apply", payload, timeout_s=120.0)
             status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
             self._send_json(resp, status=status, set_cookie=set_cookie)
             return
 
         if path == "/api/mask/asset/delete":
-            payload = self._read_json()
-            resp = sess.rpc("mask_asset_delete", payload, timeout_s=60.0)
+            from mask_assets import MaskAssetError
+            try:
+                payload = self._read_mask_json()
+            except MaskAssetError as exc:
+                self._send_json(exc.envelope(), status=exc.status, set_cookie=set_cookie)
+                return
+            resp = self._mask_rpc(sess, "mask_asset_delete", payload, timeout_s=60.0)
             status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
             self._send_json(resp, status=status, set_cookie=set_cookie)
             return
@@ -74905,7 +74970,7 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 return
             safe_filename = Path(_webui_safe_filename(filename or "mask.json")).name
             derived_id = Path(safe_filename).stem[:128]
-            resp = sess.rpc(
+            resp = self._mask_rpc(sess,
                 "mask_asset_import_apply",
                 {
                     "step_index": step_index,
