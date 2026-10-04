@@ -63,6 +63,74 @@ class _Adapter:
 
 
 class MaskAssetSchemaTests(unittest.TestCase):
+    def test_rejects_degenerate_polygon_topology(self):
+        from mask_assets import MaskAssetError, parse_candidate
+        for points in (
+            [[0, 0], [100, 0], [100, 0], [0, 100], [0, 0]],
+            [[0, 0], [100, 0], [50, 0], [50, 100], [0, 0]],
+            [[0, 0], [100, 0], [200, 0], [0, 0]],
+            [[0, 0], [100, 0], [100, 100], [50, 0], [0, 100], [0, 0]],
+        ):
+            payload = _candidate()
+            payload['shapes'] = [dict(id='p', type='polygon', layer_id='10/0', points_nm=points)]
+            with self.subTest(points=points), self.assertRaises(MaskAssetError):
+                parse_candidate(payload)
+
+    def test_shape_vertex_limits_are_checked_before_point_conversion(self):
+        from mask_assets import MaskAssetError, parse_candidate
+        for kind in ('polygon', 'line'):
+            payload = _candidate()
+            payload['shapes'] = [dict(id='p', type=kind, layer_id='10/0',
+                                      points_nm=[None] * 2050, width_nm=1)]
+            with self.subTest(kind=kind), self.assertRaises(MaskAssetError) as caught:
+                parse_candidate(payload)
+            self.assertEqual(caught.exception.code, 'mask_asset_budget_exceeded')
+
+    def test_line_join_vertices_count_toward_asset_budget(self):
+        from mask_assets import MaskAssetError, parse_candidate
+        payload = _candidate()
+        payload['shapes'] = [dict(id=f'l{i}', type='line', layer_id='10/0',
+                                  points_nm=[[500 + (j % 2) * 100, 500] for j in range(1024)],
+                                  width_nm=10) for i in range(8)]
+        with self.assertRaises(MaskAssetError) as caught:
+            parse_candidate(payload)
+        self.assertEqual(caught.exception.code, 'mask_asset_budget_exceeded')
+        self.assertEqual(caught.exception.params['limit'], 500_000)
+
+    def test_asset_raster_uses_union_and_layer_local_hole_subtraction(self):
+        from mask_assets import MaskAssetService, MaskAssetStore
+        payload = _candidate()
+        payload['bounds_nm'] = [0, 0, 2000, 1000]
+        rect = dict(id='a', type='rectangle', layer_id='10/0', x_nm=0, y_nm=0,
+                    width_nm=1500, height_nm=1000)
+        hole = dict(id='h', type='hole', layer_id='10/0', cx_nm=750, cy_nm=500, radius_nm=200)
+        cases = [([rect, dict(rect, id='b', x_nm=500)], True),
+                 ([hole], False), ([rect, hole], False)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MaskAssetService(MaskAssetStore(Path(temp_dir)))
+            for shapes, center in cases:
+                payload['shapes'] = shapes
+                asset = service.save_candidate(payload)
+                mask, _ = service.rasterize(asset.id, asset.revision, shape=(40, 20))
+                self.assertEqual(mask.shape, (20, 40))
+                self.assertEqual(bool(mask[10, 15]), center)
+            payload['layers'].append(dict(id='20/0', layer=20, datatype=0, name='other'))
+            payload['shapes'] = [rect, dict(hole, layer_id='20/0')]
+            asset = service.save_candidate(payload)
+            mask, _ = service.rasterize(asset.id, asset.revision, shape=(40, 20))
+            self.assertTrue(mask[10, 15])
+
+    def test_bent_line_joint_is_filled(self):
+        from mask_assets import MaskAssetService, MaskAssetStore
+        payload = _candidate()
+        payload['shapes'] = [dict(id='l', type='line', layer_id='10/0',
+                                  points_nm=[[500, 500], [1000, 500], [1000, 1000]], width_nm=200)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MaskAssetService(MaskAssetStore(Path(temp_dir)))
+            asset = service.save_candidate(payload)
+            mask, _ = service.rasterize(asset.id, asset.revision, shape=(200, 200))
+            self.assertTrue(mask[48:52, 98:102].all())
+
     def test_v1_shapes_convert_to_normalized_polygons(self):
         from mask_assets import parse_candidate, to_layout_geometry
 

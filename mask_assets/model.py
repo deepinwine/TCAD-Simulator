@@ -12,6 +12,8 @@ from layout import LayoutGeometry, MaskPolygon
 
 MAX_SHAPES = 50_000
 MAX_POLYGON_VERTICES = 500_000
+# Bound quadratic topology validation independently of the asset-wide budget.
+MAX_SHAPE_POINTS = 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -193,6 +195,15 @@ def parse_candidate(payload: Mapping[str, Any]) -> MaskAssetCandidate:
         if layer_id not in layer_ids:
             raise MaskAssetError("invalid_mask_asset", "Shape references an unknown layer", params={"path": f"shapes[{index}].layer_id"})
         kind = str(raw.get("type", "")).lower()
+        if kind in {"polygon", "line"}:
+            raw_points = raw.get("points_nm")
+            if isinstance(raw_points, list):
+                count = len(raw_points)
+                limit = MAX_SHAPE_POINTS + (kind == "polygon")
+                estimate = max(0, count - 1) if kind == "polygon" else max(0, count - 1) * 4 + max(0, count - 2) * 64
+                if count > limit or vertex_count + estimate > MAX_POLYGON_VERTICES:
+                    raise MaskAssetError("mask_asset_budget_exceeded", "Shape exceeds vertex budget", status=413,
+                                         params={"limit": MAX_SHAPE_POINTS if count > limit else MAX_POLYGON_VERTICES})
         if kind == "polygon":
             raw_points = raw.get("points_nm")
             if isinstance(raw_points, list) and vertex_count + max(0, len(raw_points) - 1) > MAX_POLYGON_VERTICES:
@@ -282,6 +293,10 @@ def _shape_polygons(shape: MaskShape) -> tuple[np.ndarray, ...]:
             raise MaskAssetError("invalid_mask_asset", "Line segments must have positive length")
         normal = np.asarray([-delta[1], delta[0]]) / length * half
         polys.append(np.asarray([start + normal, end + normal, end - normal, start - normal]))
+    # Round internal joins fill the outside of a bend; segment contours are unioned.
+    angles = np.linspace(0.0, math.tau, 64, endpoint=False)
+    offsets = np.column_stack((np.cos(angles), np.sin(angles))) * half
+    polys.extend(center + offsets for center in points[1:-1])
     return tuple(polys)
 
 
@@ -291,12 +306,27 @@ def _self_intersects(points: np.ndarray) -> bool:
         ac = c - a
         return float(ab[0] * ac[1] - ab[1] * ac[0])
     count = len(points)
+    if len({tuple(point) for point in points}) != count:
+        return True
+    relative = points - points[0]
+    if float(np.sum(relative[:, 0] * np.roll(relative[:, 1], -1)
+                    - relative[:, 1] * np.roll(relative[:, 0], -1))) == 0:
+        return True
+    def on_segment(a, b, c):
+        return orient(a, b, c) == 0 and np.all(c >= np.minimum(a, b)) and np.all(c <= np.maximum(a, b))
     for i in range(count):
         a, b = points[i], points[(i + 1) % count]
+        c = points[(i + 2) % count]
+        if orient(a, b, c) == 0 and float(np.dot(a - b, c - b)) > 0:
+            return True  # Adjacent collinear edges double back and overlap.
         for j in range(i + 1, count):
             if j in {i, (i + 1) % count} or (j + 1) % count in {i, (i + 1) % count}:
                 continue
             c, d = points[j], points[(j + 1) % count]
+            if np.any(np.maximum(a, b) < np.minimum(c, d)) or np.any(np.maximum(c, d) < np.minimum(a, b)):
+                continue
+            if on_segment(a, b, c) or on_segment(a, b, d) or on_segment(c, d, a) or on_segment(c, d, b):
+                return True
             if orient(a, b, c) * orient(a, b, d) < 0 and orient(c, d, a) * orient(c, d, b) < 0:
                 return True
     return False

@@ -180,3 +180,10 @@ Rules:
   首版只读，不支持就地重写。
 - 这是 M2 Compatibility API 的加法扩展。旧 `mask_file`、Designer/Image/Custom 模式、
   `/api/upload/mask` 与预览端点继续工作，不强制迁移既有 Recipe。
+- Mask Asset 栅格按 editable layer id 分组：普通 shape（包含折线段及圆形内部接缝）
+  取并集，再减去该层显式 hole，最后各层取并集。孤立 hole 不产生实心区域，
+  也不挖去其他层的图形。通用 `LayoutAdapter.rasterize` 保留旧 even-odd 契约。
+- 单 polygon 最多 1,024 个不同顶点（另加闭合点），单 line 最多 1,024 个路径点。
+  在坐标转换及拓扑检查前拒绝超限输入，限制逐边拓扑检查的平方复杂度；资产总预算
+  仍为 50,000 shapes / 500,000 个生成顶点，折线内部接缝的 64 顶点也计入总预算。
+  Polygon 拒绝重复点、零长边、端点相触、共线重叠、自交及零面积。

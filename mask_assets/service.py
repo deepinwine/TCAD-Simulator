@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from layout import LayoutAdapter
+import numpy as np
 
-from .model import MaskAsset, MaskAssetError, parse_candidate, to_layout_geometry
+from layout import LayoutAdapter, LayoutGeometry, MaskPolygon
+
+from .model import MaskAsset, MaskAssetError, _shape_polygons, parse_candidate, to_layout_geometry
 from .store import MaskAssetStore
 
 
@@ -31,9 +33,8 @@ class MaskAssetService:
         candidate = parse_candidate(payload)
         revision = self.store.current_revision(candidate.id) + 1
         asset = candidate.with_revision(revision)
-        geometry = to_layout_geometry(asset)
         # JSON editing and execution never require the optional GDS dependency.
-        self._raster_adapter().rasterize(geometry, shape=(64, 64), bounds=asset.bounds_nm)
+        self._rasterize_asset(asset, shape=(64, 64), bounds=asset.bounds_nm)
         return self.store.publish(asset)
 
     def get(self, asset_id: str, revision: int | None = None) -> MaskAsset:
@@ -51,12 +52,31 @@ class MaskAssetService:
 
     def rasterize(self, asset_id: str, revision: int, *, shape, bounds=None):
         asset = self.get(asset_id, revision)
-        geometry = to_layout_geometry(asset)
-        return self._raster_adapter().rasterize(
-            geometry,
-            shape=shape,
-            bounds=asset.bounds_nm if bounds is None else bounds,
-        ), asset
+        return self._rasterize_asset(asset, shape=shape,
+                                     bounds=asset.bounds_nm if bounds is None else bounds), asset
+
+    def _rasterize_asset(self, asset: MaskAsset, *, shape, bounds):
+        """Union ordinary contours, subtract holes within their editable layer.
+
+        LayoutAdapter retains its public even-odd contract. Each call here contains
+        one contour, preserving asset polarity before layers are finally unioned.
+        """
+        adapter = self._raster_adapter()
+        empty = adapter.rasterize(LayoutGeometry.from_polygons(()), shape=shape, bounds=bounds)
+        result = np.zeros_like(empty, dtype=bool)
+        by_layer = {layer.id: [] for layer in asset.layers}
+        for item in asset.shapes:
+            by_layer[item.layer_id].append(item)
+        for layer in asset.layers:
+            positive = np.zeros_like(result)
+            negative = np.zeros_like(result)
+            for item in by_layer[layer.id]:
+                target = negative if item.type == "hole" else positive
+                for points in _shape_polygons(item):
+                    geometry = LayoutGeometry.from_polygons((MaskPolygon(points, layer.layer, layer.datatype),))
+                    target |= adapter.rasterize(geometry, shape=shape, bounds=bounds)
+            result |= positive & ~negative
+        return result
 
     def import_json(self, data: str | bytes) -> MaskAsset:
         try:
