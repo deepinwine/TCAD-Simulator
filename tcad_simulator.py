@@ -37074,6 +37074,9 @@ def _webui_worker_main(
 ) -> None:
     storage_dir = Path(storage_dir_str)
     storage_dir.mkdir(parents=True, exist_ok=True)
+    from mask_assets.transaction import MaskApplyTransaction
+    mask_apply_transaction = MaskApplyTransaction(storage_dir)
+    mask_apply_transaction.recover()
     paths = _webui_session_paths(storage_dir)
     for key in ("history_dir", "preview_dir", "exports_dir", "uploads_dir", "cache_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
@@ -57914,7 +57917,7 @@ def _webui_worker_main(
         current_recipe_id = str(entry.get("id", "")).strip()
         return entry
 
-    def _persist_current(note: str = "", *, kind: str = "autosave") -> None:
+    def _persist_current(note: str = "", *, kind: str = "autosave", strict: bool = False) -> None:
         nonlocal current_recipe_id
         if ephemeral:
             # Ephemeral sessions (e.g. GUI-triggered video export) must never touch History/auto-save.
@@ -57950,7 +57953,8 @@ def _webui_worker_main(
         try:
             _webui_pickle_dump(paths["autosave"], blob)
         except Exception:
-            pass
+            if strict:
+                raise
         _write_history_index()
         _write_session_state()
 
@@ -71403,6 +71407,10 @@ def _webui_worker_main(
                 old_image = getattr(step, "image_mask", None)
                 old_service = getattr(step, "_mask_asset_service", None)
                 old_statuses = list(step_runtime_statuses)
+                old_errors = copy.deepcopy(step_runtime_errors)
+                old_recipe_id = current_recipe_id
+                old_history_index = copy.deepcopy(history_index)
+                old_autosave_state = (autosave_pending, autosave_note, autosave_requested_ts, autosave_last_flush_ts)
                 asset_id_hint = ""
                 if cmd == "mask_asset_save_apply":
                     candidate_payload = payload.get("asset")
@@ -71420,9 +71428,12 @@ def _webui_worker_main(
                                 asset_id_hint = str(imported_payload_hint.get("id", asset_id_hint) or asset_id_hint).strip()
                         except Exception:
                             pass
-                previous_manifest = mask_asset_service.store.manifest_bytes(asset_id_hint) if asset_id_hint else None
                 published_asset = None
                 try:
+                    mask_apply_transaction.begin([paths["autosave"], paths["session_state"], paths["history_index"]])
+                    _ensure_current_recipe_entry()
+                    mask_apply_transaction.capture(_recipe_autosave_path(current_recipe_id))
+                    mask_asset_service.store.apply_transaction = mask_apply_transaction
                     if cmd == "mask_asset_save_apply":
                         published_asset = mask_asset_service.save_candidate(candidate_payload)
                     else:
@@ -71459,27 +71470,48 @@ def _webui_worker_main(
                     step.custom_mask = None
                     step.image_mask = None
                     step.bind_mask_asset_service(mask_asset_service)
-                    _invalidate_step_runtime_statuses(step_index)
-                    _autosave(f"apply mask asset {published_asset.id}@{published_asset.revision}")
-                except Exception:
+                    step_runtime_statuses = _invalidate_step_statuses(step_runtime_statuses, step_index, len(steps))
+                    step_runtime_errors = {index: error for index, error in step_runtime_errors.items() if index < step_index}
+                    _persist_current(f"apply mask asset {published_asset.id}@{published_asset.revision}", kind="autosave", strict=True)
+                    # Build the response while rollback is still possible.
+                    apply_result = {
+                        "asset": published_asset.to_mapping(),
+                        "step": _serialize_step_for_client(step_index),
+                        "statuses": list(step_runtime_statuses),
+                        "warnings": [],
+                    }
+                    mask_apply_transaction.commit()
+                    autosave_pending = False
+                    autosave_note = ""
+                    autosave_requested_ts = 0.0
+                    autosave_last_flush_ts = time.time()
+                except Exception as exc:
+                    mask_asset_service.store.apply_transaction = None
                     step.params = old_params
                     step.custom_mask = old_custom
                     step.image_mask = old_image
                     step._mask_asset_service = old_service
                     step_runtime_statuses[:] = old_statuses
-                    if published_asset is not None:
-                        mask_asset_service.store.rollback_publish(
-                            published_asset.id, published_asset.revision, previous_manifest,
-                        )
-                    raise
+                    step_runtime_errors = old_errors
+                    current_recipe_id = old_recipe_id
+                    history_index = old_history_index
+                    (autosave_pending, autosave_note, autosave_requested_ts, autosave_last_flush_ts) = old_autosave_state
+                    try:
+                        mask_apply_transaction.recover()
+                    except Exception:
+                        # Leave the durable marker available for startup recovery.
+                        pass
+                    if isinstance(exc, MaskAssetError) and exc.status < 500:
+                        raise
+                    raise MaskAssetError("mask_asset_apply_failed", "Mask asset apply failed", status=500) from exc
+                mask_asset_service.store.apply_transaction = None
+                try:
+                    _clear_redo_history()
+                except Exception:
+                    pass
                 conn.send({
                     "ok": True,
-                    "result": {
-                        "asset": published_asset.to_mapping(),
-                        "step": _serialize_step_for_client(step_index),
-                        "statuses": list(step_runtime_statuses),
-                        "warnings": [],
-                    },
+                    "result": apply_result,
                     "rid": rid,
                 })
                 continue

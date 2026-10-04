@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .model import MaskAsset, MaskAssetError, parse_candidate, validate_asset_id
+from .transaction import atomic_bytes, fsync_directory
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -49,6 +50,10 @@ class MaskAssetStore:
         revisions.mkdir(parents=True, exist_ok=True)
         revision_path = self._revision_path(asset.id, asset.revision)
         manifest_path = self._manifest_path(asset.id)
+        transaction = getattr(self, "apply_transaction", None)
+        if transaction is not None:
+            transaction.capture(revision_path)
+            transaction.capture(manifest_path)
         if revision_path.exists():
             raise MaskAssetError("mask_asset_revision_exists", "Mask asset revision already exists", status=409)
         digest = hashlib.sha256(_content_bytes(asset)).hexdigest()
@@ -57,6 +62,7 @@ class MaskAssetStore:
         revision_data = _json_bytes(asset.to_mapping())
         manifest_data = _json_bytes({"version": 1, "id": asset.id, "name": asset.name,
                                      "current_revision": asset.revision, "sha256": asset.sha256})
+        previous_manifest = self.manifest_bytes(asset.id)
         rev_tmp = manifest_tmp = None
         try:
             fd, rev_name = tempfile.mkstemp(prefix=".revision-", suffix=".tmp", dir=revisions)
@@ -69,9 +75,11 @@ class MaskAssetStore:
                 handle.write(manifest_data); handle.flush(); os.fsync(handle.fileno())
             os.replace(rev_tmp, revision_path)
             try:
+                fsync_directory(revisions)
                 os.replace(manifest_tmp, manifest_path)
+                fsync_directory(asset_dir)
             except Exception:
-                revision_path.unlink(missing_ok=True)
+                self.rollback_publish(asset.id, asset.revision, previous_manifest)
                 raise
             return asset
         finally:
@@ -80,14 +88,14 @@ class MaskAssetStore:
 
     def rollback_publish(self, asset_id: str, revision: int, previous_manifest: bytes | None) -> None:
         self._revision_path(asset_id, revision).unlink(missing_ok=True)
+        fsync_directory(self._revision_path(asset_id, revision).parent)
         manifest = self._manifest_path(asset_id)
         if previous_manifest is None:
             manifest.unlink(missing_ok=True)
+            fsync_directory(manifest.parent)
             return
         manifest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = manifest.with_suffix(".rollback.tmp")
-        tmp.write_bytes(previous_manifest)
-        os.replace(tmp, manifest)
+        atomic_bytes(manifest, previous_manifest)
 
     def manifest_bytes(self, asset_id: str) -> bytes | None:
         path = self._manifest_path(asset_id)
