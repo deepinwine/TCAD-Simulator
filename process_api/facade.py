@@ -130,7 +130,7 @@ class ProcessCadFacade:
             domain_code = getattr(exc, "code", None)
             parameter = getattr(exc, "parameter", None)
             structured_rate_error = domain_code == "invalid_parameter" and parameter in {
-                "rate_override", "nominal_rate_nm_s",
+                "rate_override", "nominal_rate_nm_s", "material_rate_nm_min",
             }
             code = domain_code if domain_code == "unsupported_parameter" or structured_rate_error else "invalid_recipe"
             raise ProcessCadError(str(exc), code=code,

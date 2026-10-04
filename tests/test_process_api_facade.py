@@ -337,6 +337,34 @@ class FacadeRecipeLoadingTests(unittest.TestCase):
                 self.assertEqual(facade.model_revision(), revision)
         self.assertEqual(facade.run_step(2).runtimeStatus, "done")
 
+    def test_invalid_material_rate_preserves_domain_error_and_loaded_state(self):
+        import numpy as np
+        facade = self.make_facade()
+        facade.run_to(1)
+        old_model = facade._model
+        recipe = [step.to_json() for step in facade.recipe()]
+        timeline = to_json(facade.get_timeline())
+        revision = facade.model_revision()
+        grid = old_model.grid.copy()
+        silicon = facade._database.material(facade._database.id_for("Silicon"))
+
+        for chemistry, rate in (("Underflow", 5e-324), ("Overflow", 1e308)):
+            silicon.etch_rates_nm_min[chemistry] = (rate, 1.0)
+            with self.subTest(chemistry=chemistry, rate=rate):
+                with self.assertRaises(ProcessCadError) as error:
+                    facade.load_recipe_blob({"steps": [{"name": "Etch", "params": {
+                        "material": "Silicon",
+                        "chemistry": chemistry,
+                        "target_depth_nm": 120,
+                    }}]})
+                self.assertEqual(error.exception.code, "invalid_parameter")
+                self.assertEqual(error.exception.parameter_path, "material_rate_nm_min")
+                self.assertIs(facade._model, old_model)
+                np.testing.assert_array_equal(facade._model.grid, grid)
+                self.assertEqual([step.to_json() for step in facade.recipe()], recipe)
+                self.assertEqual(to_json(facade.get_timeline()), timeline)
+                self.assertEqual(facade.model_revision(), revision)
+
     def test_model_allocation_failure_preserves_loaded_state(self):
         from unittest import mock
         facade = self.make_facade()
