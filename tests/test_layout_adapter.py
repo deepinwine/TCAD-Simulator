@@ -137,6 +137,70 @@ class AdapterTests(unittest.TestCase):
         union = self.adapter.boolean(a, b, "or")
         self.assertAlmostEqual(geometry_area(union), 150 * 100, delta=1.0)
 
+    def test_hierarchy_preserves_rotation_magnification_reflection_and_nested_arrays(self):
+        lib = gdstk.Library()
+        tile = lib.new_cell("TILE")
+        tile.add(gdstk.rectangle((0, 0), (1, 2), layer=7, datatype=3))
+        top = lib.new_cell("TOP")
+        top.add(gdstk.Reference(tile, origin=(10, 20), rotation=np.pi / 2, magnification=2))
+        path = self.tmp / "transforms.gds"
+        lib.write_gds(path)
+        loaded = self.adapter.read(path)
+        np.testing.assert_allclose(loaded.bounds, (6000, 20000, 10000, 22000), atol=1e-6)
+        self.assertEqual(loaded.layers(), {(7, 3)})
+        top.remove(*top.references)
+        middle = lib.new_cell("MIDDLE")
+        middle.add(gdstk.Reference(tile, origin=(3, 4), x_reflection=True,
+                                   columns=2, rows=2, spacing=(5, 6)))
+        top.add(gdstk.Reference(middle, origin=(10, 20)))
+        lib.write_gds(path)
+        loaded = self.adapter.read(path)
+        self.assertEqual(len(loaded.polygons), 4)
+        # Reflection also reflects the reference array's y spacing.
+        np.testing.assert_allclose(loaded.bounds, (13000, 16000, 19000, 24000))
+        self.assertAlmostEqual(geometry_area(loaded), 8e6)
+
+    def test_hierarchy_includes_paths_and_polygon_repetitions(self):
+        lib = gdstk.Library()
+        tile = lib.new_cell("TILE")
+        polygon = gdstk.rectangle((0, 0), (1, 1))
+        polygon.repetition = gdstk.Repetition(columns=3, rows=1, spacing=(2, 0))
+        tile.add(polygon, gdstk.FlexPath([(0, 3), (2, 3)], 1, layer=8))
+        top = lib.new_cell("TOP")
+        top.add(gdstk.Reference(tile, origin=(10, 20)))
+        path = self.tmp / "paths.oas"
+        lib.write_oas(path)
+        loaded = self.adapter.read(path)
+        self.assertEqual(len(loaded.polygons), 4)
+        self.assertEqual(loaded.layers(), {(0, 0), (8, 0)})
+        np.testing.assert_allclose(loaded.bounds, (10000, 20000, 15000, 23500))
+
+    def test_hierarchy_rejects_expansion_before_get_polygons(self):
+        from layout.adapter import _iter_polygons
+        from unittest.mock import Mock
+        tile = gdstk.Cell("TILE")
+        tile.add(gdstk.rectangle((0, 0), (1, 1)))
+        top = gdstk.Cell("TOP")
+        top.add(gdstk.Reference(tile, columns=1000, rows=1000, spacing=(2, 2)))
+        library = Mock()
+        library.top_level.return_value = [top]
+        with self.assertRaisesRegex(ValueError, "budget"):
+            list(_iter_polygons(library))
+
+    def test_hierarchy_rejects_cycles_and_vertex_budget(self):
+        from layout.adapter import _iter_polygons
+        lib = gdstk.Library()
+        cell = lib.new_cell("CYCLE")
+        cell.add(gdstk.Reference(cell))
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            list(_iter_polygons(lib))
+        cell.remove(*cell.references)
+        polygon = gdstk.Polygon([(np.cos(t), np.sin(t)) for t in np.linspace(0, 6, 100)])
+        polygon.repetition = gdstk.Repetition(columns=6000, rows=1, spacing=(2, 0))
+        cell.add(polygon)
+        with self.assertRaisesRegex(ValueError, "budget"):
+            list(_iter_polygons(lib))
+
     def test_boolean_output_is_normalized(self) -> None:
         a = geometry_of(rect(0, 0, 100, 100))
         b = geometry_of(rect(200, 200, 300, 300))

@@ -88,7 +88,7 @@ class LayoutAdapter:
             raise ValueError(f"不支持的版图文件：{suffix!r}（仅 .gds/.oas）")
         nm_per_unit = float(library.unit) * 1e9
         polygons: List[MaskPolygon] = []
-        for polygon in library.cells[0].polygons if False else _iter_polygons(library):
+        for polygon in _iter_polygons(library):
             points = np.asarray(polygon.points, dtype=float) * nm_per_unit
             polygons.append(MaskPolygon(
                 points=points,
@@ -215,42 +215,56 @@ def _polygon_crossings(points: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np
 
 
 def _iter_polygons(library):
-    """展平所有 cell（含引用）并产出多边形。"""
+    """Budget expansion before asking gdstk to apply the complete hierarchy."""
     top_level = library.top_level() if hasattr(library, "top_level") else library.cells
+    if not top_level and library.cells:
+        raise ValueError("Layout hierarchy contains a cycle")
+    totals = [0, 0, 0]
+    cache = {}
     for cell in top_level:
-        for polygon in cell.polygons:
-            yield polygon
-        for reference in cell.references:
-            for polygon in _flatten_reference(reference):
-                yield polygon
+        counts = _hierarchy_budget(cell, cache, set())
+        totals = [a + b for a, b in zip(totals, counts)]
+        _check_expansion_budget(totals)
+    for cell in top_level:
+        yield from cell.get_polygons(apply_repetitions=True, include_paths=True)
 
 
-def _flatten_reference(reference, depth: int = 0):
-    if depth > 16:
-        return
-    cell = reference.cell
-    origin = np.asarray(reference.origin, dtype=float)
+def _check_expansion_budget(counts):
+    # Separate from asset validation: these caps protect native flatten allocation.
+    if any(value > limit for value, limit in zip(counts, (100_000, 500_000, 100_000))):
+        raise ValueError("Layout expansion budget exceeded (polygons, vertices or references)")
+
+
+def _hierarchy_budget(cell, cache, active):
+    key = id(cell)
+    if key in active or len(active) >= 64:
+        raise ValueError("Layout hierarchy contains a cycle or exceeds depth budget")
+    if key in cache:
+        return cache[key]
+    if not hasattr(cell, "polygons"):
+        raise ValueError("Unresolved layout cell reference")
+    active.add(key)
+    counts = [0, 0, 0]
     for polygon in cell.polygons:
-        points = np.asarray(polygon.points, dtype=float)
-        yield _translated_polygon(polygon, points + origin)
-    for nested in cell.references:
-        for polygon in _flatten_reference(
-            nested,
-            depth + 1,
-        ):
-            yield _translated_polygon(
-                polygon,
-                np.asarray(polygon.points, dtype=float)
-                + np.asarray(nested.origin, dtype=float)
-                + origin,
-            )
-
-
-def _translated_polygon(polygon, points_um):
-    import gdstk
-
-    return gdstk.Polygon(
-        points_um,
-        layer=int(polygon.layer),
-        datatype=int(polygon.datatype),
-    )
+        copies = max(1, polygon.repetition.size)
+        counts[0] += copies
+        counts[1] += copies * polygon.size
+        _check_expansion_budget(counts)
+    for path in cell.paths:
+        copies = max(1, path.repetition.size)
+        _check_expansion_budget([counts[0] + copies * path.num_paths, counts[1], counts[2]])
+        # to_polygons does not expand repetitions; count them before flattening.
+        for polygon in path.to_polygons():
+            counts[0] += copies
+            counts[1] += copies * polygon.size
+            _check_expansion_budget(counts)
+    for reference in cell.references:
+        copies = max(1, reference.repetition.size)
+        counts[2] += copies
+        _check_expansion_budget(counts)
+        nested = _hierarchy_budget(reference.cell, cache, active)
+        counts = [a + copies * b for a, b in zip(counts, nested)]
+        _check_expansion_budget(counts)
+    active.remove(key)
+    cache[key] = counts
+    return counts
