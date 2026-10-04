@@ -14,6 +14,7 @@ MAX_SHAPES = 50_000
 MAX_POLYGON_VERTICES = 500_000
 # Bound quadratic topology validation independently of the asset-wide budget.
 MAX_SHAPE_POINTS = 1024
+MAX_TOPOLOGY_COMPARISONS = 250_000
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -181,6 +182,16 @@ def parse_candidate(payload: Mapping[str, Any]) -> MaskAssetCandidate:
     if len(raw_shapes) > MAX_SHAPES:
         raise MaskAssetError("mask_asset_budget_exceeded", "Mask asset has too many shapes", status=413,
                              params={"limit": MAX_SHAPES})
+    topology_work = 0
+    for raw in raw_shapes:
+        if isinstance(raw, Mapping) and str(raw.get("type", "")).lower() == "polygon":
+            points = raw.get("points_nm")
+            if isinstance(points, list):
+                count = max(0, len(points) - 1)
+                topology_work += count * (count - 1) // 2
+                if topology_work > MAX_TOPOLOGY_COMPARISONS:
+                    raise MaskAssetError("mask_asset_budget_exceeded", "Mask asset topology work exceeds budget",
+                                         status=413, params={"limit": MAX_TOPOLOGY_COMPARISONS})
     shapes: list[MaskShape] = []
     shape_ids: set[str] = set()
     vertex_count = 0

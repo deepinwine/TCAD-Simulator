@@ -8,7 +8,7 @@ import numpy as np
 
 from layout import LayoutAdapter, LayoutGeometry, MaskPolygon
 
-from .model import MaskAsset, MaskAssetError, _shape_polygons, parse_candidate, to_layout_geometry
+from .model import MaskAsset, MaskAssetError, _shape_polygons, parse_candidate
 from .store import MaskAssetStore
 
 
@@ -110,4 +110,26 @@ class MaskAssetService:
 
     def export_gds(self, asset_id: str, revision: int, path: Path) -> None:
         asset = self.get(asset_id, revision)
-        self._layout_adapter().write(to_layout_geometry(asset), path, name=asset.name or "MASK")
+        adapter = self._layout_adapter()
+        output = []
+        by_layer = {layer.id: [] for layer in asset.layers}
+        for shape in asset.shapes:
+            by_layer[shape.layer_id].append(shape)
+        for layer in asset.layers:
+            positive, negative = [], []
+            for shape in by_layer[layer.id]:
+                target = negative if shape.type == "hole" else positive
+                target.extend(MaskPolygon(points, layer.layer, layer.datatype)
+                              for points in _shape_polygons(shape))
+            if not positive:
+                continue
+            geometry = LayoutGeometry.from_polygons(positive)
+            empty = LayoutGeometry.from_polygons(())
+            if len(positive) > 1:
+                geometry = adapter.boolean(geometry, empty, 'or', layer=layer.layer, datatype=layer.datatype)
+            if negative:
+                geometry = adapter.boolean(geometry, LayoutGeometry.from_polygons(negative), 'sub',
+                                           layer=layer.layer, datatype=layer.datatype)
+                geometry = adapter.fracture(geometry)
+            output.extend(geometry.polygons)
+        adapter.write(LayoutGeometry.from_polygons(output), path, name=asset.name or "MASK")

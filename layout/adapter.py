@@ -152,6 +152,23 @@ class LayoutAdapter:
 
     # ---- 栅格化（光刻桥接） ----------------------------------------------
 
+    def fracture(self, geometry: LayoutGeometry) -> LayoutGeometry:
+        """Split Boolean contours into simple polygons for editable GDS import.
+
+        GDS represents holes with doubled bridge edges. Small fragments avoid
+        admitting those weakly simple contours into the asset polygon schema.
+        """
+        if self._delegate is not None:
+            raise ValueError("Simple polygon fracture requires the gdstk backend")
+        polygons = []
+        for item in geometry.polygons:
+            source = self._gdstk.Polygon(item.points / _NM_PER_UNIT,
+                                         layer=item.layer, datatype=item.datatype)
+            for piece in source.fracture(max_points=5, precision=GDS_PRECISION_M / GDS_UNIT_M):
+                polygons.append(MaskPolygon(np.asarray(piece.points) * _NM_PER_UNIT,
+                                            item.layer, item.datatype))
+        return LayoutGeometry.from_polygons(polygons)
+
     def rasterize(
         self,
         geometry: LayoutGeometry,

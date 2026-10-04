@@ -63,6 +63,19 @@ class _Adapter:
 
 
 class MaskAssetSchemaTests(unittest.TestCase):
+    def test_topology_work_budget_is_preflighted_for_entire_candidate(self):
+        from mask_assets import MaskAssetError, parse_candidate
+        payload = _candidate()
+        angles = np.linspace(0, math.tau, 1024, endpoint=False)
+        points = np.column_stack((1000 + 500 * np.cos(angles), 1000 + 500 * np.sin(angles))).tolist()
+        payload['shapes'] = [dict(id=f'p{i}', type='polygon', layer_id='10/0',
+                                  points_nm=points + [points[0]]) for i in range(488)]
+        with mock.patch('mask_assets.model._self_intersects', side_effect=AssertionError('must preflight')):
+            with self.assertRaises(MaskAssetError) as caught:
+                parse_candidate(payload)
+        self.assertEqual(caught.exception.code, 'mask_asset_budget_exceeded')
+        self.assertEqual(caught.exception.status, 413)
+
     def test_rejects_degenerate_polygon_topology(self):
         from mask_assets import MaskAssetError, parse_candidate
         for points in (
@@ -244,6 +257,32 @@ class MaskAssetStoreTests(unittest.TestCase):
 
 
 class MaskAssetImportExportTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_GDSTK, "gdstk is not installed")
+    def test_real_gds_export_reimport_preserves_hole_and_union_area(self):
+        from mask_assets import MaskAssetService, MaskAssetStore
+        payload = _candidate()
+        payload['shapes'] = [dict(id='r', type='rectangle', layer_id='10/0',
+                                  x_nm=0, y_nm=0, width_nm=2000, height_nm=2000),
+                             dict(id='r2', type='rectangle', layer_id='10/0',
+                                  x_nm=0, y_nm=0, width_nm=1000, height_nm=2000),
+                             dict(id='h', type='hole', layer_id='10/0',
+                                  cx_nm=1000, cy_nm=1000, radius_nm=300)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MaskAssetService(MaskAssetStore(Path(temp_dir)))
+            asset = service.save_candidate(payload)
+            target = Path(temp_dir) / 'hole.gds'
+            service.export_gds(asset.id, asset.revision, target)
+            geometry = service._layout_adapter().read(target)
+            area = sum(abs(float(np.dot(p.points[:, 0], np.roll(p.points[:, 1], 1))
+                                 - np.dot(p.points[:, 1], np.roll(p.points[:, 0], 1)))) / 2
+                       for p in geometry.polygons)
+            expected = 4_000_000 - 64 * 300**2 * math.sin(math.tau / 64) / 2
+            self.assertAlmostEqual(area, expected, delta=1500)
+            imported = service.import_gds(target, asset_id='reimport', name='Reimport')
+            mask, _ = service.rasterize(imported.id, imported.revision, shape=(200, 200))
+            self.assertFalse(mask[100, 100])
+            self.assertTrue(mask[20, 20])
+
     def test_json_round_trip_and_gds_adapter_boundary(self):
         from mask_assets import MaskAssetService, MaskAssetStore
 
