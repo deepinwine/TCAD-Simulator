@@ -13218,12 +13218,18 @@ class ProcessModel:
 
         chemistry_key = chemistry.lower()
         if chemistry_key in WET_ANISOTROPIC_DB or chemistry_key in {"wet", "vhf", "hotphosphoric", "o2"}:
+            effective_rate_nm_s = (
+                float(override_rate_ang_min) / 600.0
+                if float(override_rate_ang_min) > 0.0
+                else None
+            )
             self._wet_etch_controller(
                 target_material,
                 chemistry_key,
                 time_s,
                 selectivity_to_resist,
                 passivation_rate,
+                effective_rate_nm_s,
             )
             return
 
@@ -13851,6 +13857,7 @@ class ProcessModel:
         time_s: float,
         selectivity_to_resist: float,
         passivation_rate: float,
+        effective_rate_nm_s: Optional[float] = None,
     ) -> None:
         if chemistry_key == "o2":
             resist_id = getattr(self, "resist_material_id", None)
@@ -13863,15 +13870,35 @@ class ProcessModel:
                     resist_id_i = int(self.material_db.id_for("Photoresist"))
                 except Exception:
                     resist_id_i = 0
-            self._wet_isotropic_diffusion(resist_id_i, chemistry_key, time_s, passivation_rate)
+            self._wet_isotropic_diffusion(
+                resist_id_i,
+                chemistry_key,
+                time_s,
+                passivation_rate,
+                effective_rate_nm_s,
+            )
             return
 
         mat_id = self.material_db.id_for(target_material)
         mean_removal_nm = 0.0
         if chemistry_key in WET_ANISOTROPIC_DB and self.material_db.material(mat_id).name == "Silicon":
-            mean_removal_nm = self._wet_anisotropic_levelset(mat_id, WET_ANISOTROPIC_DB[chemistry_key], time_s)
+            rate_table = WET_ANISOTROPIC_DB[chemistry_key]
+            if effective_rate_nm_s is not None:
+                base_rate_nm_min = float(rate_table.get("100", 0.0))
+                if base_rate_nm_min <= 0.0:
+                    base_rate_nm_min = float(max(rate_table.values())) if rate_table else 0.0
+                if base_rate_nm_min > 0.0:
+                    scale = float(effective_rate_nm_s) * 60.0 / base_rate_nm_min
+                    rate_table = {plane: float(rate) * scale for plane, rate in rate_table.items()}
+            mean_removal_nm = self._wet_anisotropic_levelset(mat_id, rate_table, time_s)
         else:
-            mean_removal_nm = self._wet_isotropic_diffusion(mat_id, chemistry_key, time_s, passivation_rate)
+            mean_removal_nm = self._wet_isotropic_diffusion(
+                mat_id,
+                chemistry_key,
+                time_s,
+                passivation_rate,
+                effective_rate_nm_s,
+            )
 
         if selectivity_to_resist > 0.0 and math.isfinite(selectivity_to_resist):
             resist_loss_nm = mean_removal_nm / max(selectivity_to_resist, 1e-3)
@@ -14162,6 +14189,7 @@ class ProcessModel:
         chemistry_key: str,
         time_s: float,
         passivation_rate: float,
+        effective_rate_nm_s: Optional[float] = None,
     ) -> float:
         material = self.material_db.material(material_id)
         rates = material.etch_rates_nm_min or {}
@@ -14175,6 +14203,8 @@ class ProcessModel:
         if base_rate_nm_min <= 0.0 and rates:
             base_rate_nm_min = float(next(iter(rates.values()))[0])
             lateral_ratio = float(next(iter(rates.values()))[1]) if len(next(iter(rates.values()))) > 1 else 1.0
+        if effective_rate_nm_s is not None:
+            base_rate_nm_min = float(effective_rate_nm_s) * 60.0
         if base_rate_nm_min <= 0.0 or time_s <= 0.0:
             return 0.0
 
@@ -19917,15 +19947,36 @@ def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabas
     def finite(value: Any) -> bool:
         return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
+    def validated_kernel_rate(rate_nm_s: Any, parameter: str) -> Tuple[float, float]:
+        """Return one rate/kernel pair which survives the float32 geometry boundary."""
+        if not finite(rate_nm_s) or rate_nm_s <= 0:
+            raise EtchParameterError("有效刻蚀速率必须是有限正数", parameter=parameter)
+        rate = float(rate_nm_s)
+        kernel_override = rate * 600.0
+        float32_min = float(np.nextafter(np.float32(0.0), np.float32(1.0)))
+        if (
+            not math.isfinite(kernel_override)
+            or kernel_override <= 0.0
+            or kernel_override > 20000.0
+            or rate < float32_min
+        ):
+            raise EtchParameterError("有效刻蚀速率超出内核可表示范围", parameter=parameter)
+        return rate, kernel_override
+
     if "depth_nm" in params:
         raise EtchParameterError("Etch 不接受旧 depth_nm；请使用 time 或 target_depth_nm", parameter="depth_nm")
     nominal = params.get("nominal_rate_nm_s")
     if nominal is not None and (not finite(nominal) or nominal <= 0):
         raise EtchParameterError("nominal_rate_nm_s 必须为有限正数或 None", parameter="nominal_rate_nm_s")
+    if nominal is not None:
+        validated_kernel_rate(nominal, "nominal_rate_nm_s")
     override = params.get("rate_override", 0.0)
     if not finite(override) or override < 0 or override > 20000:
         raise EtchParameterError("rate_override 必须是 0 至 20000 的有限数值", parameter="rate_override")
     override = float(override)
+    override_rate = override_kernel = None
+    if override > 0.0:
+        override_rate, override_kernel = validated_kernel_rate(override / 600.0, "rate_override")
     incidence = params.get("incidence_angle_deg", 0.0)
     if not finite(incidence) or incidence != 0:
         raise EtchParameterError("unsupported_parameter: voxel 仅支持 incidence_angle_deg=0", code="unsupported_parameter", parameter="incidence_angle_deg")
@@ -19935,11 +19986,11 @@ def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabas
         duration = params.get("time", 30.0)
         if not finite(duration) or duration < 0:
             raise EtchParameterError("time 必须是有限非负数", parameter="time")
-        effective_rate = override / 600.0 if override > 0 else None
+        effective_rate = override_rate
         source = "rate_override" if override > 0 else "kernel_model"
         return EtchExecutionPlan(float(duration), float(sidewall), "time",
                                  effective_rate_nm_s=effective_rate, rate_source=source,
-                                 kernel_override_ang_min=override)
+                                 kernel_override_ang_min=override_kernel or 0.0)
     if not finite(depth) or depth <= 0:
         raise EtchParameterError("target_depth_nm 必须是有限正数", parameter="target_depth_nm")
     name = _resolve_material_name_any(material_db, params.get("material")) or "Silicon"
@@ -19951,19 +20002,18 @@ def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabas
     if nominal is not None:
         rate, source = float(nominal), "nominal_rate_nm_s"
     elif override > 0:
-        rate, source = override / 600.0, "rate_override"
+        assert override_rate is not None
+        rate, source = override_rate, "rate_override"
     elif finite(table_rate) and table_rate > 0:
         rate, source = float(table_rate) / 60.0, "material_database"
     else:
         raise EtchParameterError("target_depth_nm 需要可用的有限正刻蚀速率", parameter="nominal_rate_nm_s")
+    source_parameter = {"nominal_rate_nm_s": "nominal_rate_nm_s", "rate_override": "rate_override",
+                        "material_database": "material_rate_nm_min"}[source]
+    rate, kernel_override = validated_kernel_rate(rate, source_parameter)
     duration = depth / rate
     if not math.isfinite(duration) or duration <= 0:
-        raise EtchParameterError("估计 time_s 必须是有限正数", parameter="target_depth_nm")
-    kernel_override = rate * 600.0
-    if not math.isfinite(kernel_override):
-        parameter = {"nominal_rate_nm_s": "nominal_rate_nm_s", "rate_override": "rate_override",
-                     "material_database": "material_rate_nm_min"}[source]
-        raise EtchParameterError("有效刻蚀速率超出内核可表示范围", parameter=parameter)
+        raise EtchParameterError("估计 time_s 必须是有限正数", parameter=source_parameter)
     return EtchExecutionPlan(
         time_s=float(duration), sidewall_angle_deg=float(sidewall), duration_mode="estimated",
         target_depth_nm=float(depth), effective_rate_nm_s=rate, rate_source=source,

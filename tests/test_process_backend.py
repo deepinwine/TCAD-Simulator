@@ -97,7 +97,7 @@ class EtchPreparationTests(unittest.TestCase):
         self.assertAlmostEqual(database_plan.kernel_override_ang_min, expected * 600)
 
     def test_rate_override_is_strictly_validated_even_when_not_selected(self):
-        for value in [True, float("nan"), float("inf"), -1, 20001]:
+        for value in [True, float("nan"), float("inf"), -1, 5e-324, 20001]:
             with self.subTest(value=value):
                 with self.assertRaises(self.tcad.EtchParameterError) as error:
                     self.prepare(target_depth_nm=120, nominal_rate_nm_s=4, rate_override=value)
@@ -106,6 +106,21 @@ class EtchPreparationTests(unittest.TestCase):
         with self.assertRaises(self.tcad.EtchParameterError) as error:
             self.prepare(target_depth_nm=120, nominal_rate_nm_s=1e308, rate_override=0)
         self.assertEqual(error.exception.parameter, "nominal_rate_nm_s")
+
+    def test_selected_rate_conversion_rejects_underflow_and_overflow_with_source_path(self):
+        for value in (5e-324, 1e308):
+            with self.subTest(source="nominal", value=value):
+                with self.assertRaises(self.tcad.EtchParameterError) as error:
+                    self.prepare(target_depth_nm=120, nominal_rate_nm_s=value, rate_override=0)
+                self.assertEqual(error.exception.parameter, "nominal_rate_nm_s")
+
+        material = self.db.material(self.db.id_for("Silicon"))
+        for chemistry, value in (("Underflow", 5e-324), ("Overflow", 1e308)):
+            material.etch_rates_nm_min[chemistry] = (value, 1.0)
+            with self.subTest(source="material_database", value=value):
+                with self.assertRaises(self.tcad.EtchParameterError) as error:
+                    self.prepare(target_depth_nm=120, chemistry=chemistry)
+                self.assertEqual(error.exception.parameter, "material_rate_nm_min")
 
     def test_invalid_depth_rates_angles_and_unsupported_incidence(self):
         for value in [0, -1, float("nan"), float("inf")]:
@@ -143,6 +158,24 @@ class EtchPreparationTests(unittest.TestCase):
             step.execute(model)
         etch.assert_not_called()
         np.testing.assert_array_equal(before, model.grid)
+
+    def test_target_depth_effective_rate_reaches_every_wet_kernel(self):
+        from unittest.mock import patch
+        model = self.tcad.ProcessModel(self.db, grid_shape=(8, 8, 8), voxel_size_nm=10, max_workers=1)
+        self.addCleanup(model.parallel.shutdown)
+        for chemistry in ("Wet", "VHF", "HotPhosphoric", "O2", "TMAH", "KOH"):
+            with self.subTest(chemistry=chemistry):
+                if chemistry in {"TMAH", "KOH"}:
+                    with patch.object(model, "_wet_anisotropic_levelset", return_value=0.0) as wet:
+                        model.etch_material("Silicon", chemistry, 30, 0, 2400, 4, 88)
+                    rate_table = wet.call_args.args[1]
+                    self.assertEqual(wet.call_args.args[2], 30)
+                    self.assertAlmostEqual(rate_table["100"] / 60.0, 4)
+                else:
+                    with patch.object(model, "_wet_isotropic_diffusion", return_value=0.0) as wet:
+                        model.etch_material("Silicon", chemistry, 30, 0, 2400, 4, 88)
+                    self.assertEqual(wet.call_args.args[2], 30)
+                    self.assertEqual(wet.call_args.args[4], 4)
 
     def test_worker_execution_error_preserves_unsupported_code(self):
         model = self.tcad.ProcessModel(self.db, grid_shape=(8, 8, 8), voxel_size_nm=10, max_workers=1)
@@ -293,12 +326,22 @@ class EtchWorkerContractTests(unittest.TestCase):
                     self.assertFalse(invalid["ok"])
                     self.assertEqual(invalid["code"], "invalid_parameter")
                 before_invalid_rates = session.rpc("get_recipe", {}, timeout_s=30)["result"]
-                for rate in (True, float("nan"), float("inf"), -1, 20001):
+                for rate in (True, float("nan"), float("inf"), -1, 5e-324, 20001):
                     with self.subTest(rate=rate):
                         invalid = session.rpc("set_step", {"index": 1, "params": {"rate_override": rate}}, timeout_s=30)
                         self.assertFalse(invalid["ok"], invalid)
                         self.assertEqual(invalid.get("code"), "invalid_parameter")
                         self.assertEqual(invalid.get("parameter_path"), "rate_override")
+                        self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_invalid_rates)
+                for rate in (5e-324, 1e308):
+                    with self.subTest(parameter="nominal_rate_nm_s", rate=rate):
+                        invalid = session.rpc("set_step", {"index": 1, "params": {
+                            "target_depth_nm": 120,
+                            "nominal_rate_nm_s": rate,
+                        }}, timeout_s=30)
+                        self.assertFalse(invalid["ok"], invalid)
+                        self.assertEqual(invalid.get("code"), "invalid_parameter")
+                        self.assertEqual(invalid.get("parameter_path"), "nominal_rate_nm_s")
                         self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_invalid_rates)
                 imported = session.rpc("recipe_import", {"recipe": {"name": "Legacy Etch", "steps": [
                     {"name": "Etch", "params": {"sidewall": 74, "time": 17, "target_depth_nm": None, "nominal_rate_nm_s": None}}
@@ -323,13 +366,21 @@ class EtchWorkerContractTests(unittest.TestCase):
                 self.assertEqual(invalid_import.get("code"), "unsupported_parameter")
                 self.assertEqual(invalid_import.get("parameter_path"), "incidence_angle_deg")
                 self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_import)
-                invalid_rate_import = session.rpc("recipe_import", {"recipe": {"steps": [
-                    {"name": "Etch", "params": {"rate_override": True}}
-                ]}}, timeout_s=30)
-                self.assertFalse(invalid_rate_import["ok"])
-                self.assertEqual(invalid_rate_import.get("code"), "invalid_parameter")
-                self.assertEqual(invalid_rate_import.get("parameter_path"), "rate_override")
-                self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_import)
+                invalid_rate_imports = [
+                    ({"rate_override": True}, "rate_override"),
+                    ({"rate_override": 5e-324}, "rate_override"),
+                    ({"target_depth_nm": 120, "nominal_rate_nm_s": 5e-324}, "nominal_rate_nm_s"),
+                    ({"target_depth_nm": 120, "nominal_rate_nm_s": 1e308}, "nominal_rate_nm_s"),
+                ]
+                for params, expected_path in invalid_rate_imports:
+                    with self.subTest(params=params):
+                        invalid_rate_import = session.rpc("recipe_import", {"recipe": {"steps": [
+                            {"name": "Etch", "params": params}
+                        ]}}, timeout_s=30)
+                        self.assertFalse(invalid_rate_import["ok"])
+                        self.assertEqual(invalid_rate_import.get("code"), "invalid_parameter")
+                        self.assertEqual(invalid_rate_import.get("parameter_path"), expected_path)
+                        self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_import)
             finally:
                 manager.stop()
 
