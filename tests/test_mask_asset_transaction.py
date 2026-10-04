@@ -35,8 +35,108 @@ DOMAIN = {'grid_shape': [8, 8, 8], 'voxel_size_nm': 5, 'threads': 1}
 
 
 class MaskApplyTransactionTests(unittest.TestCase):
+    def test_idle_autosave_preserves_pending_flag_without_crossing_failed_rollback(self):
+        import tcad_simulator as tcad
+        from mask_assets.transaction import MaskApplyTransaction
+        from tests.test_mask_assets import _candidate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blocked = False
+            idle_tick = False
+            time_offset = 0
+            writes_while_blocked = []
+            original_time = tcad.time.time
+            original_dump = tcad._webui_pickle_dump
+            original_recover = MaskApplyTransaction.recover
+            class IdleConnection(WorkerConnection):
+                def poll(self, timeout):
+                    nonlocal idle_tick, time_offset
+                    if blocked and not idle_tick:
+                        idle_tick = True
+                        time_offset = 10
+                        return False
+                    return True
+            conn = IdleConnection([
+                ('recipe_insert_steps', {'steps': [{'name': 'Mask Exposure'}], 'insert_index': -1, 'no_autosave': True}),
+                ('save', {}),
+                ('recipe_set_name', {'name': 'Pending autosave'}),
+                ('mask_asset_save_apply', {'step_index': 0, 'asset': _candidate()}),
+                ('get_recipe', {}),
+            ])
+            def fail_commit(transaction):
+                nonlocal blocked
+                blocked = True
+                raise OSError('commit failed')
+            def recover(transaction):
+                if blocked:
+                    raise OSError('rollback failed')
+                return original_recover(transaction)
+            def dump(path, payload):
+                if blocked:
+                    writes_while_blocked.append(Path(path))
+                return original_dump(path, payload)
+            with mock.patch.object(MaskApplyTransaction, 'commit', new=fail_commit), mock.patch.object(MaskApplyTransaction, 'recover', new=recover), mock.patch.object(tcad, '_webui_pickle_dump', new=dump), mock.patch.object(tcad.time, 'time', side_effect=lambda: original_time() + time_offset):
+                tcad._webui_worker_main(conn, str(root), default_domain=DOMAIN)
+            self.assertTrue(idle_tick)
+            self.assertEqual(writes_while_blocked, [])
+            self.assertTrue(conn.responses[-1]['ok'])
+            self.assertTrue((root / '.mask-apply-pending.json').exists())
+
+    def test_pending_rollback_blocks_new_mutations_until_recovery_succeeds(self):
+        import tcad_simulator as tcad
+        from mask_assets.transaction import MaskApplyTransaction
+        from tests.test_mask_assets import _candidate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_recover = MaskApplyTransaction.recover
+            blocked = False
+            setup = [
+                ('recipe_insert_steps', {'steps': [{'name': 'Mask Exposure'}], 'insert_index': -1, 'no_autosave': True}),
+                ('save', {}),
+                ('get_recipe', {}),
+                ('mask_asset_save_apply', {'step_index': 0, 'asset': _candidate()}),
+                ('recipe_insert_steps', {'steps': [{'name': 'Etch'}]}),
+                ('save', {}),
+                ('get_recipe', {}),
+                ('recipe_insert_steps', {'steps': [{'name': 'Etch'}]}),
+                ('save', {}),
+                ('get_recipe', {}),
+            ]
+            class RecoveryConnection(WorkerConnection):
+                def recv(self):
+                    nonlocal blocked
+                    if len(self.responses) == 7:
+                        blocked = False
+                    return super().recv()
+            conn = RecoveryConnection(setup)
+            def fail_commit(transaction):
+                nonlocal blocked
+                blocked = True
+                raise OSError('private commit failure')
+            def recover(transaction):
+                if blocked:
+                    raise OSError('private rollback failure')
+                return original_recover(transaction)
+            with mock.patch.object(MaskApplyTransaction, 'commit', new=fail_commit), mock.patch.object(MaskApplyTransaction, 'recover', new=recover):
+                tcad._webui_worker_main(conn, str(root), default_domain=DOMAIN)
+            self.assertEqual(conn.responses[3].get('code'), 'mask_asset_apply_failed')
+            for response in conn.responses[4:6]:
+                self.assertFalse(response['ok'])
+                self.assertEqual(response.get('code'), 'mask_asset_recovery_blocked')
+                self.assertEqual(response.get('status'), 500)
+                self.assertNotIn('private', response['error'])
+            self.assertEqual(conn.responses[6]['result'], conn.responses[2]['result'])
+            self.assertTrue(conn.responses[7]['ok'])
+            self.assertTrue(conn.responses[8]['ok'])
+            expected = conn.responses[9]['result']
+            self.assertEqual(len(expected), len(conn.responses[2]['result']) + 1)
+            restarted = WorkerConnection([('get_recipe', {})])
+            tcad._webui_worker_main(restarted, str(root), default_domain=DOMAIN)
+            actual = restarted.responses[0]['result']
+            self.assertEqual([(step['name'], step['params']) for step in actual], [(step['name'], step['params']) for step in expected])
+
     def test_store_directory_flush_failure_restores_previous_manifest(self):
-        from mask_assets import MaskAssetService, MaskAssetStore
+        from mask_assets import MaskAssetError, MaskAssetService, MaskAssetStore
         import mask_assets.store as store_module
         from tests.test_mask_assets import _candidate
         with tempfile.TemporaryDirectory() as directory:
@@ -53,7 +153,7 @@ class MaskApplyTransactionTests(unittest.TestCase):
                     failed = True
                     raise OSError('flush failed')
             with mock.patch.object(store_module, 'fsync_directory', side_effect=fail_after_manifest):
-                with self.assertRaises(OSError):
+                with self.assertRaises(MaskAssetError):
                     service.save_candidate(_candidate())
             self.assertEqual(store.manifest_bytes('mask_metal1'), old_manifest)
             self.assertFalse((store.root / 'mask_metal1/revisions/2.json').exists())

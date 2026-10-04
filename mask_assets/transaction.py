@@ -53,6 +53,10 @@ class MaskApplyTransaction:
         if self.journal.is_symlink() or self.marker.is_symlink():
             raise ValueError('Mask transaction journal symlinks are unsupported')
 
+    @property
+    def pending(self) -> bool:
+        return self.marker.exists() or self.marker.is_symlink()
+
     def begin(self, paths=()) -> None:
         self.recover()
         self.journal.mkdir(exist_ok=True)

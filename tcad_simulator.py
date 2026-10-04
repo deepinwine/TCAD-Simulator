@@ -37084,6 +37084,16 @@ def _webui_worker_main(
     storage_root = _tcad_storage_root_from_session_dir(storage_dir)
     from mask_assets import MaskAssetError, MaskAssetService, MaskAssetStore
     mask_asset_service = MaskAssetService(MaskAssetStore(storage_dir))
+
+    def _require_mask_apply_recovered() -> None:
+        if mask_apply_transaction.pending:
+            try:
+                mask_apply_transaction.recover()
+            except Exception as exc:
+                raise MaskAssetError(
+                    "mask_asset_recovery_blocked", "Session writes are blocked until mask recovery succeeds", status=500,
+                ) from exc
+
     ephemeral = bool(ephemeral)
     preview_quality = _webui_normalize_quality(preview_quality)
 
@@ -57919,6 +57929,10 @@ def _webui_worker_main(
 
     def _persist_current(note: str = "", *, kind: str = "autosave", strict: bool = False) -> None:
         nonlocal current_recipe_id
+        # strict is used only by the active mask transaction itself. Every
+        # other persistence path must resolve an earlier undo journal first.
+        if not strict:
+            _require_mask_apply_recovered()
         if ephemeral:
             # Ephemeral sessions (e.g. GUI-triggered video export) must never touch History/auto-save.
             return
@@ -57990,6 +58004,11 @@ def _webui_worker_main(
             if autosave_last_flush_ts and (now - float(autosave_last_flush_ts)) < float(autosave_min_interval_s):
                 return
         note = autosave_note or "autosave"
+        try:
+            _require_mask_apply_recovered()
+        except MaskAssetError:
+            # Preserve the queued save, and keep servicing read requests.
+            return
         autosave_pending = False
         autosave_note = ""
         autosave_requested_ts = 0.0
@@ -61890,7 +61909,7 @@ def _webui_worker_main(
             return rid or "unknown"
         return "legacy"
 
-    def _list_exports(*, max_keep_zip: int = 5, max_keep_video: int = 4, max_keep_images: int = 4) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def _list_exports(*, max_keep_zip: int = 5, max_keep_video: int = 4, max_keep_images: int = 4, prune: bool = True) -> Tuple[List[Dict[str, Any]], List[str]]:
         exports_root = paths["exports_dir"]
         exports_root.mkdir(parents=True, exist_ok=True)
         # Clean any stale staging folders from older builds.
@@ -61899,7 +61918,7 @@ def _webui_worker_main(
         try:
             now = time.time()
             stale_s = 6.0 * 3600.0
-            for p in exports_root.glob("export_*"):
+            for p in (exports_root.glob("export_*") if prune else ()):
                 try:
                     if p.is_dir():
                         try:
@@ -61911,7 +61930,7 @@ def _webui_worker_main(
                         shutil.rmtree(p, ignore_errors=True)
                 except Exception:
                     continue
-            for p in exports_root.glob("images_*"):
+            for p in (exports_root.glob("images_*") if prune else ()):
                 try:
                     if p.is_dir():
                         try:
@@ -61994,7 +62013,7 @@ def _webui_worker_main(
             drop_imgs.extend(items[per_recipe_keep_img:])
 
         removed: List[str] = []
-        for p in drop_zips + drop_vids + drop_imgs:
+        for p in (drop_zips + drop_vids + drop_imgs if prune else []):
             try:
                 removed.append(p.name)
                 p.unlink(missing_ok=True)  # type: ignore[arg-type]
@@ -62003,6 +62022,8 @@ def _webui_worker_main(
 
         out: List[Dict[str, Any]] = []
         combined = list(keep_zips) + list(keep_vids) + list(keep_imgs)
+        if not prune:
+            combined += drop_zips + drop_vids + drop_imgs
         try:
             combined.sort(key=lambda p: float(p.stat().st_mtime), reverse=True)
         except Exception:
@@ -62487,6 +62508,17 @@ def _webui_worker_main(
         rid = msg.get("rid")
 
         try:
+            # Default to gating commands: new mutation RPCs must not bypass a
+            # pending rollback merely because they were absent from a denylist.
+            mask_recovery_read_commands = {
+                "init", "get_recipe", "history_list", "timeline_get", "log_tail", "exports_list",
+                "mask_asset_list", "mask_asset_get", "preview_manifest", "preview_elements",
+                "render_gbuffer", "slice", "mask_preview_step", "profile_status",
+                "library_recipe_list", "library_step_list", "library_recipe_get", "library_step_get",
+                "agent_status", "agent_lit_list", "agent_ake_stats", "agent_ake_search", "llm_quota_status",
+            }
+            if cmd not in mask_recovery_read_commands:
+                _require_mask_apply_recovered()
             if cmd in {"shutdown", "quit", "exit"}:
                 if video_active and isinstance(video_saved_state, dict):
                     try:
@@ -62513,8 +62545,8 @@ def _webui_worker_main(
                 break
 
             if cmd == "init":
-                _sync_autosave_flags(write_index=True)
-                exports_list, _ = _list_exports(max_keep_zip=5, max_keep_video=4)
+                _sync_autosave_flags(write_index=not mask_apply_transaction.pending)
+                exports_list, _ = _list_exports(max_keep_zip=5, max_keep_video=4, prune=not mask_apply_transaction.pending)
                 try:
                     _ui_state_inject_user_prefs()
                 except Exception:
@@ -70707,7 +70739,7 @@ def _webui_worker_main(
                 continue
 
             if cmd == "exports_list":
-                exports_list, removed = _list_exports(max_keep_zip=5, max_keep_video=4)
+                exports_list, removed = _list_exports(max_keep_zip=5, max_keep_video=4, prune=not mask_apply_transaction.pending)
                 conn.send({"ok": True, "result": {"exports": exports_list, "removed_exports": removed}, "rid": rid})
                 continue
 
@@ -72270,7 +72302,7 @@ def _webui_worker_main(
                 continue
 
             if cmd == "history_list":
-                _sync_autosave_flags(write_index=True)
+                _sync_autosave_flags(write_index=not mask_apply_transaction.pending)
                 conn.send({"ok": True, "result": history_index, "rid": rid})
                 continue
 
