@@ -2,6 +2,11 @@ import type {
   BoundingBoxView,
   HistoryView,
   InitView,
+  MaskAsset,
+  MaskAssetApplyView,
+  MaskAssetLayer,
+  MaskAssetShape,
+  MaskAssetSummary,
   RecipeLoadView,
   MaterialView,
   MaterialVisualView,
@@ -112,6 +117,38 @@ function requireTuple3(value: unknown, path: string): Vec3 {
     requireFiniteNumber(items[1], `${path}[1]`),
     requireFiniteNumber(items[2], `${path}[2]`),
   ];
+}
+
+function requirePoint(value: unknown, path: string): readonly [number, number] {
+  const items = requireArray(value, path);
+  if (items.length !== 2) {
+    throw new ApiContractError(path, 'tuple with exactly 2 finite numbers');
+  }
+  return [
+    requireFiniteNumber(items[0], `${path}[0]`),
+    requireFiniteNumber(items[1], `${path}[1]`),
+  ];
+}
+
+function requireTuple4(value: unknown, path: string): readonly [number, number, number, number] {
+  const items = requireArray(value, path);
+  if (items.length !== 4) {
+    throw new ApiContractError(path, 'tuple with exactly 4 finite numbers');
+  }
+  return [
+    requireFiniteNumber(items[0], `${path}[0]`),
+    requireFiniteNumber(items[1], `${path}[1]`),
+    requireFiniteNumber(items[2], `${path}[2]`),
+    requireFiniteNumber(items[3], `${path}[3]`),
+  ];
+}
+
+function requirePositiveNumber(value: unknown, path: string): number {
+  const number = requireFiniteNumber(value, path);
+  if (number <= 0) {
+    throw new ApiContractError(path, 'positive finite number');
+  }
+  return number;
 }
 
 function requirePositiveIntegerTuple3(value: unknown, path: string): Vec3 {
@@ -372,6 +409,124 @@ export function parseMaskUploadEnvelope(payload: unknown, index: number): SetSte
     throw new ApiContractError('ok', 'true');
   }
   return parseSetStepEnvelope(envelope.result, index);
+}
+
+function parseMaskAssetLayer(value: unknown, path: string): MaskAssetLayer {
+  const source = requireRecord(value, path);
+  return {
+    id: requireString(source.id, `${path}.id`),
+    layer: requireInteger(source.layer, `${path}.layer`, 0),
+    datatype: requireInteger(source.datatype, `${path}.datatype`, 0),
+    name: requireString(source.name, `${path}.name`),
+    visible: requireBoolean(source.visible, `${path}.visible`),
+  };
+}
+
+function parseMaskPoints(value: unknown, path: string): readonly (readonly [number, number])[] {
+  return requireArray(value, path).map((point, index) => requirePoint(point, `${path}[${index}]`));
+}
+
+function parseMaskAssetShape(value: unknown, path: string): MaskAssetShape {
+  const source = requireRecord(value, path);
+  const id = requireString(source.id, `${path}.id`);
+  const layerId = requireString(source.layer_id, `${path}.layer_id`);
+  const type = requireString(source.type, `${path}.type`);
+  if (type === 'rectangle') {
+    return {
+      id, layerId, type,
+      xNm: requireFiniteNumber(source.x_nm, `${path}.x_nm`),
+      yNm: requireFiniteNumber(source.y_nm, `${path}.y_nm`),
+      widthNm: requirePositiveNumber(source.width_nm, `${path}.width_nm`),
+      heightNm: requirePositiveNumber(source.height_nm, `${path}.height_nm`),
+      rotationDeg: requireFiniteNumber(source.rotation_deg ?? 0, `${path}.rotation_deg`),
+    };
+  }
+  if (type === 'circle' || type === 'hole') {
+    return {
+      id, layerId, type,
+      cxNm: requireFiniteNumber(source.cx_nm, `${path}.cx_nm`),
+      cyNm: requireFiniteNumber(source.cy_nm, `${path}.cy_nm`),
+      radiusNm: requirePositiveNumber(source.radius_nm, `${path}.radius_nm`),
+    };
+  }
+  if (type === 'line') {
+    const pointsNm = parseMaskPoints(source.points_nm, `${path}.points_nm`);
+    if (pointsNm.length < 2) {
+      throw new ApiContractError(`${path}.points_nm`, 'at least 2 finite points');
+    }
+    return {
+      id, layerId, type, pointsNm,
+      widthNm: requirePositiveNumber(source.width_nm, `${path}.width_nm`),
+    };
+  }
+  if (type === 'polygon') {
+    const pointsNm = parseMaskPoints(source.points_nm, `${path}.points_nm`);
+    if (pointsNm.length < 4) {
+      throw new ApiContractError(`${path}.points_nm`, 'at least 4 finite points');
+    }
+    return {id, layerId, type, pointsNm};
+  }
+  throw new ApiContractError(`${path}.type`, 'rectangle, circle, hole, line, or polygon');
+}
+
+function parseMaskAsset(value: unknown, path: string): MaskAsset {
+  const source = requireRecord(value, path);
+  if (source.version !== 1) {
+    throw new ApiContractError(`${path}.version`, '1');
+  }
+  if (source.coordinate_unit !== 'nm') {
+    throw new ApiContractError(`${path}.coordinate_unit`, 'nm');
+  }
+  const parsed: MaskAsset = {
+    version: 1,
+    id: requireString(source.id, `${path}.id`),
+    revision: requireInteger(source.revision, `${path}.revision`, 1),
+    name: requireString(source.name, `${path}.name`),
+    coordinateUnit: 'nm',
+    boundsNm: requireTuple4(source.bounds_nm, `${path}.bounds_nm`),
+    layers: requireArray(source.layers, `${path}.layers`).map(
+      (layer, index) => parseMaskAssetLayer(layer, `${path}.layers[${index}]`),
+    ),
+    shapes: requireArray(source.shapes, `${path}.shapes`).map(
+      (shape, index) => parseMaskAssetShape(shape, `${path}.shapes[${index}]`),
+    ),
+    source: requireRecord(source.source, `${path}.source`),
+  };
+  const sha256 = optionalString(source.sha256, `${path}.sha256`);
+  if (sha256 !== undefined) parsed.sha256 = sha256;
+  return parsed;
+}
+
+function parseMaskAssetSummary(value: unknown, path: string): MaskAssetSummary {
+  const source = requireRecord(value, path);
+  return {
+    id: requireString(source.id, `${path}.id`),
+    name: requireString(source.name, `${path}.name`),
+    revision: requireInteger(source.revision, `${path}.revision`, 1),
+    sha256: requireString(source.sha256, `${path}.sha256`),
+  };
+}
+
+export function parseMaskAssetListEnvelope(payload: unknown): MaskAssetSummary[] {
+  const envelope = requireRecord(payload, '$');
+  if (envelope.ok !== true) throw new ApiContractError('ok', 'true');
+  return requireArray(envelope.result, 'result').map(
+    (summary, index) => parseMaskAssetSummary(summary, `result[${index}]`),
+  );
+}
+
+export function parseMaskAssetEnvelope(payload: unknown): MaskAsset {
+  return parseMaskAsset(requireOkResult(payload), 'result');
+}
+
+export function parseMaskAssetApplyEnvelope(payload: unknown, index: number): MaskAssetApplyView {
+  const result = requireOkResult(payload);
+  return {
+    asset: parseMaskAsset(result.asset, 'result.asset'),
+    step: parseStep(result.step, 'result.step', index),
+    statuses: requireArray(result.statuses, 'result.statuses').map(item => parseRuntimeStatus(item)),
+    warnings: result.warnings === undefined ? [] : parseStringArray(result.warnings, 'result.warnings'),
+  };
 }
 
 export function parseStepListEnvelope(payload: unknown): StepView[] {

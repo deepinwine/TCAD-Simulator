@@ -75,6 +75,12 @@ function apiStub(overrides: Partial<TcadApi> = {}): TcadApi {
       statuses: [],
       warnings: [],
     })),
+    listMaskAssets: vi.fn(async () => []),
+    getMaskAsset: vi.fn(async () => { throw new Error('unused'); }),
+    saveAndApplyMaskAsset: vi.fn(async () => { throw new Error('unused'); }),
+    importAndApplyMaskAsset: vi.fn(async () => { throw new Error('unused'); }),
+    deleteMaskAsset: vi.fn(async () => {}),
+    exportMaskAsset: vi.fn(async () => new Blob()),
     getTimeline: vi.fn(async () => ({items: [], current: -1})),
     restoreTimeline: vi.fn(async () => ({
       timeline: {items: [], current: -1},

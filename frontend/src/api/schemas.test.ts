@@ -3,6 +3,9 @@ import {describe, expect, it} from 'vitest';
 import {
   ApiContractError,
   parseInitEnvelope,
+  parseMaskAssetApplyEnvelope,
+  parseMaskAssetEnvelope,
+  parseMaskAssetListEnvelope,
   parseStepListEnvelope,
   parsePreviewManifestEnvelope,
   parseRunEnvelope,
@@ -325,5 +328,54 @@ describe('parseStepListEnvelope（结构编辑端点）', () => {
 
   it('ok 非真时抛契约错误', () => {
     expect(() => parseStepListEnvelope({ok: false, error: 'x'})).toThrow();
+  });
+});
+
+describe('Mask Asset schemas', () => {
+  const asset = {
+    version: 1,
+    id: 'mask_metal1',
+    revision: 3,
+    name: 'Metal-1',
+    coordinate_unit: 'nm',
+    bounds_nm: [0, 0, 2000, 2000],
+    layers: [{id: '10/0', layer: 10, datatype: 0, name: 'Metal-1', visible: true}],
+    shapes: [
+      {id: 'r', type: 'rectangle', layer_id: '10/0', x_nm: 10, y_nm: 20, width_nm: 30, height_nm: 40, rotation_deg: 0},
+      {id: 'c', type: 'circle', layer_id: '10/0', cx_nm: 100, cy_nm: 100, radius_nm: 25},
+      {id: 'h', type: 'hole', layer_id: '10/0', cx_nm: 100, cy_nm: 100, radius_nm: 10},
+      {id: 'l', type: 'line', layer_id: '10/0', points_nm: [[0, 0], [10, 10]], width_nm: 2},
+      {id: 'p', type: 'polygon', layer_id: '10/0', points_nm: [[0, 0], [10, 0], [0, 10], [0, 0]]},
+    ],
+    source: {kind: 'editor'},
+    sha256: 'abc123',
+  };
+
+  it('maps summaries, every v1 shape, and save/apply authority fields', () => {
+    expect(parseMaskAssetListEnvelope({ok: true, result: [{id: 'mask_metal1', name: 'Metal-1', revision: 3, sha256: 'abc123'}]}))
+      .toEqual([{id: 'mask_metal1', name: 'Metal-1', revision: 3, sha256: 'abc123'}]);
+    const parsed = parseMaskAssetEnvelope({ok: true, result: asset});
+    expect(parsed).toMatchObject({id: 'mask_metal1', revision: 3, coordinateUnit: 'nm'});
+    expect(parsed.shapes.map(shape => shape.type)).toEqual(['rectangle', 'circle', 'hole', 'line', 'polygon']);
+    const applied = parseMaskAssetApplyEnvelope({ok: true, result: {
+      asset,
+      step: {...validStep, params: {mask_mode: 'Asset'}, runtime_status: 'dirty'},
+      statuses: ['dirty'],
+      warnings: [],
+    }}, 0);
+    expect(applied.asset.revision).toBe(3);
+    expect(applied.step.params.mask_mode).toBe('Asset');
+  });
+
+  it.each([
+    [{...asset, revision: 0}, 'result.revision'],
+    [{...asset, bounds_nm: [0, 0, Infinity, 2]}, 'result.bounds_nm[2]'],
+    [{...asset, shapes: [{id: 'x', type: 'future', layer_id: '10/0'}]}, 'result.shapes[0].type'],
+    [{...asset, shapes: [{...asset.shapes[0], x_nm: Number.NaN}]}, 'result.shapes[0].x_nm'],
+    [{...asset, shapes: [{...asset.shapes[3], points_nm: [[0, 0], [1, Infinity]]}]}, 'result.shapes[0].points_nm[1][1]'],
+  ])('rejects invalid revision, non-finite coordinates, and unknown shapes', (invalid, path) => {
+    expect(() => parseMaskAssetEnvelope({ok: true, result: invalid})).toThrow(
+      expect.objectContaining({path}),
+    );
   });
 });

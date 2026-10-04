@@ -466,3 +466,77 @@ describe('TcadApi endpoint methods', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('Mask Asset client', () => {
+  const wireAsset = {
+    version: 1, id: 'mask_metal1', revision: 1, name: 'Metal-1', coordinate_unit: 'nm',
+    bounds_nm: [0, 0, 100, 100],
+    layers: [{id: '1/0', layer: 1, datatype: 0, name: 'M1', visible: true}],
+    shapes: [{id: 'r', type: 'rectangle', layer_id: '1/0', x_nm: 0, y_nm: 0, width_nm: 50, height_nm: 100, rotation_deg: 0}],
+    source: {kind: 'editor'}, sha256: 'hash',
+  };
+  const asset = {
+    version: 1 as const, id: 'mask_metal1', revision: 1, name: 'Metal-1', coordinateUnit: 'nm' as const,
+    boundsNm: [0, 0, 100, 100] as const,
+    layers: [{id: '1/0', layer: 1, datatype: 0, name: 'M1', visible: true}],
+    shapes: [{id: 'r', type: 'rectangle' as const, layerId: '1/0', xNm: 0, yNm: 0, widthNm: 50, heightNm: 100, rotationDeg: 0}],
+    source: {kind: 'editor'}, sha256: 'hash',
+  };
+
+  it('uses frozen methods, encoded query values, and canonical save payload', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ok: true, result: [{id: 'mask_metal1', name: 'Metal-1', revision: 1, sha256: 'hash'}]}))
+      .mockResolvedValueOnce(jsonResponse({ok: true, result: wireAsset}))
+      .mockResolvedValueOnce(jsonResponse({ok: true, result: {
+        asset: wireAsset, step: {...wireStep, params: {mask_mode: 'Asset'}, runtime_status: 'dirty'}, statuses: ['dirty'], warnings: [],
+      }}))
+      .mockResolvedValueOnce(jsonResponse({ok: true, result: {deleted: true}}));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = createTcadApi();
+    await api.listMaskAssets();
+    await api.getMaskAsset('mask metal/1', 1);
+    await api.saveAndApplyMaskAsset({asset, stepIndex: 2});
+    await api.deleteMaskAsset('mask metal/1');
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/mask/assets');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({method: 'GET'});
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/mask/asset?id=mask+metal%2F1&revision=1');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({method: 'GET'});
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/mask/asset/save');
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({
+      method: 'POST', body: JSON.stringify({asset: wireAsset, step_index: 2}),
+    });
+    expect(fetchMock.mock.calls[3][0]).toBe('/api/mask/asset/delete');
+    expect(fetchMock.mock.calls[3][1]).toMatchObject({
+      method: 'POST', body: JSON.stringify({id: 'mask metal/1'}),
+    });
+  });
+
+  it('imports with FormData and exports successful JSON as a Blob', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ok: true, result: {
+        asset: wireAsset, step: {...wireStep, params: {mask_mode: 'Asset'}, runtime_status: 'dirty'}, statuses: ['dirty'], warnings: [],
+      }}))
+      .mockResolvedValueOnce(new Response(JSON.stringify(wireAsset), {
+        status: 200, headers: {'content-type': 'application/json'},
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([0, 1, 2, 3]), {
+        status: 200, headers: {'content-type': 'application/gdsii'},
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = createTcadApi();
+    await api.importAndApplyMaskAsset(new File(['{}'], 'mask.json'), 2);
+    const blob = await api.exportMaskAsset('mask metal/1', 1, 'json');
+    expect(blob).toBeInstanceOf(Blob);
+    const gdsBlob = await api.exportMaskAsset('mask metal/1', 1, 'gds');
+    expect(gdsBlob).toBeInstanceOf(Blob);
+    expect(gdsBlob.type).toBe('application/gdsii');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/mask/asset/import?step_index=2');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({method: 'POST'});
+    expect(fetchMock.mock.calls[0][1].body).toBeInstanceOf(FormData);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/mask/asset/export?id=mask+metal%2F1&revision=1&format=json');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({method: 'GET'});
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/mask/asset/export?id=mask+metal%2F1&revision=1&format=gds');
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({method: 'GET'});
+  });
+});

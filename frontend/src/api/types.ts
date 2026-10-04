@@ -167,6 +167,84 @@ export interface PreviewStlRequest {
   mode?: 'solid' | 'fast';
 }
 
+export interface MaskAssetLayer {
+  id: string;
+  layer: number;
+  datatype: number;
+  name: string;
+  visible: boolean;
+}
+
+interface MaskAssetShapeBase {
+  id: string;
+  layerId: string;
+}
+
+export interface MaskRectangleShape extends MaskAssetShapeBase {
+  type: 'rectangle';
+  xNm: number;
+  yNm: number;
+  widthNm: number;
+  heightNm: number;
+  rotationDeg: number;
+}
+
+export interface MaskCircleShape extends MaskAssetShapeBase {
+  type: 'circle' | 'hole';
+  cxNm: number;
+  cyNm: number;
+  radiusNm: number;
+}
+
+export interface MaskLineShape extends MaskAssetShapeBase {
+  type: 'line';
+  pointsNm: readonly (readonly [number, number])[];
+  widthNm: number;
+}
+
+export interface MaskPolygonShape extends MaskAssetShapeBase {
+  type: 'polygon';
+  pointsNm: readonly (readonly [number, number])[];
+}
+
+export type MaskAssetShape =
+  | MaskRectangleShape
+  | MaskCircleShape
+  | MaskLineShape
+  | MaskPolygonShape;
+
+export interface MaskAsset {
+  version: 1;
+  id: string;
+  revision: number;
+  name: string;
+  coordinateUnit: 'nm';
+  boundsNm: readonly [number, number, number, number];
+  layers: readonly MaskAssetLayer[];
+  shapes: readonly MaskAssetShape[];
+  source: Readonly<Record<string, unknown>>;
+  sha256?: string;
+}
+
+export interface MaskAssetSummary {
+  id: string;
+  name: string;
+  revision: number;
+  sha256: string;
+}
+
+export interface SaveMaskAssetRequest {
+  asset: MaskAsset;
+  stepIndex: number;
+}
+
+export interface MaskAssetApplyView {
+  asset: MaskAsset;
+  step: StepView;
+  statuses: RuntimeStatus[];
+  warnings: string[];
+}
+
 export interface TcadApi {
   init(signal?: AbortSignal): Promise<InitView>;
   setStep(request: SetStepRequest, signal?: AbortSignal): Promise<SetStepView>;
@@ -189,6 +267,24 @@ export interface TcadApi {
   moveStep(index: number, direction: 'up' | 'down', signal?: AbortSignal): Promise<StepView[]>;
   renameStep(index: number, instanceName: string, signal?: AbortSignal): Promise<StepView>;
   uploadMask(file: File, stepIndex: number, signal?: AbortSignal): Promise<SetStepView>;
+  listMaskAssets(signal?: AbortSignal): Promise<readonly MaskAssetSummary[]>;
+  getMaskAsset(id: string, revision: number, signal?: AbortSignal): Promise<MaskAsset>;
+  saveAndApplyMaskAsset(
+    request: SaveMaskAssetRequest,
+    signal?: AbortSignal,
+  ): Promise<MaskAssetApplyView>;
+  importAndApplyMaskAsset(
+    file: File,
+    stepIndex: number,
+    signal?: AbortSignal,
+  ): Promise<MaskAssetApplyView>;
+  deleteMaskAsset(id: string, signal?: AbortSignal): Promise<void>;
+  exportMaskAsset(
+    id: string,
+    revision: number,
+    format: 'json' | 'gds',
+    signal?: AbortSignal,
+  ): Promise<Blob>;
   getTimeline(signal?: AbortSignal): Promise<TimelineView>;
   restoreTimeline(index: number, signal?: AbortSignal): Promise<TimelineRestoreView>;
   getPreviewManifest(

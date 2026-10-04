@@ -113,6 +113,12 @@ send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 | `/api/material_colors` | POST | `{action, mode?, …}` | JSON |
 | `/api/mask/preview` | GET | query `file`（已上传掩膜文件名） | **binary** `image/*`（`.npy` → `image/png`，其他支持格式保留源 MIME），JSON error |
 | `/api/mask/preview_step` | GET | query `step_index`（或 `index`） | **binary**（默认 `image/png`），JSON error |
+| `/api/mask/assets` | GET | — | JSON；`result` 为当前 revision 的资产摘要列表 |
+| `/api/mask/asset` | GET | query `id`、正整数 `revision` | JSON；`result` 为精确且不可变的 Mask Asset revision |
+| `/api/mask/asset/save` | POST | `{asset, step_index}` | JSON；`result` 含已发布 `asset`、权威 `step`、`statuses`、`warnings` |
+| `/api/mask/asset/import` | POST | **multipart/form-data**：`file` 字段 + query `step_index` | JSON；`result` 与保存应用相同；JSON/GDS/OASIS 走统一候选发布 |
+| `/api/mask/asset/delete` | POST | `{id}` | JSON；`result.deleted=true`；被当前 Recipe 引用时返回 409 `mask_asset_in_use` |
+| `/api/mask/asset/export` | GET | query `id`、正整数 `revision`、`format=json` 或 `format=gds` | **binary** JSON 或 GDS attachment，JSON error |
 | `/api/upload/mask` | POST | **multipart/form-data**：`file` 字段 + query `step_index` | JSON；顶层 `path` 为保存后完整路径（含哈希文件名），`result` 为嵌套的 `set_step` 封套，基名位于 `result.result.params.mask_name` |
 | `/api/history/load` | POST | `{id, current_name?}` | JSON |
 | `/api/ui_state` | POST | `{recipe_id, ui_state}` | JSON |
@@ -127,6 +133,12 @@ Fast/voxel 声明 `etch.target_depth=estimated`、`etch.sidewall_angle=approxima
 `code="unsupported_parameter"` 与 `parameter_path`，拒绝时不改变模型或配方。
 optional 数值的默认值与未设置参数保留 JSON `null`。旧响应缺少加法元数据时，React 仍按 `units` 静态显示，
 不猜测能力或换算。M4 视图仅将上述字段名映射为 camelCase，不改变物理含义。
+
+Mask Asset 加法契约（ADR-026）：`mask_asset_id` 与正整数 `mask_asset_revision` 绑定不可变
+revision；schema、资源预算、SHA-256 与栅格预检全部成功后才原子发布。保存/导入与步骤
+应用是一个 worker 事务，失败时恢复步骤、manifest 和 revision 文件。JSON 不依赖 gdstk；
+GDS/OASIS 只经 `LayoutAdapter`，并保留 layer/datatype 与源 database unit 元数据。旧
+`mask_file`、Custom/Designer/Image 模式及 `/api/upload/mask` 保持兼容。
 
 Rules:
 

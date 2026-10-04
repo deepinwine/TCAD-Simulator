@@ -19207,6 +19207,8 @@ class ExposureStep(ProcessStep):
         super().__init__(material_db)
         self.custom_mask: Optional[np.ndarray] = None
         self.image_mask: Optional[np.ndarray] = None
+        self._mask_asset_service: Any = None
+        self.last_metrics: Dict[str, Any] = {}
 
     def parameter_specs(self) -> Sequence[ParameterSpec]:
         patterns = [
@@ -19222,6 +19224,7 @@ class ExposureStep(ProcessStep):
         mask_modes = [
             ("Procedural", "Procedural"),
             ("Custom", "Custom/Imported"),
+            ("Asset", "Versioned Mask Asset"),
         ]
         return (
             ParameterSpec(
@@ -19245,6 +19248,9 @@ class ExposureStep(ProcessStep):
                           tooltip="Built-in procedural pattern or custom designer/image mask."),
             ParameterSpec("mask_name", "Designer mask name", "text", "", tooltip="Name for the designed mask."),
             ParameterSpec("mask_file", "Image file", "text", "", tooltip="Path to imported mask image (PNG/BMP/JPG/NPY)."),
+            ParameterSpec("mask_asset_id", "Mask asset", "text", "", tooltip="Immutable versioned Mask Asset identifier."),
+            ParameterSpec("mask_asset_revision", "Mask asset revision", "int", 0, 0.0, None,
+                          tooltip="Exact immutable Mask Asset revision used for exposure."),
             # OPC (advanced): defaults keep legacy behavior unchanged.
             ParameterSpec(
                 "opc_enable",
@@ -19314,7 +19320,48 @@ class ExposureStep(ProcessStep):
     def execute(self, model: ProcessModel) -> str:
         mask_override: Optional[np.ndarray] = None
         mode = self.params.get("mask_mode", "Procedural")
-        if mode in {"Custom", "Designer", "Image"}:
+        self.last_metrics = {}
+        if mode == "Asset":
+            from mask_assets import MaskAssetError
+            asset_id = str(self.params.get("mask_asset_id", "") or "").strip()
+            try:
+                revision = int(self.params.get("mask_asset_revision", 0) or 0)
+            except Exception:
+                revision = 0
+            if not asset_id or revision <= 0:
+                raise MaskAssetError(
+                    "invalid_mask_asset_reference",
+                    "Mask Exposure requires mask_asset_id and a positive mask_asset_revision",
+                    params={"id": asset_id, "revision": revision},
+                )
+            service = self._mask_asset_service
+            if service is None:
+                raise MaskAssetError(
+                    "mask_asset_service_unavailable",
+                    "Mask Asset service is unavailable for this execution context",
+                    status=500,
+                )
+            mask_override, asset = service.rasterize(
+                asset_id,
+                revision,
+                shape=tuple(int(v) for v in model.open_mask.shape),
+                bounds=(
+                    0.0,
+                    0.0,
+                    float(model.open_mask.shape[0]) * float(model.voxel_size_nm),
+                    float(model.open_mask.shape[1]) * float(model.voxel_size_nm),
+                ),
+            )
+            # LayoutAdapter uses image order (row=y, column=x); ProcessModel uses
+            # array order (axis 0=x, axis 1=y).
+            mask_override = np.asarray(mask_override, dtype=bool).T
+            mask_override = resample_mask(mask_override, model.open_mask.shape)
+            self.last_metrics = {
+                "mask_asset_id": asset.id,
+                "mask_asset_revision": asset.revision,
+                "mask_sha256": asset.sha256,
+            }
+        elif mode in {"Custom", "Designer", "Image"}:
             if getattr(self, "custom_mask", None) is not None:
                 mask_override = resample_mask(self.custom_mask, model.open_mask.shape)
             elif getattr(self, "image_mask", None) is not None:
@@ -19394,6 +19441,11 @@ class ExposureStep(ProcessStep):
             mask_override=mask_override,
             opc=opc_cfg,
         )
+        if mode == "Asset" and mask_override is not None:
+            return (
+                f"Expose mask asset {self.params.get('mask_asset_id')}"
+                f"@{int(self.params.get('mask_asset_revision', 0) or 0)}"
+            )
         if mode in {"Custom", "Designer", "Image"} and mask_override is not None:
             if self.params.get("mask_file"):
                 return f"Expose custom mask {os.path.basename(self.params['mask_file'])}"
@@ -19412,6 +19464,10 @@ class ExposureStep(ProcessStep):
         if not self.params.get("mask_name"):
             self.params["mask_name"] = Path(path).stem
         self.params["mask_mode"] = "Custom"
+
+    def bind_mask_asset_service(self, service: Any) -> None:
+        """Attach the session-scoped service without serializing it into Recipe data."""
+        self._mask_asset_service = service
 
 
 class DevelopStep(ProcessStep):
@@ -37023,6 +37079,8 @@ def _webui_worker_main(
         paths[key].mkdir(parents=True, exist_ok=True)
     session_id = str(storage_dir.name)
     storage_root = _tcad_storage_root_from_session_dir(storage_dir)
+    from mask_assets import MaskAssetError, MaskAssetService, MaskAssetStore
+    mask_asset_service = MaskAssetService(MaskAssetStore(storage_dir))
     ephemeral = bool(ephemeral)
     preview_quality = _webui_normalize_quality(preview_quality)
 
@@ -58696,6 +58754,8 @@ def _webui_worker_main(
     def _begin_step_execution(step: ProcessStep, step_index: int) -> Dict[str, Any]:
         """Run non-mutating preflight and allocate an uncommitted undo snapshot."""
         try:
+            if isinstance(step, ExposureStep):
+                step.bind_mask_asset_service(mask_asset_service)
             warnings = _webui_localize_exposure_mask_file(step)
             if warnings:
                 for warning in warnings[:4]:
@@ -71294,6 +71354,146 @@ def _webui_worker_main(
                 conn.send({"ok": True, "result": _serialize_recipe_for_client(), "rid": rid})
                 continue
 
+            if cmd == "mask_asset_list":
+                conn.send({"ok": True, "result": mask_asset_service.list(), "rid": rid})
+                continue
+
+            if cmd == "mask_asset_get":
+                asset_id = str(payload.get("id", "") or "").strip()
+                revision_raw = payload.get("revision")
+                revision = int(revision_raw) if revision_raw is not None else None
+                export_format = str(payload.get("format", "") or "").strip().lower()
+                asset = mask_asset_service.get(asset_id, revision)
+                if export_format == "json":
+                    conn.send({
+                        "ok": True,
+                        "data": mask_asset_service.export_json(asset.id, asset.revision),
+                        "content_type": "application/json; charset=utf-8",
+                        "filename": f"{asset.id}-r{asset.revision}.json",
+                        "rid": rid,
+                    })
+                    continue
+                if export_format == "gds":
+                    export_path = paths["exports_dir"] / f"{asset.id}-r{asset.revision}-{secrets.token_hex(4)}.gds"
+                    try:
+                        mask_asset_service.export_gds(asset.id, asset.revision, export_path)
+                        data = export_path.read_bytes()
+                    finally:
+                        export_path.unlink(missing_ok=True)
+                    conn.send({
+                        "ok": True, "data": data, "content_type": "application/gdsii",
+                        "filename": f"{asset.id}-r{asset.revision}.gds", "rid": rid,
+                    })
+                    continue
+                conn.send({"ok": True, "result": asset.to_mapping(), "rid": rid})
+                continue
+
+            if cmd in {"mask_asset_save_apply", "mask_asset_import_apply"}:
+                step_index = int(payload.get("step_index", -1))
+                if not (0 <= step_index < len(steps)):
+                    raise MaskAssetError("invalid_step_index", "Invalid step index", params={"step_index": step_index})
+                step = steps[step_index]
+                if not isinstance(step, ExposureStep):
+                    raise MaskAssetError(
+                        "invalid_step_type", "Mask Asset can only be applied to Mask Exposure",
+                        params={"step_index": step_index, "step_type": step.name},
+                    )
+                old_params = copy.deepcopy(step.params)
+                old_custom = getattr(step, "custom_mask", None)
+                old_image = getattr(step, "image_mask", None)
+                old_service = getattr(step, "_mask_asset_service", None)
+                old_statuses = list(step_runtime_statuses)
+                asset_id_hint = ""
+                if cmd == "mask_asset_save_apply":
+                    candidate_payload = payload.get("asset")
+                    if not isinstance(candidate_payload, dict):
+                        raise MaskAssetError("invalid_mask_asset", "asset must be an object")
+                    asset_id_hint = str(candidate_payload.get("id", "") or "").strip()
+                else:
+                    asset_id_hint = str(payload.get("asset_id", "") or "").strip()
+                    filename_hint = Path(str(payload.get("filename", "mask.json") or "mask.json")).name
+                    file_data_hint = payload.get("data")
+                    if Path(filename_hint).suffix.lower() == ".json" and isinstance(file_data_hint, (bytes, bytearray)):
+                        try:
+                            imported_payload_hint = json.loads(bytes(file_data_hint).decode("utf-8"))
+                            if isinstance(imported_payload_hint, dict):
+                                asset_id_hint = str(imported_payload_hint.get("id", asset_id_hint) or asset_id_hint).strip()
+                        except Exception:
+                            pass
+                previous_manifest = mask_asset_service.store.manifest_bytes(asset_id_hint) if asset_id_hint else None
+                published_asset = None
+                try:
+                    if cmd == "mask_asset_save_apply":
+                        published_asset = mask_asset_service.save_candidate(candidate_payload)
+                    else:
+                        filename = Path(str(payload.get("filename", "mask.json") or "mask.json")).name
+                        file_data = payload.get("data")
+                        if not isinstance(file_data, (bytes, bytearray)):
+                            raise MaskAssetError("invalid_mask_asset", "Imported file is empty")
+                        suffix = Path(filename).suffix.lower()
+                        if suffix == ".json":
+                            published_asset = mask_asset_service.import_json(bytes(file_data))
+                        elif suffix in {".gds", ".oas"}:
+                            import_path = storage_dir / f".mask-import-{secrets.token_hex(6)}{suffix}"
+                            try:
+                                import_path.write_bytes(bytes(file_data))
+                                published_asset = mask_asset_service.import_gds(
+                                    import_path,
+                                    asset_id=asset_id_hint,
+                                    name=str(payload.get("name", asset_id_hint) or asset_id_hint),
+                                )
+                            finally:
+                                import_path.unlink(missing_ok=True)
+                        else:
+                            raise MaskAssetError(
+                                "unsupported_mask_asset_format", "Only JSON, GDS, and OASIS imports are supported",
+                                params={"format": suffix},
+                            )
+                    step.params.update({
+                        "mask_mode": "Asset",
+                        "mask_asset_id": published_asset.id,
+                        "mask_asset_revision": published_asset.revision,
+                        "mask_name": published_asset.name,
+                    })
+                    step.params.pop("mask_file", None)
+                    step.custom_mask = None
+                    step.image_mask = None
+                    step.bind_mask_asset_service(mask_asset_service)
+                    _invalidate_step_runtime_statuses(step_index)
+                    _autosave(f"apply mask asset {published_asset.id}@{published_asset.revision}")
+                except Exception:
+                    step.params = old_params
+                    step.custom_mask = old_custom
+                    step.image_mask = old_image
+                    step._mask_asset_service = old_service
+                    step_runtime_statuses[:] = old_statuses
+                    if published_asset is not None:
+                        mask_asset_service.store.rollback_publish(
+                            published_asset.id, published_asset.revision, previous_manifest,
+                        )
+                    raise
+                conn.send({
+                    "ok": True,
+                    "result": {
+                        "asset": published_asset.to_mapping(),
+                        "step": _serialize_step_for_client(step_index),
+                        "statuses": list(step_runtime_statuses),
+                        "warnings": [],
+                    },
+                    "rid": rid,
+                })
+                continue
+
+            if cmd == "mask_asset_delete":
+                asset_id = str(payload.get("id", "") or "").strip()
+                references = []
+                for index, step in enumerate(steps):
+                    if str(getattr(step, "params", {}).get("mask_asset_id", "") or "").strip() == asset_id:
+                        references.append({"recipe": "current", "step_index": int(index)})
+                mask_asset_service.delete(asset_id, references=references)
+                conn.send({"ok": True, "result": {"deleted": True}, "rid": rid})
+                continue
+
             if cmd == "set_step":
                 idx = int(payload.get("index", -1))
                 if not (0 <= idx < len(steps)):
@@ -72897,8 +73097,17 @@ def _webui_worker_main(
 
             conn.send({"ok": False, "error": f"Unknown command: {cmd}", "rid": rid})
         except Exception as exc:
-            conn.send({"ok": False, "error": str(exc), "rid": rid,
-                       **({"code": exc.code, "parameter_path": exc.parameter} if isinstance(exc, EtchParameterError) else {})})
+            structured: Dict[str, Any] = {}
+            if isinstance(exc, EtchParameterError):
+                structured = {"code": exc.code, "parameter_path": exc.parameter}
+            elif isinstance(exc, MaskAssetError):
+                structured = {
+                    "code": exc.code,
+                    "params": dict(exc.params),
+                    "status": int(exc.status),
+                    **({"detail": exc.detail} if exc.detail else {}),
+                }
+            conn.send({"ok": False, "error": str(exc), "rid": rid, **structured})
 
 
 _TCAD_THREAD_CONN_EOF = object()
@@ -74377,6 +74586,70 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/mask/assets":
+            resp = sess.rpc("mask_asset_list", {}, timeout_s=60.0)
+            status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+            self._send_json(resp, status=status, set_cookie=set_cookie)
+            return
+
+        if path == "/api/mask/asset":
+            asset_id = str(query.get("id", [""])[0] or "").strip()
+            try:
+                revision = int(query.get("revision", ["0"])[0])
+            except Exception:
+                revision = 0
+            if not asset_id or revision <= 0:
+                self._send_json({
+                    "ok": False, "code": "invalid_mask_asset_reference",
+                    "params": {"id": asset_id, "revision": revision},
+                    "error": "id and a positive revision are required",
+                }, status=400, set_cookie=set_cookie)
+                return
+            resp = sess.rpc("mask_asset_get", {"id": asset_id, "revision": revision}, timeout_s=60.0)
+            status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+            self._send_json(resp, status=status, set_cookie=set_cookie)
+            return
+
+        if path == "/api/mask/asset/export":
+            asset_id = str(query.get("id", [""])[0] or "").strip()
+            export_format = str(query.get("format", ["json"])[0] or "json").strip().lower()
+            try:
+                revision = int(query.get("revision", ["0"])[0])
+            except Exception:
+                revision = 0
+            if not asset_id or revision <= 0 or export_format not in {"json", "gds"}:
+                self._send_json({
+                    "ok": False, "code": "invalid_mask_asset_export",
+                    "params": {"id": asset_id, "revision": revision, "format": export_format},
+                    "error": "A valid id, positive revision, and json or gds format are required",
+                }, status=400, set_cookie=set_cookie)
+                return
+            resp = sess.rpc(
+                "mask_asset_get", {"id": asset_id, "revision": revision, "format": export_format}, timeout_s=120.0,
+            )
+            if not isinstance(resp, dict) or not resp.get("ok"):
+                status = int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+                self._send_json(resp if isinstance(resp, dict) else {"ok": False, "error": "Mask export failed"},
+                                status=status, set_cookie=set_cookie)
+                return
+            data = resp.get("data")
+            if not isinstance(data, (bytes, bytearray)):
+                self._send_json({
+                    "ok": False,
+                    "code": "mask_asset_export_failed",
+                    "params": {},
+                    "error": "Invalid export payload",
+                },
+                                status=500, set_cookie=set_cookie)
+                return
+            filename = _webui_safe_filename(str(resp.get("filename", f"{asset_id}.{export_format}")))
+            self._send_bytes(
+                bytes(data), str(resp.get("content_type", "application/octet-stream")), status=200,
+                extra_headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+                set_cookie=set_cookie,
+            )
+            return
+
         if path == "/api/mask/preview":
             name = str(query.get("file", [""])[0] or "").strip()
             safe = _webui_safe_filename(name)
@@ -74508,6 +74781,79 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
             payload = self._read_json()
             resp = sess.rpc("set_step", payload)
             self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if path == "/api/mask/asset/save":
+            payload = self._read_json()
+            resp = sess.rpc("mask_asset_save_apply", payload, timeout_s=120.0)
+            status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+            self._send_json(resp, status=status, set_cookie=set_cookie)
+            return
+
+        if path == "/api/mask/asset/delete":
+            payload = self._read_json()
+            resp = sess.rpc("mask_asset_delete", payload, timeout_s=60.0)
+            status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+            self._send_json(resp, status=status, set_cookie=set_cookie)
+            return
+
+        if path == "/api/mask/asset/import":
+            query = urllib.parse.parse_qs(parsed.query or "")
+            try:
+                step_index = int(query.get("step_index", ["-1"])[0])
+            except Exception:
+                step_index = -1
+            ctype = str(self.headers.get("Content-Type", "") or "")
+            match = re.search(r"boundary=([^;]+)", ctype, flags=re.IGNORECASE)
+            boundary = match.group(1).strip().strip('"') if match else ""
+            if "multipart/form-data" not in ctype.lower() or not boundary:
+                self._send_json({
+                    "ok": False, "code": "invalid_multipart", "params": {},
+                    "error": "Expected multipart/form-data with a boundary",
+                }, status=400, set_cookie=set_cookie)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            if length <= 0 or length > 64 * 1024 * 1024:
+                status = 413 if length > 64 * 1024 * 1024 else 400
+                self._send_json({
+                    "ok": False, "code": "mask_asset_import_size", "params": {"limit": 64 * 1024 * 1024},
+                    "error": "Mask Asset import is empty or too large",
+                }, status=status, set_cookie=set_cookie)
+                return
+            body = self.rfile.read(length)
+            file_data = None
+            filename = "mask.json"
+            for part in body.split(b"--" + boundary.encode("utf-8")):
+                header, separator, content = part.partition(b"\r\n\r\n")
+                if not separator or b'name="file"' not in header:
+                    continue
+                if b'filename="' in header:
+                    filename = header.split(b'filename="', 1)[1].split(b'"', 1)[0].decode("utf-8", "ignore")
+                file_data = content.rsplit(b"\r\n", 1)[0]
+                break
+            if file_data is None:
+                self._send_json({
+                    "ok": False, "code": "invalid_multipart", "params": {}, "error": "Missing file field",
+                }, status=400, set_cookie=set_cookie)
+                return
+            safe_filename = Path(_webui_safe_filename(filename or "mask.json")).name
+            derived_id = Path(safe_filename).stem[:128]
+            resp = sess.rpc(
+                "mask_asset_import_apply",
+                {
+                    "step_index": step_index,
+                    "asset_id": str(query.get("asset_id", [derived_id])[0] or derived_id),
+                    "name": str(query.get("name", [derived_id])[0] or derived_id),
+                    "filename": safe_filename,
+                    "data": bytes(file_data),
+                },
+                timeout_s=120.0,
+            )
+            status = 200 if isinstance(resp, dict) and resp.get("ok") else int(resp.get("status", 500) if isinstance(resp, dict) else 500)
+            self._send_json(resp, status=status, set_cookie=set_cookie)
             return
 
         if path == "/api/ui_state":

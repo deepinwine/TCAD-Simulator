@@ -37,6 +37,15 @@ class LayoutAdapter:
         self._gdstk = gdstk
         self._backend = backend
 
+    @classmethod
+    def normalized(cls) -> "LayoutAdapter":
+        """Create the dependency-free normalized-geometry rasterizer."""
+        adapter = cls.__new__(cls)
+        adapter._delegate = None
+        adapter._gdstk = None
+        adapter._backend = "normalized"
+        return adapter
+
     @property
     def backend(self) -> str:
         return self._backend
@@ -61,8 +70,13 @@ class LayoutAdapter:
     # ---- 读写 -----------------------------------------------------------
 
     def read(self, path) -> LayoutGeometry:
+        geometry, _metadata = self.read_with_metadata(path)
+        return geometry
+
+    def read_with_metadata(self, path):
+        """Read normalized geometry plus scalar source-unit metadata."""
         if self._delegate is not None:
-            return self._delegate.read(path)
+            return self._delegate.read(path), {}
         source = Path(path)
         suffix = source.suffix.lower()
         gdstk = self._gdstk
@@ -72,15 +86,19 @@ class LayoutAdapter:
             library = gdstk.read_gds(source)
         else:
             raise ValueError(f"不支持的版图文件：{suffix!r}（仅 .gds/.oas）")
+        nm_per_unit = float(library.unit) * 1e9
         polygons: List[MaskPolygon] = []
         for polygon in library.cells[0].polygons if False else _iter_polygons(library):
-            points = np.asarray(polygon.points, dtype=float) * _NM_PER_UNIT
+            points = np.asarray(polygon.points, dtype=float) * nm_per_unit
             polygons.append(MaskPolygon(
                 points=points,
                 layer=int(polygon.layer),
                 datatype=int(polygon.datatype),
             ))
-        return LayoutGeometry.from_polygons(polygons)
+        return LayoutGeometry.from_polygons(polygons), {
+            "database_unit_m": float(library.unit),
+            "database_precision_m": float(library.precision),
+        }
 
     def write(self, geometry: LayoutGeometry, path, *, name: str = "MASK") -> None:
         if self._delegate is not None:

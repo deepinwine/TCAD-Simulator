@@ -2,6 +2,9 @@ import {
   ApiContractError,
   parseHistoryEnvelope,
   parseInitEnvelope,
+  parseMaskAssetApplyEnvelope,
+  parseMaskAssetEnvelope,
+  parseMaskAssetListEnvelope,
   parseRecipeLoadEnvelope,
   parseSavedEnvelope,
   parseMaskUploadEnvelope,
@@ -16,11 +19,16 @@ import {
 import type {
   HistoryView,
   InitView,
+  MaskAsset,
+  MaskAssetApplyView,
+  MaskAssetShape,
+  MaskAssetSummary,
   RecipeLoadView,
   PreviewManifestRequest,
   PreviewManifestView,
   PreviewStlRequest,
   RunView,
+  SaveMaskAssetRequest,
   SetStepRequest,
   StepView,
   SetStepView,
@@ -234,11 +242,90 @@ export async function apiBinary(path: string, signal?: AbortSignal): Promise<Arr
   }
 }
 
+async function apiBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetchSafely(path, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal,
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (contentType.includes('json')) {
+      throw toApiError(response.status, await readJsonSafely(response));
+    }
+    throw new TcadApiError(`二进制资源请求失败（HTTP ${response.status}）。`, {
+      status: response.status,
+      code: 'binary_request_failed',
+    });
+  }
+  try {
+    return await response.blob();
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new TcadApiError('无法读取 TCAD 二进制资源。', {
+      status: response.status,
+      code: 'binary_read_failed',
+    });
+  }
+}
+
 function requireRequestInteger(value: number, path: string, minimum: number): number {
   if (!Number.isFinite(value) || !Number.isInteger(value) || value < minimum) {
     throw new ApiContractError(path, `integer >= ${minimum}`);
   }
   return value;
+}
+
+function requireRequestId(value: string, path: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ApiContractError(path, 'non-empty string');
+  }
+  return value;
+}
+
+function maskShapeToWire(shape: MaskAssetShape): Record<string, unknown> {
+  const common = {id: shape.id, type: shape.type, layer_id: shape.layerId};
+  if (shape.type === 'rectangle') {
+    return {
+      ...common,
+      x_nm: shape.xNm,
+      y_nm: shape.yNm,
+      width_nm: shape.widthNm,
+      height_nm: shape.heightNm,
+      rotation_deg: shape.rotationDeg,
+    };
+  }
+  if (shape.type === 'circle' || shape.type === 'hole') {
+    return {...common, cx_nm: shape.cxNm, cy_nm: shape.cyNm, radius_nm: shape.radiusNm};
+  }
+  if (shape.type === 'line') {
+    return {...common, points_nm: shape.pointsNm, width_nm: shape.widthNm};
+  }
+  if (shape.type === 'polygon') {
+    return {...common, points_nm: shape.pointsNm};
+  }
+  throw new ApiContractError('request.asset.shapes[].type', 'known Mask Asset shape');
+}
+
+function maskAssetToWire(asset: MaskAsset): Record<string, unknown> {
+  return {
+    version: asset.version,
+    id: asset.id,
+    revision: asset.revision,
+    name: asset.name,
+    coordinate_unit: asset.coordinateUnit,
+    bounds_nm: asset.boundsNm,
+    layers: asset.layers.map(layer => ({
+      id: layer.id,
+      layer: layer.layer,
+      datatype: layer.datatype,
+      name: layer.name,
+      visible: layer.visible,
+    })),
+    shapes: asset.shapes.map(maskShapeToWire),
+    source: asset.source,
+    ...(asset.sha256 === undefined ? {} : {sha256: asset.sha256}),
+  };
 }
 
 function previewManifestPath(request: PreviewManifestRequest): string {
@@ -408,6 +495,73 @@ export function createTcadApi(): TcadApi {
         throw toApiError(response.status, payload);
       }
       return parseMaskUploadEnvelope(payload, validated);
+    },
+    listMaskAssets(signal?: AbortSignal): Promise<readonly MaskAssetSummary[]> {
+      return apiGetJson('/api/mask/assets', parseMaskAssetListEnvelope, signal);
+    },
+    getMaskAsset(id: string, revision: number, signal?: AbortSignal): Promise<MaskAsset> {
+      const query = new URLSearchParams({
+        id: requireRequestId(id, 'request.id'),
+        revision: String(requireRequestInteger(revision, 'request.revision', 1)),
+      });
+      return apiGetJson(`/api/mask/asset?${query.toString()}`, parseMaskAssetEnvelope, signal);
+    },
+    saveAndApplyMaskAsset(
+      request: SaveMaskAssetRequest,
+      signal?: AbortSignal,
+    ): Promise<MaskAssetApplyView> {
+      const stepIndex = requireRequestInteger(request.stepIndex, 'request.stepIndex', 0);
+      return apiPostJson(
+        '/api/mask/asset/save',
+        {asset: maskAssetToWire(request.asset), step_index: stepIndex},
+        payload => parseMaskAssetApplyEnvelope(payload, stepIndex),
+        signal,
+      );
+    },
+    async importAndApplyMaskAsset(
+      file: File,
+      stepIndex: number,
+      signal?: AbortSignal,
+    ): Promise<MaskAssetApplyView> {
+      const validated = requireRequestInteger(stepIndex, 'request.stepIndex', 0);
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetchSafely(
+        `/api/mask/asset/import?step_index=${validated}`,
+        {method: 'POST', body: form, credentials: 'same-origin', signal},
+      );
+      const payload = await readJsonSafely(response);
+      if (!response.ok || !isSuccessfulEnvelope(payload)) {
+        throw toApiError(response.status, payload);
+      }
+      return parseMaskAssetApplyEnvelope(payload, validated);
+    },
+    deleteMaskAsset(id: string, signal?: AbortSignal): Promise<void> {
+      const validated = requireRequestId(id, 'request.id');
+      return apiPostJson(
+        '/api/mask/asset/delete',
+        {id: validated},
+        payload => {
+          const source = payload as {ok?: unknown; result?: {deleted?: unknown}};
+          if (source.ok !== true || source.result?.deleted !== true) {
+            throw new ApiContractError('result.deleted', 'true');
+          }
+        },
+        signal,
+      );
+    },
+    exportMaskAsset(
+      id: string,
+      revision: number,
+      format: 'json' | 'gds',
+      signal?: AbortSignal,
+    ): Promise<Blob> {
+      const query = new URLSearchParams({
+        id: requireRequestId(id, 'request.id'),
+        revision: String(requireRequestInteger(revision, 'request.revision', 1)),
+        format,
+      });
+      return apiBlob(`/api/mask/asset/export?${query.toString()}`, signal);
     },
     getTimeline(signal?: AbortSignal): Promise<TimelineView> {
       return apiPostJson('/api/timeline/get', {}, parseTimelineEnvelope, signal);

@@ -162,3 +162,21 @@ Rules:
   入射角为 unsupported。非零入射角必须在模型变更前显式拒绝，不得执行或静默忽略。
 - 旧 Etch time 模式保持兼容；sidewall 显式迁移为 sidewall_angle_deg，冲突必须拒绝。
   target_depth_nm 未设置时仍使用 time；不把旧 depth_nm 猜测为时间，也不声称按实测深度反馈停止。
+
+ADR-026 — Mask Asset 使用不可变 revision 与候选原子发布（2026-10-04）。
+Reason: Recipe 快照必须能复现实际曝光版图；保存、导入或步骤绑定失败时，不能让
+资产 manifest、revision 文件与 Mask Exposure 引用处于相互矛盾的半完成状态。
+Rules:
+- Mask Exposure 通过 `mask_asset_id` 与正整数 `mask_asset_revision` 精确引用不可变版本；
+  执行时读取该 revision、按当前仿真 domain 栅格化，并记录内容 SHA-256。不得静默升级
+  到最新 revision。
+- 候选先完成 v1 schema、有限坐标、闭合/非自交几何、资源预算与 64×64 栅格预检，
+  再以同目录临时文件和 `os.replace` 发布 revision 与 manifest。保存应用任一步失败必须
+  恢复步骤参数、旧 manifest，并删除本次 revision。
+- JSON 是可编辑 round-trip 格式；GDS/OASIS 只经 `LayoutAdapter` 转为归一化几何，
+  保留 layer/datatype 与源 database unit 元数据，第三方引擎对象不得进入 ProcessStep。
+  缺少 gdstk 时 GDS 路径返回结构化 `dependency_missing`，JSON 路径仍可工作。
+- 被当前 Recipe 引用的资产不得删除；服务返回引用的 recipe 与 step index。历史 revision
+  首版只读，不支持就地重写。
+- 这是 M2 Compatibility API 的加法扩展。旧 `mask_file`、Designer/Image/Custom 模式、
+  `/api/upload/mask` 与预览端点继续工作，不强制迁移既有 Recipe。

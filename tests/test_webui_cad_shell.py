@@ -1201,6 +1201,174 @@ class M2ApiContractTests(unittest.TestCase):
             finally:
                 manager.stop()
 
+    def test_mask_asset_http_lifecycle_is_versioned_and_atomic(self):
+        import json
+
+        candidate = {
+            "version": 1,
+            "id": "mask_metal1",
+            "name": "Metal-1",
+            "coordinate_unit": "nm",
+            "bounds_nm": [0, 0, 2000, 2000],
+            "layers": [{"id": "10/0", "layer": 10, "datatype": 0, "name": "Metal-1", "visible": True}],
+            "shapes": [{
+                "id": "left", "type": "rectangle", "layer_id": "10/0",
+                "x_nm": 0, "y_nm": 0, "width_nm": 1000, "height_nm": 2000,
+                "rotation_deg": 0,
+            }],
+            "source": {"kind": "editor"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                _session, cookie = manager.create_session()
+                base = manager.url
+                self._request(base, cookie, "POST", "/api/recipe/new", {"name": "Mask assets"})
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/recipe/insert_steps", {"steps": [{"name": "Mask Exposure"}]},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                exposure_index = len(json.loads(raw)["result"]) - 1
+
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/save",
+                    {"asset": candidate, "step_index": exposure_index},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                saved = json.loads(raw)
+                self.assertTrue(saved["ok"])
+                self.assertEqual(saved["result"]["asset"]["revision"], 1)
+                self.assertEqual(saved["result"]["step"]["params"]["mask_mode"], "Asset")
+                self.assertEqual(saved["result"]["step"]["params"]["mask_asset_revision"], 1)
+
+                status, _headers, raw = self._request(base, cookie, "GET", "/api/mask/assets")
+                summaries = json.loads(raw)["result"]
+                self.assertEqual([(item["id"], item["revision"]) for item in summaries], [("mask_metal1", 1)])
+                status, _headers, raw = self._request(
+                    base, cookie, "GET", "/api/mask/asset?id=mask_metal1&revision=1",
+                )
+                self.assertEqual(json.loads(raw)["result"]["shapes"], candidate["shapes"])
+                status, headers, raw = self._request(
+                    base, cookie, "GET", "/api/mask/asset/export?id=mask_metal1&revision=1&format=json",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertEqual(json.loads(raw)["revision"], 1)
+
+                # A failed apply must not publish a new revision or change the manifest.
+                failed_candidate = dict(candidate, name="Must roll back")
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/save",
+                    {"asset": failed_candidate, "step_index": 999},
+                )
+                self.assertEqual(status, 400, raw[:300])
+                failed = json.loads(raw)
+                self.assertFalse(failed["ok"])
+                status, _headers, raw = self._request(base, cookie, "GET", "/api/mask/assets")
+                self.assertEqual(json.loads(raw)["result"][0]["revision"], 1)
+
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/delete", {"id": "mask_metal1"},
+                )
+                self.assertEqual(status, 409, raw[:300])
+                in_use = json.loads(raw)
+                self.assertEqual(in_use["code"], "mask_asset_in_use")
+                self.assertEqual(in_use["params"]["references"], [{"recipe": "current", "step_index": exposure_index}])
+
+                self._request(
+                    base, cookie, "POST", "/api/step/set",
+                    {"index": exposure_index, "params": {"mask_mode": "Procedural", "mask_asset_id": "", "mask_asset_revision": 0}},
+                )
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/delete", {"id": "mask_metal1"},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                self.assertTrue(json.loads(raw)["result"]["deleted"])
+
+                # Methods are frozen: every wrong-method call falls through to generic 404.
+                for method, path, body in (
+                    ("POST", "/api/mask/assets", {}),
+                    ("POST", "/api/mask/asset", {}),
+                    ("GET", "/api/mask/asset/save", None),
+                    ("GET", "/api/mask/asset/import", None),
+                    ("GET", "/api/mask/asset/delete?id=mask_metal1", None),
+                    ("POST", "/api/mask/asset/export", {}),
+                ):
+                    status, _headers, _raw = self._request(base, cookie, method, path, body)
+                    self.assertEqual(status, 404, f"{method} {path}")
+            finally:
+                manager.stop()
+
+    def test_mask_asset_multipart_gds_import_and_binary_export(self):
+        import json
+
+        try:
+            import gdstk
+        except ImportError:
+            self.skipTest("gdstk is not installed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.gds"
+            library = gdstk.Library(unit=2e-6, precision=1e-9)
+            cell = library.new_cell("TOP")
+            cell.add(gdstk.rectangle((0, 0), (1, 0.5), layer=7, datatype=2))
+            library.write_gds(source)
+            boundary = "tcad-gds-import-boundary"
+            body = (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="file"; filename="source.gds"\r\n'
+                "Content-Type: application/gdsii\r\n\r\n"
+            ).encode() + source.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+
+            manager = self._start_manager(temp_dir)
+            try:
+                _session, cookie = manager.create_session()
+                base = manager.url
+                self._request(base, cookie, "POST", "/api/recipe/new", {"name": "GDS assets"})
+                status, _headers, raw = self._request(
+                    base, cookie, "POST", "/api/recipe/insert_steps", {"steps": [{"name": "Mask Exposure"}]},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                exposure_index = len(json.loads(raw)["result"]) - 1
+
+                status, _headers, raw = self._request(
+                    base,
+                    cookie,
+                    "POST",
+                    f"/api/mask/asset/import?step_index={exposure_index}&asset_id=gds_asset&name=GDS+Asset",
+                    raw_body=body,
+                    content_type=f"multipart/form-data; boundary={boundary}",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                imported = json.loads(raw)["result"]["asset"]
+                self.assertEqual(imported["source"]["database_unit_m"], 2e-6)
+                self.assertEqual(
+                    {(layer["layer"], layer["datatype"]) for layer in imported["layers"]},
+                    {(7, 2)},
+                )
+
+                status, headers, raw = self._request(
+                    base,
+                    cookie,
+                    "GET",
+                    "/api/mask/asset/export?id=gds_asset&revision=1&format=gds",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                self.assertNotIn("json", headers.get("content-type", "").lower())
+                self.assertTrue(raw)
+                exported = Path(temp_dir) / "exported.gds"
+                exported.write_bytes(raw)
+                exported_library = gdstk.read_gds(exported)
+                exported_layers = {
+                    (int(polygon.layer), int(polygon.datatype))
+                    for exported_cell in exported_library.cells
+                    for polygon in exported_cell.polygons
+                }
+                self.assertEqual(exported_layers, {(7, 2)})
+            finally:
+                manager.stop()
+
 
     def test_full_endpoint_lifecycle_walk(self):
         """行为证据：契约表中每个端点都以声明的 method 调用并断言响应类别。"""
@@ -1322,6 +1490,59 @@ class M2ApiContractTests(unittest.TestCase):
                     check_json(raw, path)
 
                 # --- multipart mask upload + binary mask previews ---
+                asset = {
+                    "version": 1,
+                    "id": "contract_mask",
+                    "name": "Contract mask",
+                    "coordinate_unit": "nm",
+                    "bounds_nm": [0, 0, 2000, 2000],
+                    "layers": [{"id": "10/0", "layer": 10, "datatype": 0, "name": "M1", "visible": True}],
+                    "shapes": [{
+                        "id": "left", "type": "rectangle", "layer_id": "10/0",
+                        "x_nm": 0, "y_nm": 0, "width_nm": 1000, "height_nm": 2000, "rotation_deg": 0,
+                    }],
+                    "source": {"kind": "editor"},
+                }
+                status, headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/save", {"asset": asset, "step_index": 2},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                check_json(raw, "/api/mask/asset/save")
+                for path in (
+                    "/api/mask/assets",
+                    "/api/mask/asset?id=contract_mask&revision=1",
+                ):
+                    status, headers, raw = self._request(base, cookie, "GET", path)
+                    self.assertEqual(status, 200, raw[:300])
+                    check_json(raw, path)
+                status, headers, raw = self._request(
+                    base, cookie, "GET", "/api/mask/asset/export?id=contract_mask&revision=1&format=json",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                self.assertIn("application/json", headers.get("content-type", ""))
+                self.assertNotIn("ok", json.loads(raw), "Mask Asset JSON export is a raw editable asset")
+                imported_boundary = "tcadmaskassetcontract"
+                imported_body = multipart_file(
+                    imported_boundary, "contract_mask.json", json.dumps(asset).encode("utf-8"),
+                )
+                status, headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/import?step_index=2",
+                    raw_body=imported_body,
+                    content_type=f"multipart/form-data; boundary={imported_boundary}",
+                )
+                self.assertEqual(status, 200, raw[:300])
+                check_json(raw, "/api/mask/asset/import")
+                self._request(
+                    base, cookie, "POST", "/api/step/set",
+                    {"index": 2, "params": {"mask_mode": "Procedural", "mask_asset_id": "", "mask_asset_revision": 0}},
+                )
+                status, headers, raw = self._request(
+                    base, cookie, "POST", "/api/mask/asset/delete", {"id": "contract_mask"},
+                )
+                self.assertEqual(status, 200, raw[:300])
+                check_json(raw, "/api/mask/asset/delete")
+
+                # Legacy image upload remains additive and functional.
                 buf = io.BytesIO()
                 np.save(buf, np.zeros((8, 8), dtype=bool))
                 npy_bytes = buf.getvalue()
@@ -1540,6 +1761,23 @@ class M2ApiDocConsistencyTests(unittest.TestCase):
 
     def test_special_response_contracts_match_runtime_shapes(self):
         rows = self._doc_rows()
+        mask_asset_methods = {
+            "/api/mask/assets": "GET",
+            "/api/mask/asset": "GET",
+            "/api/mask/asset/save": "POST",
+            "/api/mask/asset/import": "POST",
+            "/api/mask/asset/delete": "POST",
+            "/api/mask/asset/export": "GET",
+        }
+        self.assertEqual(
+            {path: rows[path]["method"] for path in mask_asset_methods},
+            mask_asset_methods,
+        )
+        self.assertIn("multipart/form-data", rows["/api/mask/asset/import"]["request"])
+        self.assertIn("binary", rows["/api/mask/asset/export"]["response"])
+        self.assertIn("JSON", rows["/api/mask/asset/export"]["response"])
+        self.assertIn("GDS", rows["/api/mask/asset/export"]["response"])
+
         mask_response = rows["/api/mask/preview"]["response"]
         self.assertIn("image/*", mask_response)
         self.assertIn(".npy", mask_response)
