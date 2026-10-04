@@ -51,6 +51,7 @@ const knownErrorKeys: Record<string, TranslationKey> = {
   invalid_step: 'error.invalidRecipe',
   unknown_parameter: 'error.invalidRecipe',
   invalid_parameter: 'error.invalidRecipe',
+  invalid_draft: 'error.invalidDraft',
   empty_recipe: 'error.invalidRecipe',
   unknown_material_mesh: 'error.missingMesh',
   no_recipe: 'error.invalidRecipe',

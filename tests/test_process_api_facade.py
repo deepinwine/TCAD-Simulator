@@ -78,6 +78,31 @@ class SchemaShapeTests(unittest.TestCase):
         np.testing.assert_array_equal(before, facade._model.grid)
         self.assertEqual(recipe, [step.to_json() for step in facade.recipe()])
 
+    def test_import_invalid_rate_override_preserves_path_and_session(self):
+        facade = make_facade()
+        self.addCleanup(facade._model.parallel.shutdown)
+        recipe = [step.to_json() for step in facade.recipe()]
+        for rate in (True, float("nan"), float("inf"), -1, 20001):
+            with self.subTest(rate=rate), self.assertRaises(ProcessCadError) as error:
+                facade.load_recipe_blob({"steps": [{"name": "Etch", "params": {"rate_override": rate}}]})
+            self.assertEqual(error.exception.code, "invalid_parameter")
+            self.assertEqual(error.exception.parameter_path, "rate_override")
+            self.assertEqual(recipe, [step.to_json() for step in facade.recipe()])
+
+    def test_set_step_invalid_rate_override_preserves_path_and_session(self):
+        facade = make_facade()
+        self.addCleanup(facade._model.parallel.shutdown)
+        index = next(step.index for step in facade.recipe() if step.name == "Etch")
+        recipe = [step.to_json() for step in facade.recipe()]
+        statuses = [step.runtimeStatus for step in facade.recipe()]
+        for rate in (True, float("nan"), float("inf"), -1, 20001):
+            with self.subTest(rate=rate), self.assertRaises(ProcessCadError) as error:
+                facade.set_step(index, params={"rate_override": rate})
+            self.assertEqual(error.exception.code, "invalid_parameter")
+            self.assertEqual(error.exception.parameter_path, "rate_override")
+            self.assertEqual(recipe, [step.to_json() for step in facade.recipe()])
+            self.assertEqual(statuses, [step.runtimeStatus for step in facade.recipe()])
+
     def test_step_view_json_keys(self) -> None:
         step = StepView(
             index=0,

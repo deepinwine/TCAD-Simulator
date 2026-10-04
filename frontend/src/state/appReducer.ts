@@ -90,6 +90,7 @@ export type AppAction =
     error: TcadApiError;
   }
   | {type: 'run/started'; operation: Exclude<ActiveMutation, null>}
+  | {type: 'mutation/blocked'; error: TcadApiError}
   | {type: 'run/succeeded'; payload: RunView; index?: number}
   | {type: 'run/failed'; index?: number; error: TcadApiError}
   | {type: 'run/recovered'; index?: number; init?: InitView; timeline?: TimelineView; error?: TcadApiError}
@@ -267,6 +268,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           },
         },
         parameterErrors: withoutKey(state.parameterErrors, draftKey),
+        globalError: state.globalError?.code === 'invalid_draft' ? null : state.globalError,
       };
     }
     case 'parameter/saveSucceeded': {
@@ -304,6 +306,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           : null,
         globalError: null,
       };
+    case 'mutation/blocked':
+      return {...state, globalError: action.error};
     case 'run/succeeded': {
       const index = action.payload.index ?? action.index;
       return {

@@ -127,9 +127,14 @@ class ProcessCadFacade:
                 {"steps": candidate_blobs, "domain": {"grid_shape": list(shape), "voxel_size_nm": voxel_nm}},
                 self._database, grid_shape=shape, voxel_size_nm=voxel_nm)
         except (ValueError, TypeError, MemoryError, OverflowError) as exc:
-            unsupported = getattr(exc, "code", None) == "unsupported_parameter"
-            raise ProcessCadError(str(exc), code="unsupported_parameter" if unsupported else "invalid_recipe",
-                                  parameter_path=getattr(exc, "parameter", None)) from exc
+            domain_code = getattr(exc, "code", None)
+            parameter = getattr(exc, "parameter", None)
+            structured_rate_error = domain_code == "invalid_parameter" and parameter in {
+                "rate_override", "nominal_rate_nm_s",
+            }
+            code = domain_code if domain_code == "unsupported_parameter" or structured_rate_error else "invalid_recipe"
+            raise ProcessCadError(str(exc), code=code,
+                                  parameter_path=parameter) from exc
 
         self._blobs = candidate_blobs
         self._grid_shape = shape

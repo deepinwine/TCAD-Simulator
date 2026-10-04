@@ -19888,7 +19888,14 @@ class EtchExecutionPlan:
     sidewall_angle_deg: float
     duration_mode: str
     target_depth_nm: Optional[float] = None
-    rate_nm_s: Optional[float] = None
+    effective_rate_nm_s: Optional[float] = None
+    rate_source: Optional[str] = None
+    kernel_override_ang_min: float = 0.0
+
+    @property
+    def rate_nm_s(self) -> Optional[float]:
+        """Compatibility name for the selected effective vertical rate."""
+        return self.effective_rate_nm_s
 
 
 def _etch_sidewall_angle(params: Dict[str, Any], default: float = 88.0) -> float:
@@ -19915,6 +19922,10 @@ def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabas
     nominal = params.get("nominal_rate_nm_s")
     if nominal is not None and (not finite(nominal) or nominal <= 0):
         raise EtchParameterError("nominal_rate_nm_s 必须为有限正数或 None", parameter="nominal_rate_nm_s")
+    override = params.get("rate_override", 0.0)
+    if not finite(override) or override < 0 or override > 20000:
+        raise EtchParameterError("rate_override 必须是 0 至 20000 的有限数值", parameter="rate_override")
+    override = float(override)
     incidence = params.get("incidence_angle_deg", 0.0)
     if not finite(incidence) or incidence != 0:
         raise EtchParameterError("unsupported_parameter: voxel 仅支持 incidence_angle_deg=0", code="unsupported_parameter", parameter="incidence_angle_deg")
@@ -19924,25 +19935,40 @@ def _prepare_etch_execution(params: Dict[str, Any], material_db: MaterialDatabas
         duration = params.get("time", 30.0)
         if not finite(duration) or duration < 0:
             raise EtchParameterError("time 必须是有限非负数", parameter="time")
-        return EtchExecutionPlan(float(duration), float(sidewall), "time")
+        effective_rate = override / 600.0 if override > 0 else None
+        source = "rate_override" if override > 0 else "kernel_model"
+        return EtchExecutionPlan(float(duration), float(sidewall), "time",
+                                 effective_rate_nm_s=effective_rate, rate_source=source,
+                                 kernel_override_ang_min=override)
     if not finite(depth) or depth <= 0:
         raise EtchParameterError("target_depth_nm 必须是有限正数", parameter="target_depth_nm")
-    override = params.get("rate_override")
     name = _resolve_material_name_any(material_db, params.get("material")) or "Silicon"
     material = material_db.material(material_db.id_for(name))
     table_rate = material.etch_rates_nm_min.get(params.get("chemistry", "Dry"))
     # Material records store (vertical_nm_min, lateral_ratio).
     if isinstance(table_rate, (tuple, list)):
         table_rate = table_rate[0] if table_rate else None
-    rates = [nominal, override / 600 if finite(override) else None,
-             table_rate / 60 if finite(table_rate) else None]
-    rate = next((float(value) for value in rates if finite(value) and value > 0), None)
-    if rate is None:
+    if nominal is not None:
+        rate, source = float(nominal), "nominal_rate_nm_s"
+    elif override > 0:
+        rate, source = override / 600.0, "rate_override"
+    elif finite(table_rate) and table_rate > 0:
+        rate, source = float(table_rate) / 60.0, "material_database"
+    else:
         raise EtchParameterError("target_depth_nm 需要可用的有限正刻蚀速率", parameter="nominal_rate_nm_s")
     duration = depth / rate
     if not math.isfinite(duration) or duration <= 0:
         raise EtchParameterError("估计 time_s 必须是有限正数", parameter="target_depth_nm")
-    return EtchExecutionPlan(float(duration), float(sidewall), "estimated", float(depth), rate)
+    kernel_override = rate * 600.0
+    if not math.isfinite(kernel_override):
+        parameter = {"nominal_rate_nm_s": "nominal_rate_nm_s", "rate_override": "rate_override",
+                     "material_database": "material_rate_nm_min"}[source]
+        raise EtchParameterError("有效刻蚀速率超出内核可表示范围", parameter=parameter)
+    return EtchExecutionPlan(
+        time_s=float(duration), sidewall_angle_deg=float(sidewall), duration_mode="estimated",
+        target_depth_nm=float(depth), effective_rate_nm_s=rate, rate_source=source,
+        kernel_override_ang_min=kernel_override,
+    )
 
 
 class EtchStep(ProcessStep):
@@ -20030,7 +20056,7 @@ class EtchStep(ProcessStep):
             self.params["chemistry"],
             plan.time_s,
             self.params["bias"],
-            self.params.get("rate_override", 0.0),
+            plan.kernel_override_ang_min,
             self.params["selectivity"],
             plan.sidewall_angle_deg,
             co_material_selectivity=additional,
@@ -20043,6 +20069,9 @@ class EtchStep(ProcessStep):
         )
         self.last_metrics = {"target_depth_nm": plan.target_depth_nm, "duration_mode": plan.duration_mode,
                              "time_s": plan.time_s, "rate_nm_s": plan.rate_nm_s,
+                             "effective_rate_nm_s": plan.effective_rate_nm_s,
+                             "rate_source": plan.rate_source,
+                             "kernel_override_ang_min": plan.kernel_override_ang_min,
                              "capability": "estimated" if plan.duration_mode == "estimated" else "time"}
         return f"Etch {mat_name}"
 

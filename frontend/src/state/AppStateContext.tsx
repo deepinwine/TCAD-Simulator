@@ -273,14 +273,17 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [api, createController, dispatch, releaseController]);
 
   const beginMutation = useCallback((operation: Exclude<ActiveMutation, null>): boolean => {
-    if (
-      !mountedRef.current
-      || mutationGateRef.current !== null
-      || pendingSaveCountRef.current > 0
-      || hasUnsavedDrafts(stateRef.current)
-    ) {
+    if (!mountedRef.current || mutationGateRef.current !== null || pendingSaveCountRef.current > 0) return false;
+    const invalidDraft = Object.values(stateRef.current.drafts)
+      .find(draft => draft.validation.status === 'invalid');
+    if (invalidDraft !== undefined) {
+      dispatch({type: 'mutation/blocked', error: new TcadApiError('Invalid parameter draft', {
+        status: 400,
+        code: 'invalid_draft',
+      })});
       return false;
     }
+    if (hasUnsavedDrafts(stateRef.current)) return false;
     cancelStandaloneTimeline();
     mutationGateRef.current = operation;
     dispatch({type: 'run/started', operation});

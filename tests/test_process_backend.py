@@ -40,6 +40,11 @@ class EtchPreparationTests(unittest.TestCase):
         restored = self.tcad._webui_deserialize_step(self.tcad._webui_serialize_step(step), self.db)
         self.assertEqual(restored.params["sidewall_angle_deg"], 76)
 
+        override_plan = self.prepare(rate_override=600)
+        self.assertEqual(override_plan.rate_source, "rate_override")
+        self.assertEqual(override_plan.effective_rate_nm_s, 1)
+        self.assertEqual(override_plan.kernel_override_ang_min, 600)
+
     def test_alias_conflicts_fail(self):
         with self.assertRaisesRegex(ValueError, "冲突"):
             self.prepare(sidewall=76, sidewall_angle_deg=88)
@@ -80,10 +85,27 @@ class EtchPreparationTests(unittest.TestCase):
     def test_depth_mode_and_rate_fallbacks(self):
         plan = self.prepare(target_depth_nm=120, nominal_rate_nm_s=4, rate_override=600)
         self.assertEqual((plan.time_s, plan.rate_nm_s, plan.duration_mode), (30, 4, "estimated"))
+        self.assertEqual(plan.effective_rate_nm_s, 4)
+        self.assertEqual((plan.rate_source, plan.kernel_override_ang_min), ("nominal_rate_nm_s", 2400))
         self.assertEqual(self.prepare(target_depth_nm=120, rate_override=2400).time_s, 30)
+        self.assertEqual(self.prepare(target_depth_nm=120, rate_override=2400).rate_source, "rate_override")
         material = self.db.material(self.db.id_for("Silicon"))
         expected = material.etch_rates_nm_min["Dry"][0] / 60
-        self.assertAlmostEqual(self.prepare(target_depth_nm=120).rate_nm_s, expected)
+        database_plan = self.prepare(target_depth_nm=120)
+        self.assertAlmostEqual(database_plan.rate_nm_s, expected)
+        self.assertEqual(database_plan.rate_source, "material_database")
+        self.assertAlmostEqual(database_plan.kernel_override_ang_min, expected * 600)
+
+    def test_rate_override_is_strictly_validated_even_when_not_selected(self):
+        for value in [True, float("nan"), float("inf"), -1, 20001]:
+            with self.subTest(value=value):
+                with self.assertRaises(self.tcad.EtchParameterError) as error:
+                    self.prepare(target_depth_nm=120, nominal_rate_nm_s=4, rate_override=value)
+                self.assertEqual(error.exception.code, "invalid_parameter")
+                self.assertEqual(error.exception.parameter, "rate_override")
+        with self.assertRaises(self.tcad.EtchParameterError) as error:
+            self.prepare(target_depth_nm=120, nominal_rate_nm_s=1e308, rate_override=0)
+        self.assertEqual(error.exception.parameter, "nominal_rate_nm_s")
 
     def test_invalid_depth_rates_angles_and_unsupported_incidence(self):
         for value in [0, -1, float("nan"), float("inf")]:
@@ -105,12 +127,16 @@ class EtchPreparationTests(unittest.TestCase):
         model = self.tcad.ProcessModel(self.db, grid_shape=(8, 8, 8), voxel_size_nm=10, max_workers=1)
         self.addCleanup(model.parallel.shutdown)
         step = self.tcad.EtchStep(self.db)
-        step.params.update(target_depth_nm=120, nominal_rate_nm_s=4, sidewall_angle_deg=80)
+        step.params.update(target_depth_nm=120, nominal_rate_nm_s=4, rate_override=600, sidewall_angle_deg=80)
         with patch.object(model, "etch_material") as etch:
             step.execute(model)
             self.assertEqual(etch.call_args.args[2], 30)
+            self.assertEqual(etch.call_args.args[4], 2400)
             self.assertEqual(etch.call_args.args[6], 80)
-        self.assertEqual(step.last_metrics, {"target_depth_nm": 120, "duration_mode": "estimated", "time_s": 30, "rate_nm_s": 4, "capability": "estimated"})
+        self.assertEqual(step.last_metrics, {"target_depth_nm": 120, "duration_mode": "estimated", "time_s": 30,
+                                             "rate_nm_s": 4, "effective_rate_nm_s": 4,
+                                             "rate_source": "nominal_rate_nm_s",
+                                             "kernel_override_ang_min": 2400, "capability": "estimated"})
         before = model.grid.copy()
         step.params["incidence_angle_deg"] = 10
         with patch.object(model, "etch_material") as etch, self.assertRaises(ValueError):
@@ -266,6 +292,14 @@ class EtchWorkerContractTests(unittest.TestCase):
                     invalid = session.rpc("set_step", {"index": 1, "params": invalid_params}, timeout_s=30)
                     self.assertFalse(invalid["ok"])
                     self.assertEqual(invalid["code"], "invalid_parameter")
+                before_invalid_rates = session.rpc("get_recipe", {}, timeout_s=30)["result"]
+                for rate in (True, float("nan"), float("inf"), -1, 20001):
+                    with self.subTest(rate=rate):
+                        invalid = session.rpc("set_step", {"index": 1, "params": {"rate_override": rate}}, timeout_s=30)
+                        self.assertFalse(invalid["ok"], invalid)
+                        self.assertEqual(invalid.get("code"), "invalid_parameter")
+                        self.assertEqual(invalid.get("parameter_path"), "rate_override")
+                        self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_invalid_rates)
                 imported = session.rpc("recipe_import", {"recipe": {"name": "Legacy Etch", "steps": [
                     {"name": "Etch", "params": {"sidewall": 74, "time": 17, "target_depth_nm": None, "nominal_rate_nm_s": None}}
                 ]}}, timeout_s=30)
@@ -288,6 +322,13 @@ class EtchWorkerContractTests(unittest.TestCase):
                 self.assertFalse(invalid_import["ok"])
                 self.assertEqual(invalid_import.get("code"), "unsupported_parameter")
                 self.assertEqual(invalid_import.get("parameter_path"), "incidence_angle_deg")
+                self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_import)
+                invalid_rate_import = session.rpc("recipe_import", {"recipe": {"steps": [
+                    {"name": "Etch", "params": {"rate_override": True}}
+                ]}}, timeout_s=30)
+                self.assertFalse(invalid_rate_import["ok"])
+                self.assertEqual(invalid_rate_import.get("code"), "invalid_parameter")
+                self.assertEqual(invalid_rate_import.get("parameter_path"), "rate_override")
                 self.assertEqual(session.rpc("get_recipe", {}, timeout_s=30)["result"], before_import)
             finally:
                 manager.stop()

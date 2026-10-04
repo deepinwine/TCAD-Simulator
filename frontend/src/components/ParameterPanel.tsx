@@ -415,6 +415,7 @@ function ParameterField({
         disabled={disabled}
         onFocus={clearTimer}
         onChange={event => changeUnit(event.currentTarget.value as DisplayUnit)}
+        onBlur={flush}
       >{conversion.units.map(unit => <option key={unit} value={unit}>{unit}</option>)}</select>}
       </div>
       {description && <p id={descriptionId} className="parameter-help">{description}</p>}

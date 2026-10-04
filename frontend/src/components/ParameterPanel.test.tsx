@@ -11,6 +11,7 @@ import type {
 } from '../api/types';
 import {AppStateProvider, useAppState} from '../state/AppStateContext';
 import {ParameterPanel} from './ParameterPanel';
+import {ErrorNotice} from './ErrorNotice';
 import {I18nProvider, useI18n} from '../i18n/I18nContext';
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
@@ -106,6 +107,7 @@ function Harness() {
       <output data-testid="statuses">
         {state.recipe.map(item => item.runtimeStatus).join(',')}
       </output>
+      {state.globalError !== null && <ErrorNotice title="操作失败" error={state.globalError} />}
       <ParameterPanel step={selected} collapsed={false} />
     </>
   );
@@ -138,7 +140,7 @@ describe('per-field canonical units', () => {
     expect(screen.getByLabelText('Value')).toHaveValue('1000');
   });
 
-  it('validates integer bounds after conversion and unit changes cancel pending autosave', async () => {
+  it('flushes the canonical draft once after edit, unit switch, unit blur, then permits runAll', async () => {
     vi.useFakeTimers();
     const initial = init([step(0, {params: {value: 1000}, parameterSpecs: [{key: 'value', label: 'Value', type: 'int', minimum: 1, maximum: 2000, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]})]);
     const {api} = await mount(initial);
@@ -150,12 +152,31 @@ describe('per-field canonical units', () => {
     fireEvent.blur(input, {relatedTarget: unit});
     fireEvent.focus(unit);
     fireEvent.change(unit, {target: {value: 'nm'}});
-    await act(async () => vi.advanceTimersByTimeAsync(400));
-    expect(api.setStep).not.toHaveBeenCalled();
-    expect(input).toHaveValue('500.00');
-    fireEvent.blur(input);
+    fireEvent.blur(unit);
     await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTimeAsync(400));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(api.setStep).toHaveBeenCalledTimes(1);
+    expect(input).toHaveValue('500.00');
     expect(api.setStep).toHaveBeenCalledWith(expect.objectContaining({params: {value: 500}}), expect.anything());
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', {name: '开始运行'}));
+      await Promise.resolve();
+    });
+    expect(api.runAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('unit-only changes never save, including unit blur', async () => {
+    const initial = init([step(0, {params: {value: 1000}, parameterSpecs: [{key: 'value', label: 'Value', type: 'float', dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]})]);
+    const {api} = await mount(initial);
+    const unit = screen.getByRole('combobox', {name: 'Value 单位'});
+    fireEvent.change(unit, {target: {value: 'µm'}});
+    fireEvent.blur(unit);
+    await act(async () => Promise.resolve());
+    expect(api.setStep).not.toHaveBeenCalled();
   });
 
   it('does not display unrecognized capability values', async () => {
@@ -380,6 +401,9 @@ describe('ParameterPanel', () => {
     expect(api.setStep).not.toHaveBeenCalled();
     expect(input).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByText('必须小于或等于 500')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name: '开始运行'}));
+    expect(screen.getByText('请先修正无效参数，再运行工艺。')).toBeVisible();
+    expect(api.runAll).not.toHaveBeenCalled();
     unmount();
   });
 
