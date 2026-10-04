@@ -464,6 +464,11 @@ function parseMaskAssetShape(value: unknown, path: string): MaskAssetShape {
     if (pointsNm.length < 4) {
       throw new ApiContractError(`${path}.points_nm`, 'at least 4 finite points');
     }
+    const first = pointsNm[0];
+    const last = pointsNm[pointsNm.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) {
+      throw new ApiContractError(`${path}.points_nm`, 'explicitly closed polygon');
+    }
     return {id, layerId, type, pointsNm};
   }
   throw new ApiContractError(`${path}.type`, 'rectangle, circle, hole, line, or polygon');
@@ -493,6 +498,26 @@ function parseMaskAsset(value: unknown, path: string): MaskAsset {
     source: requireRecord(source.source, `${path}.source`),
   };
   const sha256 = optionalString(source.sha256, `${path}.sha256`);
+  if (parsed.boundsNm[2] <= parsed.boundsNm[0] || parsed.boundsNm[3] <= parsed.boundsNm[1]) {
+    throw new ApiContractError(`${path}.bounds_nm`, 'positive-area bounds');
+  }
+  const layerIds = new Set<string>();
+  parsed.layers.forEach((layer, index) => {
+    if (layerIds.has(layer.id)) {
+      throw new ApiContractError(`${path}.layers[${index}].id`, 'unique layer id');
+    }
+    layerIds.add(layer.id);
+  });
+  const shapeIds = new Set<string>();
+  parsed.shapes.forEach((shape, index) => {
+    if (shapeIds.has(shape.id)) {
+      throw new ApiContractError(`${path}.shapes[${index}].id`, 'unique shape id');
+    }
+    shapeIds.add(shape.id);
+    if (!layerIds.has(shape.layerId)) {
+      throw new ApiContractError(`${path}.shapes[${index}].layer_id`, 'existing layer id');
+    }
+  });
   if (sha256 !== undefined) parsed.sha256 = sha256;
   return parsed;
 }
@@ -517,6 +542,13 @@ export function parseMaskAssetListEnvelope(payload: unknown): MaskAssetSummary[]
 
 export function parseMaskAssetEnvelope(payload: unknown): MaskAsset {
   return parseMaskAsset(requireOkResult(payload), 'result');
+}
+
+export function parseMaskAssetDeleteEnvelope(payload: unknown): void {
+  const result = requireOkResult(payload);
+  if (result.deleted !== true) {
+    throw new ApiContractError('result.deleted', 'true');
+  }
 }
 
 export function parseMaskAssetApplyEnvelope(payload: unknown, index: number): MaskAssetApplyView {

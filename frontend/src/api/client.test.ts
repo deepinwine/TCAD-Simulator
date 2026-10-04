@@ -468,6 +468,18 @@ describe('TcadApi endpoint methods', () => {
 });
 
 describe('Mask Asset client', () => {
+  it.each([
+    [null, 'result'],
+    [[], 'result'],
+    [{deleted: false}, 'result.deleted'],
+    [{}, 'result.deleted'],
+  ])('rejects malformed delete success results with a contract path', async (result, path) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ok: true, result})));
+    const error = await createTcadApi().deleteMaskAsset('mask_metal1').catch(error => error);
+    expect(error).toBeInstanceOf(ApiContractError);
+    expect(error).toMatchObject({path});
+  });
+
   const wireAsset = {
     version: 1, id: 'mask_metal1', revision: 1, name: 'Metal-1', coordinate_unit: 'nm',
     bounds_nm: [0, 0, 100, 100],

@@ -3,6 +3,7 @@ import {
   parseHistoryEnvelope,
   parseInitEnvelope,
   parseMaskAssetApplyEnvelope,
+  parseMaskAssetDeleteEnvelope,
   parseMaskAssetEnvelope,
   parseMaskAssetListEnvelope,
   parseRecipeLoadEnvelope,
@@ -541,12 +542,7 @@ export function createTcadApi(): TcadApi {
       return apiPostJson(
         '/api/mask/asset/delete',
         {id: validated},
-        payload => {
-          const source = payload as {ok?: unknown; result?: {deleted?: unknown}};
-          if (source.ok !== true || source.result?.deleted !== true) {
-            throw new ApiContractError('result.deleted', 'true');
-          }
-        },
+        parseMaskAssetDeleteEnvelope,
         signal,
       );
     },
