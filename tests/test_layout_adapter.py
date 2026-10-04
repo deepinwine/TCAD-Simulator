@@ -201,6 +201,42 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "budget"):
             list(_iter_polygons(lib))
 
+    def test_high_precision_robust_path_rejected_before_polygon_allocation(self):
+        from layout.adapter import _iter_polygons
+        from unittest.mock import Mock
+        path = gdstk.RobustPath((0, 0), 1, tolerance=1e-9, max_evals=1_000_000)
+        path.arc(100, 0, np.pi)
+        observed_path = Mock(wraps=path)
+        for name in ("size", "num_paths", "tolerance", "max_evals", "repetition"):
+            setattr(observed_path, name, getattr(path, name))
+        cell = Mock(polygons=[], paths=[observed_path], references=[])
+        library = Mock()
+        library.top_level.return_value = [cell]
+        with self.assertRaisesRegex(ValueError, "budget"):
+            list(_iter_polygons(library))
+        observed_path.to_polygons.assert_not_called()
+        self.assertEqual(path.tolerance, 1e-9)
+        self.assertEqual(path.max_evals, 1_000_000)
+
+    def test_native_file_paths_pass_preallocation_budget(self):
+        lib = gdstk.Library()
+        cell = lib.new_cell("PATH")
+        cell.add(gdstk.FlexPath([(0, 0), (2, 0)], 1, simple_path=True,
+                               layer=9, datatype=2))
+        for suffix in ("gds", "oas"):
+            with self.subTest(suffix=suffix):
+                target = self.tmp / ("native-path." + suffix)
+                if suffix == "gds":
+                    lib.write_gds(target)
+                    raw = gdstk.read_gds(target)
+                else:
+                    lib.write_oas(target)
+                    raw = gdstk.read_oas(target)
+                self.assertEqual(len(raw.cells[0].paths), 1)
+                loaded = self.adapter.read(target)
+                self.assertEqual(loaded.layers(), {(9, 2)})
+                np.testing.assert_allclose(loaded.bounds, (0, -500, 2000, 500))
+
     def test_boolean_output_is_normalized(self) -> None:
         a = geometry_of(rect(0, 0, 100, 100))
         b = geometry_of(rect(200, 200, 300, 300))

@@ -253,6 +253,7 @@ def _hierarchy_budget(cell, cache, active):
     for path in cell.paths:
         copies = max(1, path.repetition.size)
         _check_expansion_budget([counts[0] + copies * path.num_paths, counts[1], counts[2]])
+        _check_path_budget(path, copies, counts)
         # to_polygons does not expand repetitions; count them before flattening.
         for polygon in path.to_polygons():
             counts[0] += copies
@@ -268,3 +269,37 @@ def _hierarchy_budget(cell, cache, active):
     active.remove(key)
     cache[key] = counts
     return counts
+
+
+def _check_path_budget(path, copies, counts):
+    """Bound native path discretization before allocating polygon contours.
+
+    File readers produce linear FlexPaths at the library's default tolerance.
+    In-memory parametric paths must also fit a conservative evaluation budget;
+    reject excessive precision rather than silently changing their geometry.
+    """
+    sections = max(1, path.size)
+    multiplier = copies * path.num_paths
+    tolerance = float(path.tolerance)
+    if not np.isfinite(tolerance) or tolerance < 1e-6:
+        raise ValueError("Layout path precision exceeds expansion budget")
+    if any(callable(value) for value in path.ends):
+        raise ValueError("Custom path callbacks exceed expansion budget")
+    if hasattr(path, "max_evals"):
+        if any(value in ("round", "smooth") for value in path.ends):
+            raise ValueError("Parametric curved path caps exceed expansion budget")
+        # Adaptive subdivision may round max_evals up to the next power of two;
+        # both contour sides together require at most 4 * max_evals per section.
+        estimate = 4 * max(1, path.max_evals) * sections * multiplier
+    else:
+        estimate = 4 * sections * multiplier
+        _check_expansion_budget([counts[0], counts[1] + estimate, counts[2]])
+        if any(callable(value) for value in path.ends + path.joins):
+            raise ValueError("Custom path callbacks exceed expansion budget")
+        curved = any(value in ("round", "smooth") for value in path.ends + path.joins)
+        radii = path.bend_radius
+        if curved or any(radii):
+            radius = max(float(np.max(path.widths(), initial=0)), *radii)
+            # A generous bound for circular caps, joins and bends per spine point.
+            estimate *= max(1, int(np.ceil(8 * np.sqrt(radius / tolerance))))
+    _check_expansion_budget([counts[0], counts[1] + estimate, counts[2]])
