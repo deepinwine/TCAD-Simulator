@@ -1,6 +1,6 @@
 # 双语工艺编辑与 Mask Workbench 设计
 
-日期：2026-09-15  
+日期：2026-09-15
 状态：用户已批准，进入实现
 目标分支：`codex/i18n-mask-workbench`
 
