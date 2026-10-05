@@ -267,3 +267,30 @@ fork PR #1，已立即关闭。
 
 - Next: 在任意图形 GeometryScene→ViennaPS 无损导入和校准数据完成前，保持 WebUI
   Fast/voxel 执行边界；随后继续 Task 8，不提前弃用旧 WebUI（ADR-012）。
+
+## 双语与 Mask Workbench（2026-10-05，Task 4）
+
+`codex/i18n-mask-workbench` 已交付中英文界面、逐字段显示单位、版本化 Mask Asset
+与三栏二维版图工作台。Recipe 和版图坐标始终保存 canonical 值（nm、s、degree、nm/s）；
+切换语言保持工艺参数草稿、版图历史和 Three.js 状态。
+
+工作台支持矩形、圆、孔、有限宽线、闭合多边形、选择及多选移动、精确尺寸与旋转编辑、
+GDS layer/datatype、图层显隐、网格吸附（0 关闭）和最多 100 项 Undo/Redo。
+指针绘图和移动只在 pointerup 提交一次历史；未完成绘图需要确认放弃。
+覆盖层保留 StudioShell 和 ThreeViewer 挂载，自动化测试验证相机视角保持、mount 一次、
+dispose 为 0，关闭后焦点回到编辑入口。
+
+「保存并应用」消费服务端权威步骤及状态并刷新预览，失败保留原 revision 和草稿。
+「导入并应用」成功后立即绑定工艺步骤并同步 revision；返回不会撤销已完成的导入。
+导出 JSON/GDS 使用明确的已保存版本；未保存草稿需先保存。
+gdstk 缺失时 GDS 返回 `dependency_missing`，JSON 和旧图片 Mask 上传、预览路径继续可用。
+Python HTTP 端到端测试使用 32³ session 验证左右开口造成曝光、显影和刻蚀后的实际结构差异、
+非空 STL、权威 hash/revision 及无效候选失败原子性。
+
+Fast/voxel 刻蚀能力保持 ADR-025：目标深度为 `estimated`、侧壁角为 `approximate`、
+非零入射角为 `unsupported`，不得静默忽略不支持的参数。
+
+Task 4 前端验证：`npm test -- --run`（24 个文件、375 项通过）、`npm run typecheck`、
+`npm run build` 均退出 0。jsdom 保留原有 canvas/navigation 提示，Vite 保留 Three.js
+包体积提示；没有新增未处理 Promise 或 React act 警告。
+Python 全量最终复验及独立质量审查在集成交付时记录；本提交不合并或推送。

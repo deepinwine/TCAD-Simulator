@@ -11,7 +11,7 @@ import {
 } from 'react';
 import {TcadApiError} from '../api/client';
 import type {
-  StepView,
+  StepView, MaskAssetApplyView,
   RecipeLoadView,RunView, TcadApi} from '../api/types';
 import {
   type ActiveMutation,
@@ -55,6 +55,8 @@ export interface AppStateActions {
   moveStep(direction: 'up' | 'down'): Promise<void>;
   renameStep(instanceName: string): Promise<void>;
   uploadMask(file: File): Promise<void>;
+  applyMaskAsset(payload: MaskAssetApplyView): void;
+  reportMaskError(error: unknown): void;
 }
 
 export interface AppStateContextValue {
@@ -744,6 +746,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [bootstrap]);
 
   const actions = useMemo<AppStateActions>(() => ({
+    applyMaskAsset: payload => dispatch({type: 'mask/assetApplied', payload}),
+    reportMaskError: error => dispatch({type: 'mutation/blocked', error: normalizeError(error)}),
     updateDraftDisplay,
     bootstrap,
     selectStep,
@@ -768,6 +772,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     renameStep: renameStepAction,
     uploadMask: uploadMaskAction,
   }), [
+    dispatch,
     addStepAction,
     bootstrap,
     duplicateStepAction,

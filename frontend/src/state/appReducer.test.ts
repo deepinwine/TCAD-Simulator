@@ -46,6 +46,14 @@ function readyState() {
 }
 
 describe('appReducer bootstrap 与本地编辑', () => {
+  it('mask asset applied updates authoritative statuses and preview without changing selection, timeline or drafts', () => {
+    const before = {...readyState(), timeline, selectedStepIndex: 1, drafts: {'1:dose': {value: 123, sequence: 1, validation: {status: 'valid' as const}}}};
+    const authoritative = step(1, {params: {mask_asset_revision: 4}});
+    const after = appReducer(before, {type: 'mask/assetApplied', payload: {step: authoritative, statuses: ['done', 'dirty'], warnings: []}});
+    expect(after.recipe).toEqual([{...before.recipe[0], runtimeStatus: 'done'}, {...authoritative, runtimeStatus: 'dirty'}]);
+    expect(after.previewGeneration).toBe(before.previewGeneration + 1);
+    expect(after.selectedStepIndex).toBe(1); expect(after.timeline).toBe(timeline); expect(after.drafts).toBe(before.drafts);
+  });
   it('bootstrap 成功后选择首步、进入 ready 并请求首轮预览', () => {
     const state = appReducer(initialAppState, {type: 'bootstrap/succeeded', payload: initView});
 

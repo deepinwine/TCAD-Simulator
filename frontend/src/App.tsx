@@ -1,6 +1,7 @@
-import {useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import {createTcadApi} from './api/client';
-import type {TcadApi} from './api/types';
+import type {MaskAsset, TcadApi} from './api/types';
+import {MaskWorkbench} from './mask/MaskWorkbench';
 import {ErrorNotice} from './components/ErrorNotice';
 import {ParameterPanel} from './components/ParameterPanel';
 import {ProcessFlowPane} from './components/ProcessFlowPane';
@@ -22,6 +23,13 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
   const {state, actions} = useAppState();
   const {t} = useI18n();
   const [parametersCollapsed, setParametersCollapsed] = useState(false);
+  const [workbench, setWorkbench] = useState<{
+    asset: MaskAsset;
+    stepIndex: number;
+  } | null>(null);
+  const [openingMask, setOpeningMask] = useState(false);
+  const maskController = useRef<AbortController | null>(null);
+  useEffect(() => () => maskController.current?.abort(), []);
   const selectedStep = useMemo(
     () => state.recipe.find(step => step.index === state.selectedStepIndex) ?? null,
     [state.recipe, state.selectedStepIndex],
@@ -57,8 +65,46 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
     ? 'studio-workspace parameters-collapsed'
     : 'studio-workspace';
 
+  const openMask = async () => {
+    if (selectedStep === null || openingMask || state.activeMutation !== null)
+      return;
+    const controller = new AbortController();
+    maskController.current = controller;
+    setOpeningMask(true);
+    try {
+      const id = selectedStep.params.mask_asset_id;
+      const revision = selectedStep.params.mask_asset_revision;
+      const sizeX =
+        (state.model?.gridShape[0] ?? 200) * (state.model?.voxelSizeNm ?? 10);
+      const sizeY =
+        (state.model?.gridShape[1] ?? 200) * (state.model?.voxelSizeNm ?? 10);
+      const asset: MaskAsset =
+        typeof id === "string" && typeof revision === "number"
+          ? await api.getMaskAsset(id, revision, controller.signal)
+          : {
+              version: 1,
+              id: `mask_${crypto.randomUUID()}`,
+              revision: 0,
+              name: selectedStep.instanceName,
+              coordinateUnit: "nm",
+              boundsNm: [0, 0, sizeX, sizeY],
+              layers: [
+                { id: "1/0", layer: 1, datatype: 0, name: "M1", visible: true },
+              ],
+              shapes: [],
+              source: { kind: "editor" },
+            };
+      if (!controller.signal.aborted)
+        setWorkbench({ asset, stepIndex: selectedStep.index });
+    } catch (error) {
+      if (!controller.signal.aborted) actions.reportMaskError(error);
+    } finally {
+      if (!controller.signal.aborted) setOpeningMask(false);
+    }
+  };
+
   return (
-    <main className="studio-shell">
+    <><main className="studio-shell" inert={workbench !== null || openingMask ? true : undefined}>
       <Toolbar
         parametersCollapsed={parametersCollapsed}
         onToggleParameters={() => setParametersCollapsed(value => !value)}
@@ -92,11 +138,12 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
             <StepStructureBar />
           </ProcessFlowPane>
         </div>
-        <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} />
+        <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} onEditMask={() => void openMask()} />
         <ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />
       </div>
       <TimelineBar />
     </main>
+    {workbench !== null && <MaskWorkbench api={api} initialAsset={workbench.asset} stepIndex={workbench.stepIndex} onApply={actions.applyMaskAsset} onError={actions.reportMaskError} onClose={() => setWorkbench(null)} />}</>
   );
 }
 

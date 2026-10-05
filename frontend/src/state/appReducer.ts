@@ -105,6 +105,7 @@ export type AppAction =
   | {type: 'recipe/stepsReplaced'; recipe: StepView[]}
   | {type: 'step/renamed'; index: number; step: StepView}
   | {type: 'mask/uploaded'; payload: SetStepView}
+  | {type: 'mask/assetApplied'; payload: SetStepView}
   | {type: 'reconcile/succeeded'; payload: TimelineView}
   | {type: 'mutation/finished'};
 
@@ -466,6 +467,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         globalError: null,
       };
+    case 'mask/assetApplied':
+      return {...state, recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses), globalError: null, previewGeneration: state.previewGeneration + 1};
     case 'history/applied':
       // undo/redo 有意使步骤缓存失效（ADR-008）：几何权威是 manifest.rev，
       // 这里只 bump previewGeneration 让 Viewer 重拉。

@@ -10,10 +10,16 @@ export function MaskControl({
   stepIndex,
   maskName,
   disabled,
+  onEdit,
+  assetId,
+  assetRevision,
 }: {
   stepIndex: number;
   maskName: string | undefined;
   disabled: boolean;
+  onEdit?(): void;
+  assetId?: string;
+  assetRevision?: number;
 }) {
   const {actions} = useAppState();
   const {t} = useI18n();
@@ -27,6 +33,8 @@ export function MaskControl({
       <div className="mask-current">
         {t('mask.current')}<strong>{hasMask ? maskName : t('mask.unset')}</strong>
       </div>
+      {assetId !== undefined && <p>{assetId} · {t('workbench.revision', {revision: assetRevision ?? 0})}</p>}
+      {onEdit !== undefined && <button type="button" disabled={disabled} onClick={onEdit}>{t('workbench.edit')}</button>}
       <button
         type="button"
         disabled={disabled}

@@ -15,6 +15,13 @@ interface ErrorNoticeProps {
 }
 
 const knownErrorKeys: Record<string, TranslationKey> = {
+  invalid_mask_asset: 'error.invalidMask',
+  invalid_coordinate_unit: 'error.invalidMask',
+  invalid_mask_asset_reference: 'workbench.notFound',
+  mask_asset_not_found: 'workbench.notFound',
+  mask_asset_out_of_bounds: 'workbench.outOfBounds',
+  mask_asset_budget_exceeded: 'workbench.budget',
+  unsupported_mask_asset_version: 'error.invalidMask',
   network_error: 'error.network',
   invalid_json: 'error.invalidJson',
   unexpected_json_response: 'error.unexpectedJson',

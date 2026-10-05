@@ -93,6 +93,28 @@ function stubViewerRuntime() {
 }
 
 describe('App shell', () => {
+  it('opens and saves a Mask Workbench overlay while keeping viewer runtime mounted and selection', async () => {
+    const exposure = step(0, {name: 'Mask Exposure', params: {mask_mode: 'Asset', mask_asset_id: 'mask_one', mask_asset_revision: 1}});
+    const asset = {version: 1 as const, id: 'mask_one', revision: 1, name: 'M1', coordinateUnit: 'nm' as const, boundsNm: [0, 0, 2000, 2000] as const, layers: [{id: '1/0', layer: 1, datatype: 0, name: 'M1', visible: true}], shapes: [], source: {kind: 'editor'}};
+    const api = apiStub({init: vi.fn(async () => initView([exposure])), getMaskAsset: vi.fn(async () => asset), saveAndApplyMaskAsset: vi.fn(async request => ({asset: {...request.asset, revision: 2}, step: {...exposure, params: {...exposure.params, mask_asset_revision: 2}}, statuses: ['dirty'] as RuntimeStatus[], warnings: []}))});
+    const camera = {view: 'iso'};
+    const runtime = {...stubViewerRuntime(), dispose: vi.fn(), mount: vi.fn(), setStandardView: vi.fn((view: string) => {camera.view = view;})};
+    render(<App api={api} viewerRuntimeFactory={() => runtime} />);
+    await screen.findByRole('button', {name: '编辑版图'});
+    fireEvent.click(screen.getByRole('button', {name: '顶视图'}));
+    const opener = screen.getByRole('button', {name: '编辑版图'}); opener.focus();
+    fireEvent.click(opener);
+    await screen.findByRole('dialog', {name: '版图工作台'});
+    expect(document.querySelector('.studio-shell')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('资产名称'), {target: {value: 'New layout'}});
+    fireEvent.click(screen.getByRole('button', {name: '保存并应用'}));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(runtime.dispose).not.toHaveBeenCalled(); expect(runtime.mount).toHaveBeenCalledOnce();
+    expect(camera.view).toBe('top'); expect(runtime.setStandardView).toHaveBeenCalledOnce();
+    expect(opener).toHaveFocus();
+    expect(api.getMaskAsset).toHaveBeenCalledWith('mask_one', 1, expect.any(AbortSignal));
+    expect(screen.getByText('mask_one · revision 2')).toBeInTheDocument();
+  });
   it('bootstrap 后同时显示三栏与 Timeline', async () => {
     render(<App api={apiStub()} />);
 

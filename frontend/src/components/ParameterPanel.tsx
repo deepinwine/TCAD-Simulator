@@ -14,6 +14,7 @@ import {canonicalUnits, toCanonical, fromCanonical, formatDisplayValue, type Dim
 interface ParameterPanelProps {
   step: StepView | null;
   collapsed: boolean;
+  onEditMask?(): void;
 }
 
 interface ParameterFieldProps {
@@ -435,7 +436,7 @@ function ParameterField({
   );
 }
 
-export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
+export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProps) {
   const {state} = useAppState();
   const {t} = useI18n();
   const disabled = state.phase === 'running' || state.activeMutation !== null;
@@ -505,6 +506,9 @@ export function ParameterPanel({step, collapsed}: ParameterPanelProps) {
               stepIndex={step.index}
               maskName={typeof step.params.mask_name === 'string' ? step.params.mask_name : undefined}
               disabled={disabled}
+              onEdit={onEditMask}
+              assetId={typeof step.params.mask_asset_id === 'string' ? step.params.mask_asset_id : undefined}
+              assetRevision={typeof step.params.mask_asset_revision === 'number' ? step.params.mask_asset_revision : undefined}
             />
           )}
         </div>
