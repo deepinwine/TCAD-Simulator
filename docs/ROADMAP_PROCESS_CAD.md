@@ -290,7 +290,7 @@ Python HTTP 端到端测试使用 32³ session 验证左右开口造成曝光、
 Fast/voxel 刻蚀能力保持 ADR-025：目标深度为 `estimated`、侧壁角为 `approximate`、
 非零入射角为 `unsupported`，不得静默忽略不支持的参数。
 
-Task 4 前端验证：`npm test -- --run`（24 个文件、375 项通过）、`npm run typecheck`、
+Task 4 前端验证：`npm test -- --run`（24 个文件、379 项通过）、`npm run typecheck`、
 `npm run build` 均退出 0。jsdom 保留原有 canvas/navigation 提示，Vite 保留 Three.js
 包体积提示；没有新增未处理 Promise 或 React act 警告。
 Python 全量最终复验及独立质量审查在集成交付时记录；本提交不合并或推送。

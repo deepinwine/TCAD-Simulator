@@ -27,6 +27,23 @@ function Harness({initial}: {initial: MaskEditorState}) {
 }
 const current = () => JSON.parse(screen.getByTestId('state').textContent!);
 describe('MaskCanvas', () => {
+  it('does not start a transient drawing gesture on a hidden active layer', () => {
+    render(
+      <Harness
+        initial={{
+          ...createMaskEditorState({...asset, layers: [{...asset.layers[0], visible: false}]}),
+          tool: 'rectangle',
+        }}
+      />,
+    );
+    const canvas = screen.getByTestId('mask-canvas');
+    fireEvent.pointerDown(canvas, {clientX: 10, clientY: 10});
+    fireEvent.pointerMove(canvas, {clientX: 50, clientY: 50});
+    expect(canvas.querySelector('g[opacity]')).toBeNull();
+    fireEvent.pointerUp(canvas, {clientX: 50, clientY: 50});
+    expect(current().asset.shapes).toEqual([]);
+    expect(current().past).toEqual([]);
+  });
   it('commits one history item on pointerup and selects, clears and deletes', () => {
     render(<Harness initial={{...createMaskEditorState(asset), tool: 'rectangle'}} />);
     const canvas = screen.getByTestId('mask-canvas');

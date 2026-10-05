@@ -1,5 +1,14 @@
 import type {MaskAsset, MaskAssetShape} from '../api/types';
 import type {MaskEditorAction, MaskEditorState} from './types';
+function visible(asset: MaskAsset, shape: MaskAssetShape): boolean {
+  return asset.layers.some((layer) => layer.id === shape.layerId && layer.visible);
+}
+function visibleSelection(state: MaskEditorState): MaskEditorState {
+  const selection = state.selection.filter((id) =>
+    state.asset.shapes.some((shape) => shape.id === id && visible(state.asset, shape)),
+  );
+  return selection.length === state.selection.length ? state : {...state, selection};
+}
 export function createMaskEditorState(asset: MaskAsset): MaskEditorState {
   return {
     asset,
@@ -50,16 +59,17 @@ export function maskEditorReducer(
   state: MaskEditorState,
   action: MaskEditorAction,
 ): MaskEditorState {
+  state = visibleSelection(state);
   const commit = (asset: MaskAsset): MaskEditorState =>
     JSON.stringify(asset) === JSON.stringify(state.asset)
       ? state
-      : {
+      : visibleSelection({
           ...state,
           asset,
           past: [...state.past, state.asset].slice(-100),
           future: [],
           dirty: true,
-        };
+        });
   switch (action.type) {
     case 'setTool':
       return {...state, tool: action.tool};
@@ -67,7 +77,7 @@ export function maskEditorReducer(
       return {
         ...state,
         selection: [...new Set(action.selection)].filter((id) =>
-          state.asset.shapes.some((shape) => shape.id === id),
+          state.asset.shapes.some((shape) => shape.id === id && visible(state.asset, shape)),
         ),
       };
     case 'setSnap':
@@ -114,6 +124,10 @@ export function maskEditorReducer(
             activeLayerId: action.layer.id,
           };
     case 'patchShape':
+      if (
+        !state.asset.shapes.some((shape) => shape.id === action.id && visible(state.asset, shape))
+      )
+        return state;
       return commit({
         ...state.asset,
         shapes: state.asset.shapes.map((shape) =>
@@ -122,7 +136,7 @@ export function maskEditorReducer(
       });
     case 'addShape': {
       if (
-        !state.asset.layers.some((layer) => layer.id === state.activeLayerId) ||
+        !state.asset.layers.some((layer) => layer.id === state.activeLayerId && layer.visible) ||
         state.asset.shapes.some((shape) => shape.id === action.shape.id)
       )
         return state;

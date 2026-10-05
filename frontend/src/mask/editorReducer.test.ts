@@ -13,6 +13,61 @@ export const asset: MaskAsset = {
   source: {kind: 'manual'},
 };
 describe('mask reducer', () => {
+  it('moving a selected shape to a hidden layer clears selection and blocks stale patch/delete/selection', () => {
+    const shape = {
+      id: 'r',
+      type: 'rectangle' as const,
+      layerId: '1',
+      xNm: 10,
+      yNm: 10,
+      widthNm: 20,
+      heightNm: 20,
+      rotationDeg: 0,
+    };
+    const initial = {
+      ...createMaskEditorState({
+        ...asset,
+        shapes: [shape],
+        layers: [
+          ...asset.layers,
+          {id: 'hidden', layer: 2, datatype: 0, name: 'Hidden', visible: false},
+        ],
+      }),
+      selection: ['r'],
+    };
+    const moved = reduce(initial, {type: 'patchShape', id: 'r', patch: {layerId: 'hidden'}});
+    expect(moved.selection).toEqual([]);
+    const selected = reduce(moved, {type: 'setSelection', selection: ['r']});
+    expect(selected.selection).toEqual([]);
+    const stale = {...moved, selection: ['r']};
+    expect(reduce(stale, {type: 'patchShape', id: 'r', patch: {widthNm: 99}}).asset).toEqual(
+      moved.asset,
+    );
+    expect(reduce(stale, {type: 'deleteSelection'}).asset).toEqual(moved.asset);
+    expect(reduce(stale, {type: 'moveSelection', dxNm: 20, dyNm: 20}).asset).toEqual(moved.asset);
+  });
+  it('rejects drawing a shape in a hidden active layer', () => {
+    const initial = createMaskEditorState({
+      ...asset,
+      layers: [{...asset.layers[0], visible: false}],
+    });
+    const after = reduce(initial, {
+      type: 'addShape',
+      shape: {
+        id: 'r',
+        type: 'rectangle',
+        layerId: '1',
+        xNm: 10,
+        yNm: 10,
+        widthNm: 20,
+        heightNm: 20,
+        rotationDeg: 0,
+      },
+    });
+    expect(after.asset.shapes).toEqual([]);
+    expect(after.past).toEqual([]);
+    expect(after.selection).toEqual([]);
+  });
   it('keeps the active layer valid when undo removes a newly added layer', () => {
     const added = reduce(createMaskEditorState(asset), {
       type: 'addLayer',

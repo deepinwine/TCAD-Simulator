@@ -66,6 +66,18 @@ function setup(overrides: Partial<TcadApi> = {}) {
   return {api, onApply, onClose};
 }
 describe('Mask Workbench session', () => {
+  it('removes the Inspector selection when a shape is moved into a hidden layer', () => {
+    setup();
+    fireEvent.click(screen.getByRole('button', {name: '新增图层'}));
+    fireEvent.click(screen.getByLabelText('可见 L2'));
+    fireEvent.pointerDown(screen.getByTestId('mask-shape-rect'), {clientX: 100, clientY: 100});
+    fireEvent.pointerUp(screen.getByTestId('mask-canvas'), {clientX: 100, clientY: 100});
+    const hiddenId = (screen.getByLabelText('活动图层') as HTMLSelectElement).value;
+    fireEvent.change(screen.getByLabelText('图形所属图层'), {target: {value: hiddenId}});
+    expect(screen.queryByLabelText('宽度 (nm)')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: '删除所选'})).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mask-shape-rect')).not.toBeInTheDocument();
+  });
   it('allows zero snapping for precise drawing', () => {
     setup();
     fireEvent.change(screen.getByLabelText('吸附网格 (nm)'), {target: {value: '10'}});

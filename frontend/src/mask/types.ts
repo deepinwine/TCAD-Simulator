@@ -23,7 +23,7 @@ export type ShapePatch = Partial<MaskAssetShape> & {
   pointsNm?: readonly (readonly [number, number])[];
 };
 export type MaskEditorAction =
-  | {type: 'patchAsset'; patch: Partial<MaskAsset>}
+  | {type: 'patchAsset'; patch: Partial<Pick<MaskAsset, 'name' | 'boundsNm'>>}
   | {type: 'patchShape'; id: string; patch: ShapePatch}
   | {type: 'setTool'; tool: MaskTool}
   | {type: 'setSelection'; selection: readonly string[]}

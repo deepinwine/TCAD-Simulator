@@ -23,10 +23,13 @@ export function MaskCanvas({
     moving: boolean;
   } | null>(null);
   const [vertices, setVertices] = useState<Point[]>([]);
+  const activeLayerVisible = state.asset.layers.some(
+    (layer) => layer.id === state.activeLayerId && layer.visible,
+  );
   useEffect(() => {
     setGesture(null);
     setVertices([]);
-  }, [state.tool, state.asset.id, state.asset.revision]);
+  }, [state.tool, state.asset.id, state.asset.revision, state.activeLayerId, activeLayerVisible]);
   useEffect(() => {
     onTransientChanged?.(gesture !== null || vertices.length > 0);
   }, [gesture, vertices.length, onTransientChanged]);
@@ -136,6 +139,7 @@ export function MaskCanvas({
         }
       }}
       onPointerDown={(event) => {
+        if (state.tool !== 'select' && !activeLayerVisible) return;
         svg.current?.focus();
         const p = point(event);
         const target = (event.target as Element).closest('[data-shape-id]');
