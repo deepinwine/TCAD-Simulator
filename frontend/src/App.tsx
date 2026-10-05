@@ -79,7 +79,9 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       const sizeY =
         (state.model?.gridShape[1] ?? 200) * (state.model?.voxelSizeNm ?? 10);
       const asset: MaskAsset =
-        typeof id === "string" && typeof revision === "number"
+        selectedStep.params.mask_mode === "Asset" &&
+        typeof id === "string" && id.trim() !== "" &&
+        typeof revision === "number" && Number.isInteger(revision) && revision > 0
           ? await api.getMaskAsset(id, revision, controller.signal)
           : {
               version: 1,

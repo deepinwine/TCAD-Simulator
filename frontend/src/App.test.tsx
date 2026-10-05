@@ -93,6 +93,19 @@ function stubViewerRuntime() {
 }
 
 describe('App shell', () => {
+  it.each([
+    {mask_mode: 'Procedural', mask_asset_id: '', mask_asset_revision: 0},
+    {mask_mode: 'Custom', mask_asset_id: 'previous_asset', mask_asset_revision: 1},
+  ])('opens a new workbench for an Exposure without an active asset binding: $mask_mode', async params => {
+    const exposure = step(0, {name: 'Mask Exposure', params});
+    const api = apiStub({init: vi.fn(async () => initView([exposure]))});
+    render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    fireEvent.click(await screen.findByRole('button', {name: '编辑版图'}));
+    await screen.findByRole('dialog', {name: '版图工作台'});
+    expect(api.getMaskAsset).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('资产名称')).toHaveValue(exposure.instanceName);
+    expect(screen.getByLabelText('边界 X 最大值 (nm)')).toHaveValue(80);
+  });
   it('opens and saves a Mask Workbench overlay while keeping viewer runtime mounted and selection', async () => {
     const exposure = step(0, {name: 'Mask Exposure', params: {mask_mode: 'Asset', mask_asset_id: 'mask_one', mask_asset_revision: 1}});
     const asset = {version: 1 as const, id: 'mask_one', revision: 1, name: 'M1', coordinateUnit: 'nm' as const, boundsNm: [0, 0, 2000, 2000] as const, layers: [{id: '1/0', layer: 1, datatype: 0, name: 'M1', visible: true}], shapes: [], source: {kind: 'editor'}};
