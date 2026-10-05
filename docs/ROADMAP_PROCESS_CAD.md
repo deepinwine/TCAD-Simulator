@@ -294,3 +294,15 @@ Task 4 前端验证：`npm test -- --run`（24 个文件、379 项通过）、`n
 `npm run build` 均退出 0。jsdom 保留原有 canvas/navigation 提示，Vite 保留 Three.js
 包体积提示；没有新增未处理 Promise 或 React act 警告。
 Python 全量最终复验及独立质量审查在集成交付时记录；本提交不合并或推送。
+
+### Task 5 集成验证（2026-10-05）
+
+最终代码 `3ff4d0b` 已包含 main 的 DRAM 示例修改，并修复首次打开版图工作台的
+空资产绑定误判。独立审查结论为 APPROVE WITH NON-BLOCKING COMMENTS，无未解决
+BLOCK；边界与后续 NB 清单见 `docs/superpowers/task5-review.md`。
+
+修复后完整 Python 回归：576 项、跳过 2 项、498.110 秒，退出 0。
+前端：24 个文件、381 项通过；typecheck、build 退出 0。
+grid=128 五个核心 demo 基准全部通过；JSON/实际工艺与无 gdstk 兼容端到端测试通过。
+测试日志存在 worker_crash.log 未关闭的 ResourceWarning；构建保留既有包体积警告，
+均不影响退出结果。集成流程仅推 deepinwine 的 backup/main，保留用户未跟踪文件。
