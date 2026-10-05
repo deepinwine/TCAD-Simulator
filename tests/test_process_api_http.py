@@ -40,8 +40,13 @@ class ApiV2Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(
-            set(payload.keys()), {"recipe", "model", "factories", "materials", "uiState"},
+            set(payload.keys()), {"recipe", "model", "factories", "materials", "uiState", "backendCapabilities"},
         )
+        self.assertEqual(payload["backendCapabilities"], {
+            "etch.target_depth": "estimated",
+            "etch.sidewall_angle": "approximate",
+            "etch.incidence_angle": "unsupported",
+        })
         self.assertGreater(len(payload["recipe"]), 0)
         self.assertIn("Silicon", [m["name"] for m in payload["materials"]])
         self.assertEqual(payload["model"]["gridShape"], [GRID, GRID, 72])

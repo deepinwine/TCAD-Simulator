@@ -64,9 +64,18 @@ class RecipeReliabilityTests(unittest.TestCase):
 
     def test_assistant_placeholder_is_executable(self):
         from pathlib import Path
+        import ast
         import re
-        source = (Path(__file__).parents[1] / 'frontend/src/components/RecipeAssistant.tsx').read_text()
-        text = re.search(r"例：([^']+)'}", source).group(1)
+        frontend = Path(__file__).parents[1] / 'frontend/src'
+        source = (frontend / 'components/RecipeAssistant.tsx').read_text(encoding='utf-8')
+        self.assertIn("placeholder={t('recipeAssistant.placeholder')}", source)
+        catalogs = (frontend / 'i18n/catalogs.ts').read_text(encoding='utf-8')
+        chinese = catalogs.split('export const zhCN = {', 1)[1].split('} as const', 1)[0]
+        match = re.search(r"'recipeAssistant\.placeholder':\s*('(?:\\.|[^'\\])*')", chinese)
+        self.assertIsNotNone(match, 'Chinese UI must retain a real executable recipe example')
+        placeholder = ast.literal_eval(match.group(1))
+        self.assertIn('\n例：', placeholder)
+        text = placeholder.split('\n例：', 1)[1]
         draft = RecipePlanner().parse(text)
         result = self.validator.validate(draft)
         self.assertTrue(result['ok'], result)
