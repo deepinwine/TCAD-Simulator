@@ -139,7 +139,7 @@ it.each([[1, '0'], [2, '1'], [14, '2']])('renders numeric Structure material ID 
   initial.materials = [{id: 1, name: 'Silicon', color: [1,1,1], enabled: true}, {id: 2, name: 'Silicon Dioxide', color: [1,1,1], enabled: true}, {id: 14, name: 'Copper', color: [1,1,1], enabled: true}];
   const api = apiStub(initial, {setStep: vi.fn(async request => ({
     step: {...initial.recipe[0], params: {material: request.params?.material === 'Copper' ? 14 : 1}},
-    statuses: ['dirty'], warnings: [],
+    statuses: ['dirty' as RuntimeStatus], warnings: [],
   }))});
   await mount(initial, api);
   const material = screen.getByRole('combobox', {name: '材料'});
