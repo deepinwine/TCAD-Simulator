@@ -1,5 +1,14 @@
 # ROADMAP_PROCESS_CAD — M0–M12
 
+## 当前优先级：参数化 Structure CAD（2026-10-07）
+
+所有者决定先做「输入参数得到半导体结构」，暂停新增物理仿真与校准工作（ADR-027）。
+当前实施六种纯几何步骤：晶圆、沉积、版图开口、深度刻蚀、填充、平坦化；通过既有
+Recipe、时间线、版图资产与 Three.js 查看器交付。设计与计划位于
+`docs/superpowers/specs/2026-10-07-structure-cad-design.md` 和
+`docs/superpowers/plans/2026-10-07-structure-cad.md`。
+后续优先改善结构编辑、面板布局和结构导出；下述仿真里程碑保留为历史与兼容记录。
+
 One screen of truth for "what now". Target architecture: `docs/ARCHITECTURE_TARGET.md`;
 decisions: `docs/DECISIONS.md`; pre-constitution milestone designs remain in
 `docs/superpowers/specs|plans/` as history.

@@ -1,5 +1,11 @@
 # ARCHITECTURE_TARGET — TCAD Studio Long-Term Architecture
 
+Current delivery priority (owner decision 2026-10-07, ADR-027): **parameter-driven
+Structure CAD**. Structure ProcessSteps build material geometry directly from thickness,
+depth, mask and height parameters; they do not invoke physical process solvers. The fixed
+React/Python/ProcessModel/Three.js stack and existing Recipe compatibility remain in use.
+New Accurate engine development and calibration are paused while this workflow is delivered.
+
 Companion to `AGENTS.md` (constitution). This file describes where the project is going
 and how it gets there without a big-bang rewrite. Current-system behavior is described in
 `docs/ARCHITECTURE.md`; nothing there changes until an approved migration milestone.
