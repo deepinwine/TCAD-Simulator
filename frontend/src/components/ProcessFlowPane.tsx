@@ -1,5 +1,6 @@
 import {useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
-import type {StepView} from '../api/types';
+import type {MaterialView, StepView} from '../api/types';
+import {presentStep} from './stepPresentation';
 import {useI18n} from '../i18n/I18nContext';
 import {zhCN} from '../i18n/catalogs';
 import {StatusBadge} from './StatusBadge';
@@ -9,6 +10,7 @@ interface ProcessFlowPaneProps {
   selectedStepIndex: number | null;
   onSelect(index: number): void;
   children?: ReactNode;
+  materials?: MaterialView[];
 }
 
 function compactText(value: string, limit = 28): string {
@@ -49,8 +51,8 @@ export function summarizeParams(
   return compactText(`${summary}${suffix}`, 92);
 }
 
-export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}: ProcessFlowPaneProps) {
-  const {t} = useI18n();
+export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children, materials = []}: ProcessFlowPaneProps) {
+  const {t, locale} = useI18n();
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
   const pendingFocusRef = useRef<number | null>(null);
   const [activeStepIndex, setActiveStepIndex] = useState<number | null>(() => {
@@ -138,10 +140,10 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children}:
               </span>
               <span className="step-content">
                 <span className="step-heading-row">
-                  <strong className="step-title">{step.instanceName}</strong>
+                  <strong className="step-title">{presentStep(step, materials, locale).title}</strong>
                   {!step.enabled && <span className="disabled-copy">{t('process.disabled')}</span>}
                 </span>
-                <span className="step-subtitle">{step.name} · {summarizeParams(step.params, t('process.noParams'))}</span>
+                <span className="step-subtitle">{presentStep(step, materials, locale).type} · {summarizeParams(step.params, t('process.noParams'))}</span>
                 <StatusBadge status={step.runtimeStatus} />
               </span>
             </button>
