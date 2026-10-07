@@ -1,4 +1,4 @@
-import {useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {useAppState} from '../state/AppStateContext';
 import {useI18n} from '../i18n/I18nContext';
 
@@ -27,6 +27,11 @@ export function MaskControl({
   const [previewNonce, setPreviewNonce] = useState(0);
   const [previewFailed, setPreviewFailed] = useState(false);
   const hasMask = maskName !== undefined && maskName !== '';
+  const previewUrl = `/api/mask/preview_step?step_index=${stepIndex}&t=${previewNonce}` +
+    `&asset_id=${encodeURIComponent(assetId ?? '')}&asset_revision=${assetRevision ?? 0}`;
+  useEffect(() => {
+    setPreviewFailed(false);
+  }, [stepIndex, maskName, assetId, assetRevision]);
 
   return (
     <div className="mask-control" role="group" aria-label={t('mask.group')}>
@@ -61,9 +66,10 @@ export function MaskControl({
       />
       {hasMask && !previewFailed && (
         <img
+          key={previewUrl}
           className="mask-preview"
           alt={t('mask.previewAlt', {step: stepIndex + 1})}
-          src={`/api/mask/preview_step?step_index=${stepIndex}&t=${previewNonce}`}
+          src={previewUrl}
           onError={() => setPreviewFailed(true)}
         />
       )}

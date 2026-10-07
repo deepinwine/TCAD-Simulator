@@ -11,6 +11,7 @@ import type {
 } from '../api/types';
 import {AppStateProvider, useAppState} from '../state/AppStateContext';
 import {ParameterPanel} from './ParameterPanel';
+import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {I18nProvider, useI18n} from '../i18n/I18nContext';
 
@@ -132,6 +133,29 @@ async function mount(initial: InitView, api = apiStub(initial), strict = false) 
   });
   return {...result, api};
 }
+
+describe('Mask preview binding', () => {
+  it('refreshes same-name revisions and retries failed previews when binding changes', async () => {
+    const api = apiStub(init());
+    const tree = (id: string, revision: number, index = 0) => (
+      <AppStateProvider api={api}>
+        <MaskControl stepIndex={index} maskName="M1" disabled={false} assetId={id} assetRevision={revision} />
+      </AppStateProvider>
+    );
+    const view = render(tree('mask_a', 1));
+    const image = screen.getByRole('img');
+    const original = image.getAttribute('src');
+    view.rerender(tree('mask_a', 2));
+    expect(screen.getByRole('img').getAttribute('src')).not.toBe(original);
+    fireEvent.error(screen.getByRole('img'));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    view.rerender(tree('mask_b', 2));
+    await waitFor(() => expect(screen.getByRole('img')).toBeInTheDocument());
+    fireEvent.error(screen.getByRole('img'));
+    view.rerender(tree('mask_b', 2, 1));
+    await waitFor(() => expect(screen.getByRole('img')).toBeInTheDocument());
+  });
+});
 
 afterEach(() => {
   vi.clearAllTimers();
