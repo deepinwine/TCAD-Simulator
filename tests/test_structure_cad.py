@@ -32,10 +32,20 @@ class StructureCADTests(unittest.TestCase):
     def test_overflow_and_invalid_values_are_atomic(self):
         self.step('Structure Wafer', thickness_nm=20)
         before = self.model.grid.copy()
-        for value in (200, .1, True, -1, float('nan'), float('inf')):
+        for value in (200, 1e300, .1, True, -1, float('nan'), float('inf')):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.step('Structure Deposit', thickness_nm=value)
             np.testing.assert_array_equal(before, self.model.grid)
+
+    def test_readonly_colocated_field_rejects_before_any_geometry_mutation(self):
+        self.step('Structure Wafer', thickness_nm=20)
+        self.model.doping = np.full(self.model.grid.shape, 7.0)
+        self.model.doping.flags.writeable = False
+        before = {key:getattr(self.model,key).copy() for key in ('grid','height_map','open_mask','doping')}
+        with self.assertRaisesRegex(ValueError, 'writable'):
+            self.step('Structure Deposit', thickness_nm=5)
+        for key,value in before.items():
+            np.testing.assert_array_equal(getattr(self.model,key),value)
 
     def test_mask_preserved_fields_cleared_and_etch_blocked_by_void_or_material(self):
         self.step('Structure Wafer', thickness_nm=40)

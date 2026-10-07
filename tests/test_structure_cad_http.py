@@ -65,7 +65,17 @@ class StructureHTTPTests(unittest.TestCase):
                 self.request('POST','/api/mask/asset/save', {'asset':bad,'step_index':2}, expected=400)
                 self.assertEqual(before,self.request('GET','/api/init')['result']['recipe'])
                 self.assertEqual(assets,self.request('GET','/api/mask/assets')['result'])
+                def geometry_bytes():
+                    current = self.request('GET','/api/preview/manifest?mode=solid')['result']
+                    geometry = {}
+                    for mesh in current['meshes']:
+                        status, _, data = self._request(self.base,self.cookie,'GET',f'/api/preview/stl?mat_id={mesh["mat_id"]}&rev={current["rev"]}&mode=solid')
+                        self.assertEqual(status,200)
+                        geometry[mesh['mat_id']] = data
+                    return geometry
+                geometry = geometry_bytes()
                 self.request('POST','/api/undo', {})
                 self.request('POST','/api/redo', {})
+                self.assertEqual(geometry_bytes(),geometry)
             finally:
                 manager.stop()

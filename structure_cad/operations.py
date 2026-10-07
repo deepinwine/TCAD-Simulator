@@ -23,7 +23,10 @@ def number(value, label, *, zero=False):
 
 def layers(model, value, label, *, zero=False):
     value = number(value, label, zero=zero)
-    count = int(math.floor(value / model.voxel_size_nm + .5))
+    scaled = value / model.voxel_size_nm
+    if not math.isfinite(scaled):
+        raise ValueError(f'{label} exceeds the representable grid range')
+    count = int(math.floor(scaled + .5))
     if value > 0 and count == 0:
         raise ValueError(f'{label} is below half the grid spacing')
     return count
@@ -76,6 +79,8 @@ def construct(model, operation, **params):
         candidate[:, :, :n] = mid
     elif operation == 'Deposit':
         n = layers(model, params['thickness_nm'], 'thickness_nm')
+        if n > nz:
+            raise ValueError('Structure Deposit exceeds domain height')
         coverage = params.get('coverage', 'Full wafer')
         if coverage not in ('Full wafer', 'Open mask'):
             raise ValueError('Unknown Structure Deposit coverage')
