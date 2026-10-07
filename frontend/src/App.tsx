@@ -131,7 +131,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       )}
       <div className={workspaceClass}>
         <div className="workspace-left">
-          <RecipeAssistant />
+          {!(state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '))) && <RecipeAssistant />}
           <ProcessFlowPane
             recipe={state.recipe}
             selectedStepIndex={state.selectedStepIndex}

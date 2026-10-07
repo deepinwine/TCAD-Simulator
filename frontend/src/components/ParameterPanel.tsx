@@ -5,6 +5,7 @@ import {parameterDraftKey} from '../state/appReducer';
 import {useAppState} from '../state/AppStateContext';
 import {type I18nContextValue, useI18n} from '../i18n/I18nContext';
 import type {TranslationKey} from '../i18n/catalogs';
+import {zhCN} from '../i18n/catalogs';
 import {MaskControl} from './MaskControl';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
@@ -390,7 +391,7 @@ function ParameterField({
   return (
     <div className={`parameter-field${hasError ? ' has-error' : ''}`}>
       <div className="parameter-label-row">
-        <label htmlFor={inputId}>{spec.label || spec.key}</label>
+        <label htmlFor={inputId}>{stepName.startsWith('Structure ') && Object.hasOwn(zhCN, `cad.${spec.key}`) ? t(`cad.${spec.key}` as TranslationKey) : spec.label || spec.key}</label>
         {capabilityLabel !== undefined && <span className={`parameter-capability capability-${capability}`}>{t(capabilityLabel)}</span>}
         {!conversion && spec.units && (
           <span id={unitsId} className="parameter-units">{spec.units}</span>
@@ -464,7 +465,7 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
             <div>
               <span className="selection-label">{t('parameter.currentStep')}</span>
               <h3>{step.instanceName}</h3>
-              <p>{step.name}</p>
+              <p>{step.name.startsWith('Structure ') ? t(`cad.${step.name.slice(10).toLowerCase()}` as TranslationKey) : step.name}</p>
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>

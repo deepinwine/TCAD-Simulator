@@ -21,23 +21,25 @@ export function StepStructureBar() {
   const canMoveDown = position >= 0 && position < state.recipe.length - 1;
   const renameTrimmed = renameValue.trim();
   const renameValid = renameTrimmed.length >= 1 && renameTrimmed.length <= 80;
+  const structureMode = state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '));
+  const factories = state.factories.filter(factory => !structureMode || factory.startsWith('Structure '));
 
   return (
     <div className="step-structure-bar" role="group" aria-label={t('structure.group')}>
       <select
         aria-label={t('structure.addType')}
-        value={addChoice}
+        value={factories.includes(addChoice) ? addChoice : ''}
         disabled={busy || state.factories.length === 0}
         onChange={event => setAddChoice(event.target.value)}
       >
         <option value="">{t('structure.selectType')}</option>
-        {state.factories.map(factory => (
+        {factories.map(factory => (
           <option key={factory} value={factory}>{factory}</option>
         ))}
       </select>
       <button
         type="button"
-        disabled={busy || addChoice === ''}
+        disabled={busy || !factories.includes(addChoice)}
         onClick={() => {
           void actions.addStep(addChoice);
           setAddChoice('');

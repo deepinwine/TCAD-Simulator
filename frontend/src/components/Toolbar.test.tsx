@@ -135,6 +135,38 @@ const stubViewerRuntime = () => ({
   dispose: () => {},
 });
 
+it('imports the structure example and shows build controls', async () => {
+  const demo = {name: 'Structure CAD — Trench', domain: {grid_shape: [64, 64, 64], voxel_size_nm: 5, threads: 1}, steps: [
+    {name: 'Structure Wafer', params: {material: 'Silicon', thickness_nm: 100}},
+    {name: 'Structure Deposit', params: {material: 'Silicon Dioxide', thickness_nm: 80, coverage: 'Full wafer'}},
+    {name: 'Structure Pattern', params: {pattern: 'Lines', critical_dimension: 60, pitch: 160, orientation: 0}},
+    {name: 'Structure Etch', params: {material: 'Silicon Dioxide', depth_nm: 40, sidewall_angle_deg: 90}},
+    {name: 'Structure Fill', params: {material: 'Copper', height_nm: 180}},
+    {name: 'Structure Planarize', params: {height_nm: 160}},
+  ]};
+  const recipe = demo.steps.map((blob, index) => step(index, {...blob, instanceName: blob.name, parameterSpecs: []}));
+  const mount = vi.fn();
+  const dispose = vi.fn();
+  const api = apiStub({
+    init: vi.fn(async () => ({...initView(), demoRecipes: {'Structure CAD — Trench': demo}})),
+    importRecipe: vi.fn(async () => ({model: {...initView().model, voxelSizeNm: 5}, recipe, currentRecipe: {name: 'Structure CAD — Trench', id: ''}, log: []})),
+  });
+  render(<App api={api} viewerRuntimeFactory={() => ({...stubViewerRuntime(), mount, dispose})} />);
+  fireEvent.click(await screen.findByRole('button', {name: '结构构建示例'}));
+  await waitFor(() => expect(api.importRecipe).toHaveBeenCalled());
+  expect(api.importRecipe).toHaveBeenCalledWith(expect.objectContaining({recipe: demo}), expect.any(AbortSignal));
+  expect(await screen.findByRole('button', {name: '构建全部'})).toBeEnabled();
+  expect(screen.getByText('结构构建 · 网格 5 nm · 纯几何，无物理仿真')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+  expect(screen.getByRole('button', {name: 'Build all'})).toBeEnabled();
+  expect(api.init).toHaveBeenCalledTimes(1);
+  expect(api.importRecipe).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', {name: '中文'}));
+  expect(screen.getByRole('button', {name: '构建全部'})).toBeEnabled();
+  expect(mount).toHaveBeenCalledTimes(1);
+  expect(dispose).not.toHaveBeenCalled();
+});
+
 function recordingViewerRuntime() {
   const loadedTokens: number[] = [];
   return {

@@ -30,6 +30,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
   const [recipeName, setRecipeName] = useState('');
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const demoRecipes = state.demoRecipes;
+  const structureMode = state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '));
   const mutationActive = state.phase === 'running' || state.activeMutation !== null;
   const activeOperation = state.activeMutation;
   const online = state.phase === 'ready' || state.phase === 'running';
@@ -52,10 +53,14 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
         <span className="product-mark" aria-hidden="true">TS</span>
         <div>
           <h1>TCAD Studio</h1>
-          <span className="product-context">Process CAD</span>
+          <span className="product-context">{structureMode ? t('cad.mode', {grid: state.model?.voxelSizeNm ?? '—'}) : 'Process CAD'}</span>
         </div>
       </div>
       <div className="toolbar-run-group" aria-label={t('toolbar.processActions')}>
+        <button type="button" className="toolbar-button is-primary" disabled={allRunsDisabled || demoRecipes?.['Structure CAD — Trench'] === undefined} aria-describedby={describedBy} onClick={() => {
+          const recipe = demoRecipes?.['Structure CAD — Trench'];
+          if (recipe !== undefined) void actions.importRecipe({recipe, name: 'Structure CAD — Trench'});
+        }}>{t('cad.example')}</button>
         <button
           type="button"
           className="toolbar-button run-button"
@@ -63,7 +68,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
           aria-describedby={describedBy}
           onClick={() => void actions.runStep()}
         >
-          {t('toolbar.runStep')}
+          {t(structureMode ? 'cad.step' : 'toolbar.runStep')}
         </button>
         <button
           type="button"
@@ -72,7 +77,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
           aria-describedby={describedBy}
           onClick={() => void actions.runTo()}
         >
-          {t('toolbar.runTo')}
+          {t(structureMode ? 'cad.to' : 'toolbar.runTo')}
         </button>
         <button
           type="button"
@@ -81,7 +86,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
           aria-describedby={describedBy}
           onClick={() => void actions.runAll()}
         >
-          {t('toolbar.runAll')}
+          {t(structureMode ? 'cad.all' : 'toolbar.runAll')}
         </button>
         <button
           type="button"
