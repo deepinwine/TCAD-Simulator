@@ -278,7 +278,7 @@ export function MaskWorkbench({
           ref={fileRef}
           className="visually-hidden"
           type="file"
-          accept=".json,.gds,.gdsii"
+          accept=".json,.gds,.oas"
           aria-label={t('workbench.importFile')}
           disabled={busy}
           onChange={(event) => {

@@ -66,6 +66,10 @@ function setup(overrides: Partial<TcadApi> = {}) {
   return {api, onApply, onClose};
 }
 describe('Mask Workbench session', () => {
+  it('offers exactly the JSON, GDS and OASIS suffixes supported by the backend', () => {
+    setup();
+    expect(screen.getByLabelText('导入并应用文件')).toHaveAttribute('accept', '.json,.gds,.oas');
+  });
   it('removes the Inspector selection when a shape is moved into a hidden layer', () => {
     setup();
     fireEvent.click(screen.getByRole('button', {name: '新增图层'}));
