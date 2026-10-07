@@ -19317,7 +19317,7 @@ class ExposureStep(ProcessStep):
             return f"Mask Exposure (custom: {name})"
         return f"Mask Exposure ({self.params.get('pattern', 'Lines')})"
 
-    def execute(self, model: ProcessModel) -> str:
+    def _resolve_mask_override(self, model: ProcessModel) -> Optional[np.ndarray]:
         mask_override: Optional[np.ndarray] = None
         mode = self.params.get("mask_mode", "Procedural")
         self.last_metrics = {}
@@ -19376,6 +19376,12 @@ class ExposureStep(ProcessStep):
                 raise ValueError(
                     "Custom Mask Exposure requires a readable mask_file or embedded custom mask"
                 )
+
+        return mask_override
+
+    def execute(self, model: ProcessModel) -> str:
+        mask_override = self._resolve_mask_override(model)
+        mode = self.params.get("mask_mode", "Procedural")
 
         def _truthy(v: Any) -> bool:
             if isinstance(v, bool):
@@ -20404,7 +20410,100 @@ class OxidationNitridationStep(ProcessStep):
         return f"{self.params.get('reaction', 'Reaction')} {self.params.get('ambient', '')}".strip()
 
 
+class StructureGeometryStep(ProcessStep):
+    group = "Structure"
+    operation = "Wafer"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        specs = []
+        if self.operation != "Planarize":
+            specs.append(ParameterSpec("material", "Material", "enum", "Silicon" if self.operation == "Wafer" else "Silicon Dioxide", choices=[(n, n) for n in self.material_db.names() if n != "Void"]))
+        key = "depth_nm" if self.operation == "Etch" else "height_nm" if self.operation in {"Fill", "Planarize"} else "thickness_nm"
+        specs.append(ParameterSpec(key, "Depth" if key == "depth_nm" else "Absolute height" if key == "height_nm" else "Thickness", "float", 100.0, 0.0, None, units="nm", dimension="length", canonical_unit="nm", display_units=("nm", "µm")))
+        if self.operation == "Deposit":
+            specs.append(ParameterSpec("coverage", "Coverage", "enum", "Full wafer", choices=[("Full wafer", "Full wafer"), ("Open mask", "Open mask")]))
+        if self.operation == "Etch":
+            specs.append(ParameterSpec("sidewall_angle_deg", "Sidewall angle", "float", 90.0, 0.0, 90.0, units="°", dimension="angle", canonical_unit="degree", display_units=("°", "rad")))
+        return tuple(specs)
+
+    def execute(self, model: ProcessModel) -> str:
+        from structure_cad.operations import construct
+        changed = construct(model, self.operation, **self.params)
+        return f"{self.name}: {changed} voxels constructed"
+
+
+class StructureWaferStep(StructureGeometryStep):
+    name = "Structure Wafer"
+    operation = "Wafer"
+
+
+class StructureDepositStep(StructureGeometryStep):
+    name = "Structure Deposit"
+    operation = "Deposit"
+
+
+class StructureEtchStep(StructureGeometryStep):
+    name = "Structure Etch"
+    operation = "Etch"
+
+
+class StructureFillStep(StructureGeometryStep):
+    name = "Structure Fill"
+    operation = "Fill"
+
+
+class StructurePlanarizeStep(StructureGeometryStep):
+    name = "Structure Planarize"
+    operation = "Planarize"
+
+
+class StructurePatternStep(ExposureStep):
+    name = "Structure Pattern"
+    group = "Structure"
+
+    def parameter_specs(self) -> Sequence[ParameterSpec]:
+        keys = {"pattern", "critical_dimension", "pitch", "orientation", "mask_mode", "mask_name", "mask_file", "mask_asset_id", "mask_asset_revision"}
+        specs = [s for s in super().parameter_specs() if s.key in keys]
+        for spec in specs:
+            if spec.key in {"critical_dimension", "pitch"}:
+                spec.dimension, spec.canonical_unit, spec.display_units = "length", "nm", ("nm", "µm")
+            elif spec.key == "orientation":
+                spec.dimension, spec.canonical_unit, spec.display_units = "angle", "degree", ("°", "rad")
+        return tuple(specs)
+
+    def geometry_mask(self, model: ProcessModel) -> np.ndarray:
+        from structure_cad.operations import top, number
+        top(model)
+        if self.params.get("mask_mode") not in {"Procedural", "Asset", "Custom", "Designer", "Image"}:
+            raise ValueError("Unknown Structure Pattern mask_mode")
+        if self.params.get("pattern") not in {"Lines", "Grid", "Checkerboard", "Contacts", "Vias", "Circular", "Open", "Manual"}:
+            raise ValueError("Unknown Structure Pattern pattern")
+        cd = number(self.params["critical_dimension"], "critical_dimension")
+        pitch = number(self.params["pitch"], "pitch")
+        orientation = number(self.params["orientation"], "orientation", zero=True)
+        if orientation > 180:
+            raise ValueError("Structure Pattern orientation must be in [0, 180]")
+        override = self._resolve_mask_override(model)
+        if override is not None:
+            opened = np.asarray(override, dtype=bool)
+        else:
+            opened = model._generate_mask_density(self.params["pattern"], cd, pitch, orientation) >= .5
+        if not opened.any():
+            raise ValueError("Structure Pattern: no effective opening")
+        return opened
+
+    def execute(self, model: ProcessModel) -> str:
+        model.open_mask = self.geometry_mask(model).copy()
+        return f"Structure Pattern: {int(model.open_mask.sum())} open columns"
+
+
 PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
+    "Structure Wafer": StructureWaferStep,
+    "Structure Deposit": StructureDepositStep,
+    "Structure Pattern": StructurePatternStep,
+    "Structure Etch": StructureEtchStep,
+    "Structure Fill": StructureFillStep,
+    "Structure Planarize": StructurePlanarizeStep,
     "Initialize Wafer": InitializeWaferStep,
     "Spin Resist": SpinResistStep,
     "Mask Exposure": ExposureStep,
@@ -32649,7 +32748,8 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
             step.image_mask = None
         try:
             if not had_adv:
-                step.params["advanced_enable"] = _infer_exposure_advanced_enable(step.params)
+                if not isinstance(step, StructurePatternStep):
+                    step.params["advanced_enable"] = _infer_exposure_advanced_enable(step.params)
         except Exception:
             pass
     return step
@@ -33068,6 +33168,8 @@ def load_demo_flows(material_db: MaterialDatabase) -> Dict[str, Dict[str, Any]]:
 
     flows = _load_core_demo_flows(material_db)
     flows.update(build_advanced_flows(flows))
+    from structure_cad.recipes import build_structure_flows
+    flows.update(build_structure_flows())
     return flows
 
 
@@ -73057,6 +73159,10 @@ def _webui_worker_main(
                         mask_density = model._generate_mask_density(pattern, cd_nm, pitch_nm, ori_deg).astype(np.float64, copy=False)
                 except Exception:
                     mask_density = np.zeros_like(model.open_mask, dtype=np.float64)
+
+                if isinstance(st, StructurePatternStep):
+                    mask_density = st.geometry_mask(model).astype(np.float32)
+                    opc_cfg = {"enabled": False}
 
                 # Apply the same OPC masking logic as ProcessModel.expose_resist.
                 try:

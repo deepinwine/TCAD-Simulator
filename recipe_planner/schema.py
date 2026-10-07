@@ -36,7 +36,7 @@ def normalize_params(name, params):
         aliases["sidewall"] = "sidewall_angle_deg"
     if name in ("Deposition", "Selective Epitaxy"):
         aliases["thickness_nm"] = "thickness"
-    if name == "Mask Exposure":
+    if name in ("Mask Exposure", "Structure Pattern"):
         aliases["cd_nm"] = "critical_dimension"
     for old, new in aliases.items():
         if old in result:
@@ -168,11 +168,11 @@ def validate_import(blob, material_db):
         if not isinstance(step, dict):
             raise ValueError(f"步骤 {i+1} 必须是对象")
         name = step.get("name")
-        if name == "Mask Exposure":
+        if name in ("Mask Exposure", "Structure Pattern"):
             for key in ("mask_file", "mask_name"):
                 if key in step and not isinstance(step[key], str):
                     raise ValueError(f"步骤 {i+1}: {key} 必须是字符串")
-        if name == "Mask Exposure" and "custom_mask" in step:
+        if name in ("Mask Exposure", "Structure Pattern") and "custom_mask" in step:
             import numpy as np
             try:
                 mask = np.asarray(step["custom_mask"])
