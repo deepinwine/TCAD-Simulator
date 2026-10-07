@@ -77,6 +77,10 @@ Frozen core — one row per endpoint, verified against the HTTP dispatchers in
 send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 `tests/test_webui_cad_shell.py::M2ApiContractTests`
 (behavioral) and `::M2ApiDocConsistencyTests` (doc vs dispatcher drift).
+Structure editor additive fields (`factory_templates`, configured atomic recipe add)
+also have HTTP behavioral coverage in
+`tests/test_structure_editor_http.py::StructureEditorHTTPTests`; run this class alongside
+the frozen-core tests when changing those fields.
 
 | Endpoint | Method | Request (minimal) | Response |
 | --- | --- | --- | --- |
@@ -150,7 +154,8 @@ Rules:
 
 1. Any endpoint or response field a React component reads must be added to this table
    (in the same PR) before the client depends on it, and covered in
-   `M2ApiContractTests`.
+   `M2ApiContractTests` or a named feature HTTP contract suite documented here (such as
+   `StructureEditorHTTPTests` for the additive Structure editor fields).
 2. Methods are part of the contract: GET/POST membership above is enforced by the HTTP
    dispatchers (wrong-method requests fall through to a 404 JSON envelope).
 3. Binary endpoints (`geom`, `stl`, `elements`, `gbuffer`, `export/download`) stay binary —
