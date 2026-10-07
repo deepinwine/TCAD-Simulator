@@ -110,6 +110,26 @@ class StructureCADTests(unittest.TestCase):
                 step.execute(self.model)
             np.testing.assert_array_equal(before,self.model.open_mask)
 
+    def test_pattern_rejects_subgrid_sizes_and_cd_larger_than_pitch(self):
+        for params in ({'critical_dimension': .1}, {'pitch': .1}, {'pattern':'Circular','critical_dimension':.1,'pitch':.1}, {'critical_dimension':50,'pitch':10}):
+            step = tcad.StructurePatternStep(self.db)
+            step.params.update(params)
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                step.execute(self.model)
+
+    def test_pattern_quantizes_nearest_grid_without_legacy_radius_clamp(self):
+        step = tcad.StructurePatternStep(self.db)
+        step.params.update(critical_dimension=12, pitch=32)
+        with mock.patch.object(self.model, '_generate_mask_density', wraps=self.model._generate_mask_density) as generate:
+            step.execute(self.model)
+        self.assertEqual(generate.call_args.args[1:3], (10,30))
+        self.assertTrue(generate.call_args.kwargs['strict_geometry'])
+        model = tcad.ProcessModel(self.db,grid_shape=(13,13,20),voxel_size_nm=5,max_workers=1)
+        self.addCleanup(model.parallel.shutdown)
+        step.params.update(pattern='Circular',critical_dimension=5,pitch=20)
+        step.execute(model)
+        self.assertEqual(model.open_mask.sum(),1)
+
     def test_demo_is_fresh_and_measured(self):
         key = 'Structure CAD — Trench'
         flow = tcad.load_demo_flows(self.db)[key]

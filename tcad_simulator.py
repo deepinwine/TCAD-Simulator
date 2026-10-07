@@ -9419,10 +9419,12 @@ class ProcessModel:
         critical_dimension_nm: float,
         pitch_nm: float,
         orientation_deg: float,
+        *,
+        strict_geometry: bool = False,
     ) -> np.ndarray:
         nx, ny, _ = self.grid.shape
-        pitch_nm = max(pitch_nm, self.voxel_size_nm)
-        cd_nm = max(min(critical_dimension_nm, pitch_nm), self.voxel_size_nm * 0.5)
+        pitch_nm = pitch_nm if strict_geometry else max(pitch_nm, self.voxel_size_nm)
+        cd_nm = critical_dimension_nm if strict_geometry else max(min(critical_dimension_nm, pitch_nm), self.voxel_size_nm * 0.5)
         oversample = int(np.clip(math.ceil(max(cd_nm, pitch_nm) / max(self.voxel_size_nm, 1e-6) / 12.0), 1, 6))
         max_fine_points = 4_000_000
         while oversample > 1 and (nx * oversample) * (ny * oversample) > max_fine_points:
@@ -9469,7 +9471,7 @@ class ProcessModel:
             y_local = np.remainder(y_rot_nm + spacing / 2.0, spacing) - spacing / 2.0
             mask = (np.abs(x_local) <= radius) & (np.abs(y_local) <= radius)
         elif pattern == "Circular":
-            radius = max(float(half_cd), float(self.voxel_size_nm))
+            radius = float(half_cd) if strict_geometry else max(float(half_cd), float(self.voxel_size_nm))
             mask = (x_rot_nm**2 + y_rot_nm**2) <= radius**2
         elif pattern == "Open":
             mask[:, :] = True
@@ -20472,7 +20474,7 @@ class StructurePatternStep(ExposureStep):
         return tuple(specs)
 
     def geometry_mask(self, model: ProcessModel) -> np.ndarray:
-        from structure_cad.operations import top, number
+        from structure_cad.operations import top, number, layers
         top(model)
         if self.params.get("mask_mode") not in {"Procedural", "Asset", "Custom", "Designer", "Image"}:
             raise ValueError("Unknown Structure Pattern mask_mode")
@@ -20483,11 +20485,15 @@ class StructurePatternStep(ExposureStep):
         orientation = number(self.params["orientation"], "orientation", zero=True)
         if orientation > 180:
             raise ValueError("Structure Pattern orientation must be in [0, 180]")
+        if self.params["pattern"] in {"Lines", "Grid", "Checkerboard", "Contacts", "Vias"} and cd > pitch:
+            raise ValueError("Structure Pattern critical_dimension must not exceed pitch")
+        cd = layers(model, cd, "critical_dimension") * model.voxel_size_nm
+        pitch = layers(model, pitch, "pitch") * model.voxel_size_nm
         override = self._resolve_mask_override(model)
         if override is not None:
             opened = np.asarray(override, dtype=bool)
         else:
-            opened = model._generate_mask_density(self.params["pattern"], cd, pitch, orientation) >= .5
+            opened = model._generate_mask_density(self.params["pattern"], cd, pitch, orientation, strict_geometry=True) >= .5
         if not opened.any():
             raise ValueError("Structure Pattern: no effective opening")
         return opened
