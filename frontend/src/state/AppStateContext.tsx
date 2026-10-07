@@ -50,7 +50,7 @@ export interface AppStateActions {
   newRecipe(name: string): Promise<void>;
   saveRecipe(name: string): Promise<void>;
   exportRecipe(): Promise<void>;
-  addStep(name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<void>;
+  addStep(name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean>;
   removeStep(): Promise<void>;
   duplicateStep(): Promise<void>;
   moveStep(direction: 'up' | 'down'): Promise<void>;
@@ -516,6 +516,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
    */
   const structureMutation = useCallback(async (
     operation: (signal: AbortSignal) => Promise<StepView[]>,
+    onApplied?: (recipe: StepView[]) => void,
   ): Promise<void> => {
     if (!beginMutation('recipe')) return;
     const controller = createController();
@@ -523,6 +524,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       const recipe = await operation(controller.signal);
       if (!mountedRef.current || controller.signal.aborted) return;
       dispatch({type: 'recipe/stepsReplaced', recipe});
+      onApplied?.(recipe);
       const generation = ++timelineGenerationRef.current;
       try {
         const timeline = await api.getTimeline(controller.signal);
@@ -551,9 +553,15 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
 
   const selectedStepIndexForOps = () => stateRef.current.selectedStepIndex;
 
-  const addStepAction = useCallback((name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}) => (
-    structureMutation(signal => configuration === undefined ? api.addStep(name, signal) : api.addStep(name, signal, configuration))
-  ), [api, structureMutation]);
+  const addStepAction = useCallback(async (name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}) => {
+    let applied = false;
+    await structureMutation(signal => configuration === undefined ? api.addStep(name, signal) : api.addStep(name, signal, configuration), recipe => {
+      applied = true;
+      const added = recipe.at(-1);
+      if (configuration !== undefined && added !== undefined) dispatch({type: 'step/selected', index: added.index});
+    });
+    return applied;
+  }, [api, dispatch, structureMutation]);
 
   const removeStepAction = useCallback(() => {
     const index = selectedStepIndexForOps();

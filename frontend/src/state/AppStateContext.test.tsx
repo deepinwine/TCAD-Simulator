@@ -153,6 +153,14 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it('原子配置添加成功选中新步骤并打开其参数', async () => {
+    const added = step(2, {name: 'Structure Deposit', instanceName: '铜保护层', params: {material: 'Copper', thickness_nm: 35}});
+    const api = apiStub({addStep: vi.fn(async () => [...initView.recipe, added])});
+    mount(api); await waitUntilReady();
+    await act(async () => captured!.actions.addStep('Structure Deposit', {params: added.params, instanceName: added.instanceName}));
+    expect(captured!.state.selectedStepIndex).toBe(2);
+    expect(captured!.state.recipe.find(item => item.index === captured!.state.selectedStepIndex)).toEqual(added);
+  });
   it('应用并构建等待旧自动保存及最新草稿，期间阻止其他变更', async () => {
     const first = deferred<SetStepView>();
     const events: string[] = [];

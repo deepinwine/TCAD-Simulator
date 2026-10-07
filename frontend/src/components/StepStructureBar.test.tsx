@@ -8,6 +8,7 @@ import type {
 } from '../api/types';
 import {AppStateProvider} from '../state/AppStateContext';
 import {StepStructureBar} from './StepStructureBar';
+import {TcadApiError} from '../api/client';
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
@@ -101,6 +102,41 @@ function mount(api: TcadApi) {
     </AppStateProvider>,
   );
 }
+
+describe('配置结构步骤', () => {
+  const template: StepView = step(0, {name: 'Structure Deposit', instanceName: 'Structure Deposit', params: {material: 'Silicon', thickness_nm: 100}, parameterSpecs: [{key: 'material', label: 'Material', type: 'enum', choices: [['Silicon', 'Silicon'], ['Silicon Dioxide', 'Silicon Dioxide']]}, {key: 'thickness_nm', label: 'Thickness', type: 'float', minimum: 0, units: 'nm', dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]});
+  it('配置后只发一次原子请求，取消不创建', async () => {
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [template], factories: ['Structure Deposit'], factoryTemplates: [template]}))});
+    mount(api);
+    await waitFor(() => expect(screen.getByLabelText('添加步骤类型')).not.toBeDisabled());
+    fireEvent.change(screen.getByLabelText('添加步骤类型'), {target: {value: 'Structure Deposit'}});
+    fireEvent.click(screen.getByRole('button', {name: '添加步骤'}));
+    expect(api.addStep).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '取消'}));
+    expect(api.addStep).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '添加步骤'}));
+    fireEvent.change(screen.getByLabelText('厚度（nm）'), {target: {value: '80'}});
+    fireEvent.change(screen.getByLabelText('厚度单位'), {target: {value: 'µm'}});
+    expect(screen.getByLabelText('厚度（µm）')).toHaveValue(0.08);
+    fireEvent.change(screen.getByLabelText('材料'), {target: {value: '1'}});
+    fireEvent.change(screen.getByLabelText('自定义名称（可选）'), {target: {value: 'Oxide cap'}});
+    fireEvent.click(screen.getByRole('button', {name: '确认添加'}));
+    await waitFor(() => expect(api.addStep).toHaveBeenCalledWith('Structure Deposit', expect.any(AbortSignal), {params: {material: 'Silicon Dioxide', thickness_nm: 80}, instanceName: 'Oxide cap'}));
+    expect(api.addStep).toHaveBeenCalledTimes(1); expect(api.setStep).not.toHaveBeenCalled();
+  });
+  it('原子创建失败保留对话框和已填写参数供修正', async () => {
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [template], factories: ['Structure Deposit'], factoryTemplates: [template]})), addStep: vi.fn(async () => {throw new TcadApiError('invalid parameters', {status: 400});})});
+    mount(api);
+    await waitFor(() => expect(screen.getByLabelText('添加步骤类型')).not.toBeDisabled());
+    fireEvent.change(screen.getByLabelText('添加步骤类型'), {target: {value: 'Structure Deposit'}});
+    fireEvent.click(screen.getByRole('button', {name: '添加步骤'}));
+    fireEvent.change(screen.getByLabelText('厚度（nm）'), {target: {value: '80'}});
+    fireEvent.click(screen.getByRole('button', {name: '确认添加'}));
+    await waitFor(() => expect(api.addStep).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', {name: '确认添加'})).not.toBeDisabled());
+    expect(screen.getByRole('dialog')).toBeVisible(); expect(screen.getByLabelText('厚度（nm）')).toHaveValue(80);
+  });
+});
 
 afterEach(() => cleanup());
 

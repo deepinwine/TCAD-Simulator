@@ -1,6 +1,9 @@
 import {useState} from 'react';
 import {useAppState} from '../state/AppStateContext';
 import {useI18n} from '../i18n/I18nContext';
+import {AddStepDialog} from './AddStepDialog';
+import type {StepView} from '../api/types';
+import {presentStep} from './stepPresentation';
 
 /**
  * 步骤结构编辑条：添加（工厂选择）、上移/下移/复制/删除、重命名（1–80 字符）。
@@ -8,10 +11,11 @@ import {useI18n} from '../i18n/I18nContext';
  */
 export function StepStructureBar() {
   const {state, actions} = useAppState();
-  const {t} = useI18n();
+  const {t, locale} = useI18n();
+  const [template, setTemplate] = useState<StepView | null>(null);
   const [addChoice, setAddChoice] = useState('');
   const [renameValue, setRenameValue] = useState('');
-  const busy = state.phase === 'running' || state.activeMutation !== null;
+  const busy = state.phase === 'running' || state.activeMutation !== null || state.pendingSaves > 0;
   const selected = state.recipe.find(step => step.index === state.selectedStepIndex) ?? null;
   const selectedIndex = selected?.index ?? null;
   const position = selected === null
@@ -34,19 +38,23 @@ export function StepStructureBar() {
       >
         <option value="">{t('structure.selectType')}</option>
         {factories.map(factory => (
-          <option key={factory} value={factory}>{factory}</option>
+          <option key={factory} value={factory}>{state.factoryTemplates?.find(item => item.name === factory) ? `${!structureMode && factory.startsWith('Structure ') ? (locale === 'en' ? 'Structure · ' : '结构 · ') : !structureMode && ['Deposit', 'Deposition', 'Etch'].includes(factory) ? (locale === 'en' ? 'Process · ' : '工艺 · ') : ''}${presentStep(state.factoryTemplates.find(item => item.name === factory)!, state.materials, locale).type}` : factory}</option>
         ))}
       </select>
       <button
         type="button"
         disabled={busy || !factories.includes(addChoice)}
         onClick={() => {
+          const configurationTemplate = state.factoryTemplates?.find(item => item.name === addChoice);
+          if (structureMode && configurationTemplate) {setTemplate(configurationTemplate); return;}
           void actions.addStep(addChoice);
           setAddChoice('');
         }}
       >
         {t('structure.add')}
       </button>
+      {structureMode && state.factoryTemplates === undefined && <small>{locale === 'en' ? 'Legacy server: adds default parameters; edit after adding.' : '旧版服务器：添加默认步骤后编辑参数。'}</small>}
+      {template !== null && <AddStepDialog template={template} busy={busy} onCancel={() => setTemplate(null)} onConfirm={async configuration => {const applied = await actions.addStep(template.name, configuration); if (applied) {setTemplate(null); setAddChoice('');} return applied;}} />}
       <button
         type="button"
         disabled={busy || !canMoveUp}
