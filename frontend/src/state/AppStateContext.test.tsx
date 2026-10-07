@@ -153,6 +153,46 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it('应用并构建等待旧自动保存及最新草稿，期间阻止其他变更', async () => {
+    const first = deferred<SetStepView>();
+    const events: string[] = [];
+    const api = apiStub({setStep: vi.fn(async request => {
+      events.push(`save:${request.params?.dose}`);
+      if (request.params?.dose === 200) return first.promise;
+      return {step: step(0, {params: request.params!}), statuses: ['dirty', 'dirty'] as RuntimeStatus[], warnings: []};
+    }), runTo: vi.fn(async () => { events.push('run'); return {}; })});
+    mount(api); await waitUntilReady();
+    let saving!: Promise<void>; let building!: Promise<void>;
+    act(() => {captured!.actions.updateDraft(0, 'dose', 200); saving = captured!.actions.saveParameter(0, 'dose');});
+    await waitFor(() => expect(events).toEqual(['save:200']));
+    expect(captured!.state.pendingSaves).toBe(1);
+    act(() => {captured!.actions.updateDraft(0, 'dose', 300); building = captured!.actions.applyAndRunTo(0);});
+    await act(async () => {await captured!.actions.runAll(); await captured!.actions.addStep('deposit'); await captured!.actions.renameStep('blocked'); await captured!.actions.saveRecipe('blocked');});
+    expect(api.runAll).not.toHaveBeenCalled(); expect(api.addStep).not.toHaveBeenCalled(); expect(api.renameStep).not.toHaveBeenCalled(); expect(api.saveRecipe).not.toHaveBeenCalled();
+    await act(async () => {first.resolve({step: step(0, {params: {dose: 200}}), statuses: ['dirty', 'dirty'], warnings: []}); await saving; await building;});
+    expect(events).toEqual(['save:200', 'save:300', 'run']);
+    expect(captured!.state.drafts).toEqual({});
+    expect(captured!.state.pendingSaves).toBe(0);
+  });
+  it('应用构建依次保存所有有效字段且首个保存失败立即停止', async () => {
+    const events: string[] = [];
+    const api = apiStub({setStep: vi.fn(async request => {events.push(Object.keys(request.params!)[0]); return {step: step(request.index, {params: request.params!}), statuses: ['dirty', 'dirty'] as RuntimeStatus[], warnings: []};}), runTo: vi.fn(async () => {events.push('run'); return {};})});
+    mount(api); await waitUntilReady();
+    act(() => {captured!.actions.updateDraft(0, 'dose', 500); captured!.actions.updateDraft(1, 'time', 30);});
+    await act(async () => captured!.actions.applyAndRunTo(1));
+    expect(events).toEqual(['dose', 'time', 'run']);
+    expect(captured!.state.drafts).toEqual({});
+  });
+  it('无效草稿或保存失败禁止应用构建', async () => {
+    const api = apiStub({setStep: vi.fn(async () => {throw new TcadApiError('save failed', {status: 400});})});
+    mount(api); await waitUntilReady();
+    act(() => captured!.actions.updateDraft(0, 'dose', -1, {status: 'invalid'}));
+    await act(async () => captured!.actions.applyAndRunTo(0));
+    expect(api.setStep).not.toHaveBeenCalled(); expect(api.runTo).not.toHaveBeenCalled();
+    act(() => captured!.actions.updateDraft(0, 'dose', 300));
+    await act(async () => captured!.actions.applyAndRunTo(0));
+    expect(api.setStep).toHaveBeenCalledTimes(1); expect(api.runTo).not.toHaveBeenCalled(); expect(captured!.state.drafts['0:dose']).toBeDefined();
+  });
   it('运行及对账均失败时保留原错误并释放 gate，几何仍尝试刷新', async () => {
     const failure = new TcadApiError('运行网络中断', {status: 0});
     const recoveryFailure = new TcadApiError('对账离线', {status: 503});

@@ -14,7 +14,7 @@ import type {
 
 export type AppPhase = 'booting' | 'ready' | 'running' | 'fatal';
 export type ActiveMutation =
-  | 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | 'recipe' | 'mask' | null;
+  | 'step' | 'to' | 'all' | 'timeline' | 'undo' | 'redo' | 'recipe' | 'mask' | 'apply' | null;
 export type TimelineStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ParameterValidation {
@@ -50,9 +50,11 @@ export interface AppState {
   parameterErrors: Record<string, ParameterError>;
   stepErrors: Record<number, TcadApiError>;
   activeMutation: ActiveMutation;
+  pendingSaves: number;
   globalError: TcadApiError | null;
   model: ModelSummaryView | null;
   factories: string[];
+  factoryTemplates?: StepView[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
   backendCapabilities: Record<string, string>;
@@ -60,6 +62,7 @@ export interface AppState {
 }
 
 export type AppAction =
+  | {type: 'parameter/pendingSaves'; count: number}
   | {type: 'parameter/displayChanged'; index: number; key: string; rawValue: string | boolean; displayUnit: string}
   | {type: 'bootstrap/started'}
   | {type: 'bootstrap/succeeded'; payload: InitView}
@@ -124,6 +127,7 @@ export const initialAppState: AppState = {
   parameterErrors: {},
   stepErrors: {},
   activeMutation: null,
+  pendingSaves: 0,
   globalError: null,
   model: null,
   factories: [],
@@ -218,6 +222,7 @@ function canonicalizeTimeline(timeline: TimelineView): TimelineView {
 
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
+    case 'parameter/pendingSaves': return {...state, pendingSaves: action.count};
     case 'bootstrap/started':
       return {...state, phase: 'booting', globalError: null};
     case 'bootstrap/succeeded':
@@ -238,6 +243,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         globalError: null,
         model: action.payload.model,
         factories: action.payload.factories,
+        factoryTemplates: action.payload.factoryTemplates,
         materials: action.payload.materials,
         uiState: action.payload.uiState,
         backendCapabilities: action.payload.backendCapabilities ?? {},

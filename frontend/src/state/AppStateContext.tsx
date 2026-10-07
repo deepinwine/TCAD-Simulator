@@ -39,6 +39,7 @@ export interface AppStateActions {
   saveParameter(index: number, key: string): Promise<void>;
   runStep(index?: number): Promise<void>;
   runTo(index?: number): Promise<void>;
+  applyAndRunTo(index?: number): Promise<void>;
   runAll(): Promise<void>;
   loadTimeline(): Promise<void>;
   restoreTimeline(index: number): Promise<void>;
@@ -49,7 +50,7 @@ export interface AppStateActions {
   newRecipe(name: string): Promise<void>;
   saveRecipe(name: string): Promise<void>;
   exportRecipe(): Promise<void>;
-  addStep(name: string): Promise<void>;
+  addStep(name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<void>;
   removeStep(): Promise<void>;
   duplicateStep(): Promise<void>;
   moveStep(direction: 'up' | 'down'): Promise<void>;
@@ -115,6 +116,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const bootstrapAttemptRef = useRef<object | null>(null);
   const bootstrapCompletedRef = useRef(false);
   const mutationGateRef = useRef<ActiveMutation>(null);
+  const applyingRef = useRef(false);
   const sequenceRef = useRef<Record<string, number>>({});
   const savingRef = useRef<Record<string, number>>({});
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -200,7 +202,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     rawValue?: string | boolean,
     displayUnit?: string,
   ): number => {
-    if (!mountedRef.current) return 0;
+    if (!mountedRef.current || applyingRef.current || mutationGateRef.current !== null) return 0;
     const draftKey = parameterDraftKey(index, key);
     const previous = Math.max(
       sequenceRef.current[draftKey] ?? 0,
@@ -225,8 +227,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     dispatch({type: 'parameter/displayChanged', index, key, rawValue, displayUnit});
   }, [dispatch]);
 
-  const saveParameter = useCallback((index: number, key: string): Promise<void> => {
-    if (!mountedRef.current || mutationGateRef.current !== null) return Promise.resolve();
+  const saveParameterInternal = useCallback((index: number, key: string, applying = false): Promise<void> => {
+    if (!mountedRef.current || mutationGateRef.current !== null || (applyingRef.current && !applying)) return Promise.resolve();
     const draftKey = parameterDraftKey(index, key);
     const draft = stateRef.current.drafts[draftKey];
     if (draft === undefined || draft.validation.status !== 'valid') return Promise.resolve();
@@ -234,6 +236,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
 
     savingRef.current[draftKey] = draft.sequence;
     pendingSaveCountRef.current += 1;
+    dispatch({type: 'parameter/pendingSaves', count: pendingSaveCountRef.current});
     const controller = createController();
     const operation = saveQueueRef.current
       .catch(() => undefined)
@@ -266,6 +269,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       .finally(() => {
         releaseController(controller);
         pendingSaveCountRef.current = Math.max(0, pendingSaveCountRef.current - 1);
+        dispatch({type: 'parameter/pendingSaves', count: pendingSaveCountRef.current});
         if (savingRef.current[draftKey] === draft.sequence) {
           delete savingRef.current[draftKey];
         }
@@ -273,9 +277,10 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     saveQueueRef.current = operation.catch(() => undefined);
     return operation;
   }, [api, createController, dispatch, releaseController]);
+  const saveParameter = useCallback((index: number, key: string) => saveParameterInternal(index, key), [saveParameterInternal]);
 
   const beginMutation = useCallback((operation: Exclude<ActiveMutation, null>): boolean => {
-    if (!mountedRef.current || mutationGateRef.current !== null || pendingSaveCountRef.current > 0) return false;
+    if (!mountedRef.current || applyingRef.current || mutationGateRef.current !== null || pendingSaveCountRef.current > 0) return false;
     const invalidDraft = Object.values(stateRef.current.drafts)
       .find(draft => draft.validation.status === 'invalid');
     if (invalidDraft !== undefined) {
@@ -373,6 +378,33 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     if (index === undefined) return Promise.resolve();
     return runMutation('to', signal => api.runTo(index, signal), index);
   }, [api, runMutation]);
+
+  const applyAndRunTo = useCallback(async (index = stateRef.current.selectedStepIndex ?? undefined) => {
+    if (index === undefined || !mountedRef.current || applyingRef.current || mutationGateRef.current !== null) return;
+    if (Object.values(stateRef.current.drafts).some(draft => draft.validation.status !== 'valid')) {
+      dispatch({type: 'mutation/blocked', error: new TcadApiError('Invalid parameter draft', {status: 400, code: 'invalid_draft'})});
+      return;
+    }
+    applyingRef.current = true;
+    dispatch({type: 'run/started', operation: 'apply'});
+    try {
+      await saveQueueRef.current;
+      if (Object.keys(stateRef.current.parameterErrors).length > 0) return;
+      const drafts = Object.entries(stateRef.current.drafts);
+      for (const [draftKey, draft] of drafts) {
+        if (draft.validation.status !== 'valid') return;
+        const delimiter = draftKey.indexOf(':');
+        await saveParameterInternal(Number(draftKey.slice(0, delimiter)), draftKey.slice(delimiter + 1), true);
+        if (Object.keys(stateRef.current.parameterErrors).length > 0) return;
+      }
+      if (!mountedRef.current || hasUnsavedDrafts(stateRef.current) || pendingSaveCountRef.current > 0) return;
+      applyingRef.current = false;
+      dispatch({type: 'mutation/finished'});
+      await runTo(index);
+    } finally {
+      if (applyingRef.current) {applyingRef.current = false; dispatch({type: 'mutation/finished'});}
+    }
+  }, [dispatch, runTo, saveParameterInternal]);
 
   const runAll = useCallback(
     () => runMutation('all', signal => api.runAll(signal)),
@@ -519,8 +551,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
 
   const selectedStepIndexForOps = () => stateRef.current.selectedStepIndex;
 
-  const addStepAction = useCallback((name: string) => (
-    structureMutation(signal => api.addStep(name, signal))
+  const addStepAction = useCallback((name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}) => (
+    structureMutation(signal => configuration === undefined ? api.addStep(name, signal) : api.addStep(name, signal, configuration))
   ), [api, structureMutation]);
 
   const removeStepAction = useCallback(() => {
@@ -543,7 +575,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
 
   const renameStepAction = useCallback(async (instanceName: string): Promise<void> => {
     const index = selectedStepIndexForOps();
-    if (index === null) return;
+    if (index === null || !beginMutation('recipe')) return;
     const controller = createController();
     try {
       const step = await api.renameStep(index, instanceName, controller.signal);
@@ -555,8 +587,9 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       dispatch({type: 'run/failed', error: normalizeError(error)});
     } finally {
       releaseController(controller);
+      finishMutation('recipe');
     }
-  }, [api, createController, dispatch, releaseController]);
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   /**
    * 配方替换（导入/新建）：服务端已重置历史，客户端整体替换并重拉 timeline。
@@ -618,6 +651,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [api, replaceRecipe]);
 
   const saveRecipeAction = useCallback(async (name: string): Promise<void> => {
+    if (!beginMutation('recipe')) return;
     const controller = createController();
     try {
       await api.saveRecipe(name, controller.signal);
@@ -627,8 +661,9 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       dispatch({type: 'run/failed', error: normalizeError(error)});
     } finally {
       releaseController(controller);
+      finishMutation('recipe');
     }
-  }, [api, createController, dispatch, releaseController]);
+  }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   const exportRecipeAction = useCallback(async (): Promise<void> => {
     const controller = createController();
@@ -755,6 +790,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     saveParameter,
     runStep,
     runTo,
+    applyAndRunTo,
     runAll,
     loadTimeline,
     restoreTimeline,
@@ -790,6 +826,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     runAll,
     runStep,
     runTo,
+    applyAndRunTo,
     saveParameter,
     selectStep,
     undo,

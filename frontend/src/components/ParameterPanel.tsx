@@ -7,10 +7,12 @@ import {type I18nContextValue, useI18n} from '../i18n/I18nContext';
 import type {TranslationKey} from '../i18n/catalogs';
 import {zhCN} from '../i18n/catalogs';
 import {MaskControl} from './MaskControl';
+import {presentStep} from './stepPresentation';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
-import {canonicalUnits, toCanonical, fromCanonical, formatDisplayValue, type Dimension, type DisplayUnit} from '../units/units';
+import {toCanonical, fromCanonical, formatDisplayValue, type DisplayUnit} from '../units/units';
+import {conversionSpec} from '../units/parameterUnits';
 
 interface ParameterPanelProps {
   step: StepView | null;
@@ -42,18 +44,6 @@ interface ParameterControlProps {
 }
 
 type Translate = I18nContextValue['t'];
-
-function conversionSpec(spec: ParameterSpecView): {dimension: Dimension; units: DisplayUnit[]; preferred: DisplayUnit} | null {
-  if (!['float', 'int', 'integer'].includes(spec.type) || !spec.dimension || !spec.canonicalUnit || !spec.displayUnits?.length) return null;
-  const dimension = spec.dimension as Dimension;
-  if (!Object.hasOwn(canonicalUnits, dimension) || canonicalUnits[dimension] !== spec.canonicalUnit) return null;
-  const units = spec.displayUnits as DisplayUnit[];
-  const canonicalDisplay = spec.canonicalUnit === 'degree' ? '°' : spec.canonicalUnit;
-  try {
-    for (const unit of units) toCanonical(0, dimension, unit);
-    return {dimension, units, preferred: units.includes(canonicalDisplay as DisplayUnit) ? canonicalDisplay as DisplayUnit : units[0]};
-  } catch { return null; }
-}
 
 const capabilityKeys: Record<string, TranslationKey> = {
   exact: 'capability.exact', approximate: 'capability.approximate',
@@ -444,8 +434,8 @@ function ParameterField({
 }
 
 export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProps) {
-  const {state} = useAppState();
-  const {t} = useI18n();
+  const {state, actions} = useAppState();
+  const {t, locale} = useI18n();
   const disabled = state.phase === 'running' || state.activeMutation !== null;
   const runError = step === null ? undefined : state.stepErrors[step.index];
 
@@ -470,11 +460,14 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
           <div className="selected-step-heading">
             <div>
               <span className="selection-label">{t('parameter.currentStep')}</span>
-              <h3>{step.instanceName}</h3>
+              <h3>{presentStep(step, state.materials, locale).title}</h3>
               <p>{step.name.startsWith('Structure ') ? t(`cad.${step.name.slice(10).toLowerCase()}` as TranslationKey) : step.name}</p>
+              <p>{presentStep(step, state.materials, locale).description}</p>
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
+          <p role="status">{Object.keys(state.drafts).some(key => key.startsWith(`${step.index}:`)) ? (locale === 'en' ? 'Unsaved changes' : '未保存的参数') : step.runtimeStatus === 'dirty' ? (locale === 'en' ? 'Modified · rebuild required' : '已修改 · 尚未重新构建') : ''}</p>
+          <button type="button" className="toolbar-button is-primary" disabled={disabled || Object.values(state.drafts).some(draft => draft.validation.status === 'invalid')} onClick={() => void actions.applyAndRunTo(step.index)}>{locale === 'en' ? 'Apply and build to this step' : '应用并构建到此步'}</button>
           {runError !== undefined && (
             <ErrorNotice
               title={t('parameter.runErrorTitle')}
