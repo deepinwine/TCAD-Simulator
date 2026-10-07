@@ -7,6 +7,10 @@ FIXED unless the repository owner explicitly changes it.
 Project: evolving `deepinwine/TCAD-Simulator` (from the FonaTech prototype) into
 **TCAD Studio** — a maintainable semiconductor virtual fabrication / Process CAD platform.
 
+Current owner priority (2026-10-07, ADR-027): parameter-driven Structure CAD geometry;
+pause new physical simulation development. Keep the fixed client/runtime stack and
+existing compatibility paths; Structure steps construct geometry without physics solvers.
+
 ## 1. Target Technology Stack (fixed)
 
 | Layer | Technology | Notes |

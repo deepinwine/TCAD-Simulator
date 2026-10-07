@@ -3,6 +3,13 @@
 Numbered, settled decisions. Agents: read before proposing alternatives.
 To change a decision, add a new ADR that supersedes the old one — never deviate silently.
 
+ADR-027 — 当前交付优先参数化 Structure CAD，暂停新增物理仿真（2026-10-07）。
+Reason: 所有者明确选择输入参数得到半导体结构，以控制工程量。
+Rules: 增加纯几何 Structure ProcessStep，尺寸直接构造几何，不调用速率、光学或
+ViennaPS 求解；继续使用 React/Python/ProcessModel/Three.js 和既有 Recipe/资产契约。
+既有仿真配方保留原语义。Structure UI 明确标识构建模式、网格精度和几何能力。
+ADR-014 的 Accurate 栈保持兼容；其新增功能与校准工作暂停，直至所有者恢复安排。
+
 ---
 
 ADR-001 — Python `ProcessModel` stays the geometry/process backend (Fast Mode).
