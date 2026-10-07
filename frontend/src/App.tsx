@@ -9,6 +9,7 @@ import {RecipeAssistant} from './components/RecipeAssistant';
 import {StepStructureBar} from './components/StepStructureBar';
 import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
+import {WorkspaceLayout} from './components/WorkspaceLayout';
 import {I18nProvider, useI18n} from './i18n/I18nContext';
 import {AppStateProvider, useAppState} from './state/AppStateContext';
 import {ThreeViewer} from './viewer/ThreeViewer';
@@ -60,10 +61,6 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
       </main>
     );
   }
-
-  const workspaceClass = parametersCollapsed
-    ? 'studio-workspace parameters-collapsed'
-    : 'studio-workspace';
 
   const openMask = async () => {
     if (selectedStep === null || openingMask || state.activeMutation !== null)
@@ -129,20 +126,18 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
           />
         </div>
       )}
-      <div className={workspaceClass}>
-        <div className="workspace-left">
+      <WorkspaceLayout collapsed={parametersCollapsed} left={<>
           {!(state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '))) && <RecipeAssistant />}
           <ProcessFlowPane
             recipe={state.recipe}
             selectedStepIndex={state.selectedStepIndex}
             onSelect={actions.selectStep}
+            materials={state.materials}
           >
             <StepStructureBar />
           </ProcessFlowPane>
-        </div>
-        <ParameterPanel step={selectedStep} collapsed={parametersCollapsed} onEditMask={() => void openMask()} />
-        <ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />
-      </div>
+        </>} parameters={<ParameterPanel step={selectedStep} collapsed={parametersCollapsed} onEditMask={() => void openMask()} />}
+        viewer={<ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />} />
       <TimelineBar />
     </main>
     {workbench !== null && <MaskWorkbench api={api} initialAsset={workbench.asset} stepIndex={workbench.stepIndex} onApply={actions.applyMaskAsset} onError={actions.reportMaskError} onClose={() => setWorkbench(null)} />}</>

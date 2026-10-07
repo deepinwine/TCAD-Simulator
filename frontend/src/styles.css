@@ -1356,3 +1356,47 @@ button:focus-visible,
 .mask-workbench-footer p { flex: 1; }
 .mask-discard-confirm { position: absolute; inset: 0; background: #0b1421f5; display: flex; align-items: center; justify-content: center; gap: 15px; border-radius: inherit; }
 @media (max-width: 900px) { .mask-workbench-overlay { inset: 0; border-radius: 0; } .mask-workbench-body { grid-template-columns: 165px minmax(220px, 1fr) 210px; overflow: auto; } }
+
+.resizable-workspace { display: grid; grid-template-columns: var(--flow-width) 6px minmax(260px, 1fr) 6px var(--parameter-width); }
+.resizable-workspace.parameters-collapsed { grid-template-columns: var(--flow-width) 6px minmax(260px, 1fr); }
+.resizable-workspace > .workspace-left { width: auto; min-width: 0; max-width: none; grid-column: 1; }
+.workspace-viewer { min-width: 0; min-height: 0; grid-column: 3; }
+.workspace-viewer > .viewer-pane { height: 100%; min-width: 0; }
+.workspace-parameters { min-width: 0; min-height: 0; grid-column: 5; }
+.workspace-parameters > .parameter-pane { position: static; height: 100%; width: auto; max-width: none; box-shadow: none; }
+.workspace-separator { cursor: col-resize; touch-action: none; background: #172333; border-inline: 1px solid #263749; }
+.workspace-separator:hover, .workspace-separator:focus-visible { background: #4ba7d4; outline: none; }
+.workspace-separator[hidden], .workspace-parameters[hidden] { display: none; }
+.add-step-dialog { width: min(460px, calc(100vw - 32px)); max-height: 85vh; overflow: auto; color: #e6eef5; border: 1px solid #41536a; border-radius: 8px; background: #142131; box-shadow: 0 24px 80px #0009; padding: 24px; }
+.add-step-dialog::backdrop { background: #020912aa; }
+.add-step-dialog form { display: flex; flex-direction: column; gap: 12px; }
+.add-step-dialog h2 { font-size: 18px; margin: 0; }
+.add-step-dialog p, .add-step-dialog small { color: #a6b9cd; font-size: 12px; }
+.add-step-dialog input, .add-step-dialog select { padding: 8px; background: #0c1722; color: #e6eef5; border: 1px solid #41536a; border-radius: 4px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.studio-shell { grid-template-rows: auto auto minmax(0, 1fr) 92px; }
+.studio-toolbar { position: relative; gap: 12px; grid-row: 1; min-height: 56px; padding-block: 8px; }
+.global-error-strip { grid-row: 2; }
+.studio-workspace { grid-row: 3; }
+.timeline-bar { grid-row: 4; }
+.product-lockup, .toolbar-actions { flex-shrink: 0; }
+.toolbar-run-group { flex: 1; flex-wrap: wrap; gap: 6px; overflow: visible; }
+.toolbar-run-group > button { flex-shrink: 0; }
+.toolbar-button { white-space: nowrap; }
+.toolbar-recipe-tools { position: absolute; top: 100%; left: 16px; right: 16px; z-index: 10; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; background: #142131; border: 1px solid #41536a; box-shadow: 0 12px 24px #0007; }
+.toolbar-recipe-tools[hidden] { display: none; }
+@media (max-width: 1200px) {
+  .studio-toolbar { flex-wrap: wrap; justify-content: flex-start; gap: 8px; }
+  .toolbar-run-group { order: 3; flex-basis: 100%; width: 100%; }
+  .toolbar-actions { flex-wrap: wrap; margin-left: auto; }
+}
+@media (max-width: 900px) {
+  .studio-workspace.resizable-workspace, .studio-workspace.resizable-workspace.parameters-collapsed { display: flex; flex-direction: column; overflow: auto; }
+  .resizable-workspace > .workspace-left { width: 100%; min-height: 320px; max-height: none; flex-shrink: 0; }
+  .workspace-left .process-pane { min-height: 320px; }
+  .workspace-left .recipe-assistant { max-height: 200px; }
+  .workspace-viewer { min-height: 420px; flex-shrink: 0; }
+  .workspace-parameters { min-height: 300px; flex-shrink: 0; }
+  .workspace-separator { display: none; }
+  .workspace-parameters > .parameter-pane { position: static; width: 100%; height: auto; min-height: 300px; }
+}

@@ -13,15 +13,18 @@ export function materialLabel(value: unknown, materials: MaterialView[]): string
   return ({'Silicon Dioxide': 'SiO₂', SiO2: 'SiO₂', Silicon: 'Si', 'Silicon Nitride': 'Si₃N₄', Si3N4: 'Si₃N₄'} as Record<string, string>)[name] ?? name;
 }
 export function presentStep(step: StepView, materials: MaterialView[], locale: Locale) {
-  const operation = step.name.startsWith('Structure ') ? step.name.slice(10) : step.name === 'Deposition' ? 'Deposit' : step.name;
+  const structure = step.name.startsWith('Structure ');
+  const operation = structure ? step.name.slice(10) : step.name === 'Deposition' || step.name === 'Deposit' ? 'Deposit' : step.name === 'Etch' ? 'Etch' : '';
   const copy = operations[operation];
   if (!copy) return {title: step.instanceName, type: step.name, description: ''};
   const english = locale === 'en';
   const label = copy[english ? 1 : 0];
   const material = materialLabel(step.params.material, materials);
-  const key = operation === 'Etch' ? 'depth_nm' : operation === 'Fill' || operation === 'Planarize' ? 'height_nm' : operation === 'Pattern' ? 'critical_dimension' : 'thickness_nm';
+  const key = operation === 'Etch' ? (structure ? 'depth_nm' : 'time') : operation === 'Fill' || operation === 'Planarize' ? 'height_nm' : operation === 'Pattern' ? 'critical_dimension' : 'thickness_nm';
   const value = step.params[key] ?? (operation === 'Deposit' ? step.params.thickness : undefined);
-  const prefix = operation === 'Etch' ? (english ? 'Depth ' : '深度 ') : operation === 'Fill' || operation === 'Planarize' ? (english ? 'Height ' : '高度 ') : operation === 'Pattern' ? 'CD ' : '';
-  const summary = [label, material, typeof value === 'number' ? `${prefix}${value} nm` : ''].filter(Boolean).join(' · ');
-  return {title: step.instanceName && step.instanceName !== step.name ? step.instanceName : summary, type: `${label} / ${copy[1]}`, description: copy[english ? 3 : 2]};
+  const legacyEtch = !structure && operation === 'Etch';
+  const prefix = operation === 'Etch' ? (legacyEtch ? (english ? 'Time ' : '时间 ') : english ? 'Depth ' : '深度 ') : operation === 'Fill' || operation === 'Planarize' ? (english ? 'Height ' : '高度 ') : operation === 'Pattern' ? 'CD ' : '';
+  const summary = [label, material, typeof value === 'number' ? `${prefix}${value} ${legacyEtch ? 's' : 'nm'}` : ''].filter(Boolean).join(' · ');
+  const description = legacyEtch ? (english ? 'Legacy etching uses time and rate. Select Structure Etch to construct by depth.' : '旧配方刻蚀按时间与速率运行；按深度构建请选择结构刻蚀。') : copy[english ? 3 : 2];
+  return {title: step.instanceName && step.instanceName !== step.name ? step.instanceName : summary, type: `${label} / ${copy[1]}`, description};
 }

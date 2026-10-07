@@ -191,6 +191,15 @@ function recordingViewerRuntime() {
 }
 
 describe('Toolbar 配方管理', () => {
+  it('次要配方操作可展开且默认不占用主工具栏', async () => {
+    render(<App api={apiStub()} viewerRuntimeFactory={stubViewerRuntime} />);
+    const toggle = await screen.findByRole('button', {name: '配方操作'});
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', {name: '保存配方'})).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', {name: '保存配方'})).toBeVisible();
+  });
   it('Demo 列表来自 init，选择后加载触发 importRecipe', async () => {
     const api = apiStub({
       init: vi.fn(async () => ({
@@ -202,6 +211,7 @@ describe('Toolbar 配方管理', () => {
       })),
     });
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    fireEvent.click(await screen.findByRole('button', {name: '配方操作'}));
     const select = await screen.findByRole('combobox', {name: 'Demo 配方'});
     expect(select).toHaveDisplayValue('-- 选择 Demo 配方 --');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent);
@@ -216,6 +226,7 @@ describe('Toolbar 配方管理', () => {
   it('保存与导出触发对应调用', async () => {
     const api = apiStub();
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    fireEvent.click(await screen.findByRole('button', {name: '配方操作'}));
     await screen.findByRole('button', {name: '保存配方'});
     fireEvent.change(screen.getByRole('textbox', {name: '配方名称'}), {
       target: {value: 'My Recipe'},
@@ -229,6 +240,7 @@ describe('Toolbar 配方管理', () => {
   it('导入读取本地 JSON 文件并触发 importRecipe', async () => {
     const api = apiStub();
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    fireEvent.click(await screen.findByRole('button', {name: '配方操作'}));
     await screen.findByRole('button', {name: '导入配方'});
     const input = screen.getByLabelText('导入配方文件') as HTMLInputElement;
     const file = new File([JSON.stringify({steps: []})], 'recipe.json', {
@@ -241,6 +253,7 @@ describe('Toolbar 配方管理', () => {
   it('新建配方以输入名调用 newRecipe', async () => {
     const api = apiStub();
     render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+    fireEvent.click(await screen.findByRole('button', {name: '配方操作'}));
     const nameInput = await screen.findByRole('textbox', {name: '配方名称'});
     fireEvent.change(nameInput, {target: {value: 'My Process'}});
     fireEvent.click(screen.getByRole('button', {name: '新建配方'}));

@@ -114,6 +114,7 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children, 
         </div>
         <span className="pane-count" aria-label={t('process.stepCount', {count: recipe.length})}>{recipe.length}</span>
       </header>
+      {children}
       {recipe.length === 0 ? (
         <p className="pane-empty">{t('process.empty')}</p>
       ) : (
@@ -150,7 +151,6 @@ export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children, 
           ))}
         </div>
       )}
-      {children}
     </section>
   );
 }

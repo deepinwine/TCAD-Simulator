@@ -205,7 +205,7 @@ describe('App shell', () => {
     render(<App api={apiStub()} />);
     const button = await screen.findByRole('button', {name: '折叠 Parameters'});
     const panel = screen.getByRole('region', {name: 'Parameters'});
-    const workspace = panel.parentElement;
+    const workspace = panel.closest('.studio-workspace');
 
     expect(button).toHaveAttribute('aria-expanded', 'true');
     expect(button).toHaveAttribute('aria-controls', panel.id);

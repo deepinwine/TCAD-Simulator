@@ -21,11 +21,13 @@ const operationKeys: Record<Exclude<ActiveMutation, null>, TranslationKey> = {
   redo: 'operation.redo',
   recipe: 'operation.recipe',
   mask: 'operation.mask',
+  apply: 'operation.to',
 };
 
 export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {
   const {state, actions} = useAppState();
-  const {t} = useI18n();
+  const {t, locale} = useI18n();
+  const [recipeToolsOpen, setRecipeToolsOpen] = useState(false);
   const [demoChoice, setDemoChoice] = useState('');
   const [recipeName, setRecipeName] = useState('');
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -45,7 +47,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
     : '';
   const draftBlocked = hasUnsavedDrafts(state);
   const selectedMissing = state.selectedStepIndex === null;
-  const allRunsDisabled = mutationActive || draftBlocked;
+  const allRunsDisabled = mutationActive || draftBlocked || state.pendingSaves > 0;
   const describedBy = draftBlocked ? draftGuidanceId : undefined;
   return (
     <header className="studio-toolbar">
@@ -104,6 +106,8 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
         >
           {t('toolbar.redo')}
         </button>
+        <button type="button" className="toolbar-button" aria-controls="recipe-tools" aria-expanded={recipeToolsOpen} onClick={() => setRecipeToolsOpen(value => !value)}>{locale === 'en' ? 'Recipe actions' : '配方操作'}</button>
+        <div id="recipe-tools" className="toolbar-recipe-tools" hidden={!recipeToolsOpen}>
         <select
           className="toolbar-button"
           aria-label={t('toolbar.demoRecipe')}
@@ -195,6 +199,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
             event.target.value = '';
           }}
         />
+        </div>
         {draftBlocked && (
           <span id={draftGuidanceId} className="toolbar-gate-copy" role="status">
             {t('toolbar.draftGuidance')}
