@@ -18,6 +18,16 @@ const wireStep = {
   runtime_status: 'ready',
 };
 
+it('配置添加一次提交params和可选name，旧调用维持name-only', async () => {
+  const fetcher = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ok: true, result: [wireStep]}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  vi.stubGlobal('fetch', fetcher);
+  const api = createTcadApi();
+  await api.addStep('Structure Deposit', undefined, {params: {material: 'Silicon Dioxide', thickness_nm: 80}, instanceName: 'Oxide'});
+  expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toEqual({name: 'Structure Deposit', params: {material: 'Silicon Dioxide', thickness_nm: 80}, instance_name: 'Oxide'});
+  await api.addStep('Deposit');
+  expect(JSON.parse(fetcher.mock.calls[1][1]!.body as string)).toEqual({name: 'Deposit'});
+});
+
 const wireModel = {
   grid_shape: [64, 64, 96],
   voxel_size_nm: 10,

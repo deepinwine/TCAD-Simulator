@@ -48,6 +48,10 @@ const validInit = {
 };
 
 describe('parseInitEnvelope', () => {
+  it('解析可选工厂模板且接受没有模板的旧服务器', () => {
+    expect(parseInitEnvelope({...validInit, result: {...validInit.result, factory_templates: [validStep]}})).toHaveProperty('factoryTemplates', [expect.objectContaining({name: 'Initialize Wafer', parameterSpecs: [expect.objectContaining({key: 'material'})]})]);
+    expect(parseInitEnvelope(validInit)).not.toHaveProperty('factoryTemplates');
+  });
   it.each([
     [{dimension: 'length', canonical_unit: 's', display_units: ['nm']}, 'canonical_unit'],
     [{dimension: 'nonsense', canonical_unit: 'nm', display_units: ['nm']}, 'dimension'],

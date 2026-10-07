@@ -54,6 +54,7 @@ export interface InitView {
   recipe: StepView[];
   model: ModelSummaryView;
   factories: string[];
+  factoryTemplates?: StepView[];
   materials: MaterialView[];
   uiState: Record<string, unknown>;
   backendCapabilities?: Record<string, string>;
@@ -261,7 +262,7 @@ export interface TcadApi {
   saveRecipe(name: string, signal?: AbortSignal): Promise<{saved: boolean}>;
   exportRecipe(scope?: string, signal?: AbortSignal): Promise<Blob>;
   loadRecipe(id: string, signal?: AbortSignal): Promise<RecipeLoadView>;
-  addStep(name: string, signal?: AbortSignal): Promise<StepView[]>;
+  addStep(name: string, signal?: AbortSignal, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<StepView[]>;
   removeStep(index: number, signal?: AbortSignal): Promise<StepView[]>;
   duplicateStep(index: number, signal?: AbortSignal): Promise<StepView[]>;
   moveStep(index: number, direction: 'up' | 'down', signal?: AbortSignal): Promise<StepView[]>;

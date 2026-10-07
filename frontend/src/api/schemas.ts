@@ -352,6 +352,7 @@ export function parseInitEnvelope(payload: unknown): InitView {
     }
     view.demoRecipes = demos;
   }
+  if (result.factory_templates !== undefined) view.factoryTemplates = parseRecipe(result.factory_templates, 'result.factory_templates');
   if (result.current_recipe !== undefined) {
     view.currentRecipe = parseCurrentRecipe(result.current_recipe);
   }

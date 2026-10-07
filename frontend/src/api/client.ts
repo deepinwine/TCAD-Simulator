@@ -439,10 +439,10 @@ export function createTcadApi(): TcadApi {
         signal,
       );
     },
-    addStep(name: string, signal?: AbortSignal): Promise<StepView[]> {
+    addStep(name: string, signal?: AbortSignal, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<StepView[]> {
       return apiPostJson(
         '/api/recipe/add',
-        {name},
+        {name, ...(configuration === undefined ? {} : {params: configuration.params, ...(configuration.instanceName === undefined ? {} : {instance_name: configuration.instanceName})})},
         parseStepListEnvelope,
         signal,
       );
