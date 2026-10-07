@@ -38,7 +38,7 @@ export function StepStructureBar() {
       >
         <option value="">{t('structure.selectType')}</option>
         {factories.map(factory => (
-          <option key={factory} value={factory}>{state.factoryTemplates?.find(item => item.name === factory) ? `${!structureMode && factory.startsWith('Structure ') ? (locale === 'en' ? 'Structure · ' : '结构 · ') : !structureMode && ['Deposit', 'Deposition', 'Etch'].includes(factory) ? (locale === 'en' ? 'Process · ' : '工艺 · ') : ''}${presentStep(state.factoryTemplates.find(item => item.name === factory)!, state.materials, locale).type}` : factory}</option>
+          <option key={factory} value={factory}>{state.factoryTemplates?.find(item => item.name === factory) ? `${!structureMode && factory.startsWith('Structure ') ? t('structure.structurePrefix') : !structureMode && ['Deposit', 'Deposition', 'Etch'].includes(factory) ? t('structure.processPrefix') : ''}${presentStep(state.factoryTemplates.find(item => item.name === factory)!, state.materials, locale).type}` : factory}</option>
         ))}
       </select>
       <button
@@ -53,7 +53,7 @@ export function StepStructureBar() {
       >
         {t('structure.add')}
       </button>
-      {structureMode && state.factoryTemplates === undefined && <small>{locale === 'en' ? 'Legacy server: adds default parameters; edit after adding.' : '旧版服务器：添加默认步骤后编辑参数。'}</small>}
+      {structureMode && state.factoryTemplates === undefined && <small>{t('structure.legacyServer')}</small>}
       {template !== null && <AddStepDialog template={template} busy={busy} onCancel={() => setTemplate(null)} onConfirm={async configuration => {const applied = await actions.addStep(template.name, configuration); if (applied) {setTemplate(null); setAddChoice('');} return applied;}} />}
       <button
         type="button"

@@ -15,7 +15,6 @@ function displayBound(value: number | undefined, conversion: ReturnType<typeof c
 
 export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: StepView; busy: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
   const {locale, t} = useI18n();
-  const english = locale === 'en';
   const [values, setValues] = useState<Record<string, unknown>>(() => Object.fromEntries(template.parameterSpecs.map(spec => [spec.key, template.params[spec.key] ?? spec.defaultValue])));
   const [name, setName] = useState('');
   const [units, setUnits] = useState<Record<string, DisplayUnit>>(() => Object.fromEntries(template.parameterSpecs.flatMap(spec => {const conversion = conversionSpec(spec); return conversion ? [[spec.key, conversion.preferred]] : [];})));
@@ -61,18 +60,18 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
       try {if (await onConfirm({params: Object.fromEntries(validated.map(({spec, result}) => [spec.key, result.ok ? result.value : undefined])), ...(name.trim() ? {instanceName: name.trim()} : {})}) === false) setFailed(true);}
       finally {gate.current = false; setSubmitting(false);}
     }}>
-      <h2 id="add-step-title">{english ? 'Configure step' : '配置步骤'} · {presentStep(template, [], locale).type}</h2>
+      <h2 id="add-step-title">{t('addStep.title')} · {presentStep(template, [], locale).type}</h2>
       <p>{presentStep(template, [], locale).description}</p>
-      {failed && <p role="alert">{english ? 'Could not add the step. Check the parameters and retry.' : '添加失败，请检查参数后重试。'}</p>}
+      {failed && <p role="alert">{t('addStep.failed')}</p>}
       {validated.map(({spec, result, baseResult, conversion, editable}) => {
         const id = `add-step-${spec.key}`;
         const label = Object.hasOwn(zhCN, `cad.${spec.key}`) ? t(`cad.${spec.key}` as TranslationKey) : spec.label;
         return <div className="parameter-field" key={spec.key}>
-          <label htmlFor={id}>{label}{spec.units ? `（${units[spec.key] ?? spec.units}）` : ''}</label>
+          <label htmlFor={id}>{spec.units ? t('addStep.fieldWithUnit', {label, unit: units[spec.key] ?? spec.units}) : label}</label>
           {!editable ? <pre>{JSON.stringify(values[spec.key])}</pre> : spec.choices ? <select id={id} disabled={disabled} value={spec.choices.findIndex(([value]) => Object.is(value, values[spec.key]))} onChange={event => updateValue(spec.key, spec.choices![Number(event.target.value)][0])}>
             {spec.choices.map(([, text], index) => <option key={index} value={index}>{text}</option>)}
           </select> : spec.type === 'bool' || spec.type === 'boolean' ? <input id={id} type="checkbox" disabled={disabled} checked={Boolean(values[spec.key])} onChange={event => updateValue(spec.key, event.target.checked)} /> : <input id={id} type={['float', 'int', 'integer'].includes(spec.type) ? 'number' : 'text'} step="any" min={displayBound(spec.minimum, conversion, units[spec.key])} max={displayBound(spec.maximum, conversion, units[spec.key])} disabled={disabled} aria-invalid={!result.ok} value={String(values[spec.key] ?? '')} onChange={event => updateValue(spec.key, event.target.value)} />}
-          {conversion && <select aria-label={`${label}${english ? ' unit' : '单位'}`} disabled={disabled} value={units[spec.key]} onChange={event => {
+          {conversion && <select aria-label={t('addStep.unit', {label})} disabled={disabled} value={units[spec.key]} onChange={event => {
             const nextUnit = event.target.value as DisplayUnit;
             try {
               if (baseResult.ok && typeof baseResult.value === 'number') {
@@ -86,12 +85,12 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
             }
           }}>{conversion.units.map(unit => <option key={unit} value={unit}>{unit}</option>)}</select>}
           {spec.tooltip && <small>{spec.tooltip}</small>}
-          {!result.ok && <small role="alert">{english ? 'Enter a valid value within the allowed range.' : '请输入符合范围的有效值。'}</small>}
+          {!result.ok && <small role="alert">{t('addStep.invalid')}</small>}
         </div>;
       })}
-      <label htmlFor="add-step-name">{english ? 'Custom name (optional)' : '自定义名称（可选）'}</label>
+      <label htmlFor="add-step-name">{t('addStep.customName')}</label>
       <input id="add-step-name" maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} />
-      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{english ? 'Cancel' : '取消'}</button><button type="submit" disabled={disabled || !valid}>{english ? 'Add step' : '确认添加'}</button></div>
+      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid}>{t('addStep.confirm')}</button></div>
     </form>
   </dialog>;
 }

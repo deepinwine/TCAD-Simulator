@@ -466,8 +466,8 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
-          <p role="status">{Object.keys(state.drafts).some(key => key.startsWith(`${step.index}:`)) ? (locale === 'en' ? 'Unsaved changes' : '未保存的参数') : step.runtimeStatus === 'dirty' ? (locale === 'en' ? 'Modified · rebuild required' : '已修改 · 尚未重新构建') : ''}</p>
-          <button type="button" className="toolbar-button is-primary" disabled={disabled || Object.values(state.drafts).some(draft => draft.validation.status === 'invalid')} onClick={() => void actions.applyAndRunTo(step.index)}>{locale === 'en' ? 'Apply and build to this step' : '应用并构建到此步'}</button>
+          <p role="status">{Object.keys(state.drafts).some(key => key.startsWith(`${step.index}:`)) ? t('parameter.unsavedChanges') : step.runtimeStatus === 'dirty' ? t('parameter.modifiedBuildRequired') : ''}</p>
+          <button type="button" className="toolbar-button is-primary" disabled={disabled || Object.values(state.drafts).some(draft => draft.validation.status === 'invalid')} onClick={() => void actions.applyAndRunTo(step.index)}>{t('parameter.applyAndBuild')}</button>
           {runError !== undefined && (
             <ErrorNotice
               title={t('parameter.runErrorTitle')}

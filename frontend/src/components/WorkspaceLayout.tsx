@@ -18,7 +18,7 @@ function fitWidths(widths: PaneWidths, available: number, collapsed: boolean): P
   return left === widths.left && right === widths.right ? widths : {left, right};
 }
 export function WorkspaceLayout({left, viewer, parameters, collapsed}: {left: ReactNode; viewer: ReactNode; parameters: ReactNode; collapsed: boolean}) {
-  const {locale} = useI18n();
+  const {t} = useI18n();
   const [widths, setWidths] = useState({left: 280, right: 320});
   const [availableWidth, setAvailableWidth] = useState(0);
   const workspace = useRef<HTMLDivElement>(null);
@@ -46,7 +46,7 @@ export function WorkspaceLayout({left, viewer, parameters, collapsed}: {left: Re
     });
   }
   function separator(side: 'left' | 'right') {
-    return <div className="workspace-separator" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={locale === 'en' ? `${side} pane width` : side === 'left' ? '步骤栏宽度' : '参数栏宽度'} aria-valuemin={bounds[side][0]} aria-valuemax={maximumWidth(side, widths, availableWidth, collapsed)} aria-valuenow={widths[side]} hidden={side === 'right' && collapsed}
+    return <div className="workspace-separator" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={t(side === 'left' ? 'workspace.flowWidth' : 'workspace.parameterWidth')} aria-valuemin={bounds[side][0]} aria-valuemax={maximumWidth(side, widths, availableWidth, collapsed)} aria-valuenow={widths[side]} hidden={side === 'right' && collapsed}
       onKeyDown={event => {const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0; if (direction) {event.preventDefault(); resize(side, widths[side] + direction * (side === 'left' ? 20 : -20));} else if (event.key === 'Home' || event.key === 'End') {event.preventDefault(); resize(side, bounds[side][event.key === 'Home' ? 0 : 1]);}}}
       onPointerDown={event => {if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); drag.current = {side, pointerId: event.pointerId, startX: event.clientX, width: widths[side]};}}
       onPointerMove={event => {const active = drag.current; if (!active || active.side !== side || active.pointerId !== event.pointerId) return; resize(side, active.width + (event.clientX - active.startX) * (side === 'left' ? 1 : -1));}}

@@ -5,6 +5,10 @@ import {I18nProvider, useI18n} from './I18nContext';
 import {detectInitialLocale, en, zhCN} from './catalogs';
 
 describe('translation catalogs', () => {
+  it('集中管理创建表单、构建反馈与工作区新增文案', () => {
+    expect(zhCN).toMatchObject({'addStep.title': '配置步骤', 'addStep.confirm': '确认添加', 'parameter.applyAndBuild': '应用并构建到此步', 'toolbar.recipeActions': '配方操作', 'workspace.parameterWidth': '参数栏宽度'});
+    expect(en).toMatchObject({'addStep.title': 'Configure step', 'addStep.confirm': 'Add step', 'parameter.applyAndBuild': 'Apply and build to this step', 'toolbar.recipeActions': 'Recipe actions', 'workspace.parameterWidth': 'Parameter pane width'});
+  });
   it('keeps zh-CN and en keys in exact parity', () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(zhCN).sort());
   });

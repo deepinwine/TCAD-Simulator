@@ -26,7 +26,7 @@ const operationKeys: Record<Exclude<ActiveMutation, null>, TranslationKey> = {
 
 export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {
   const {state, actions} = useAppState();
-  const {t, locale} = useI18n();
+  const {t} = useI18n();
   const [recipeToolsOpen, setRecipeToolsOpen] = useState(false);
   const [demoChoice, setDemoChoice] = useState('');
   const [recipeName, setRecipeName] = useState('');
@@ -106,7 +106,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
         >
           {t('toolbar.redo')}
         </button>
-        <button type="button" className="toolbar-button" aria-controls="recipe-tools" aria-expanded={recipeToolsOpen} onClick={() => setRecipeToolsOpen(value => !value)}>{locale === 'en' ? 'Recipe actions' : '配方操作'}</button>
+        <button type="button" className="toolbar-button" aria-controls="recipe-tools" aria-expanded={recipeToolsOpen} onClick={() => setRecipeToolsOpen(value => !value)}>{t('toolbar.recipeActions')}</button>
         <div id="recipe-tools" className="toolbar-recipe-tools" hidden={!recipeToolsOpen}>
         <select
           className="toolbar-button"

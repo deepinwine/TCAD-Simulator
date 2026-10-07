@@ -2,8 +2,18 @@ import {fireEvent, render, screen} from '@testing-library/react';
 import {describe, expect, it, vi} from 'vitest';
 import type {StepView} from '../api/types';
 import {AddStepDialog} from './AddStepDialog';
+import {I18nProvider} from '../i18n/I18nContext';
 const template: StepView = {index: 0, name: 'Structure Deposit', instanceName: 'Structure Deposit', group: '', loop: '', enabled: true, runtimeStatus: 'ready', params: {thickness_nm: 35, metadata: {source: 'default'}}, parameterSpecs: [{key: 'thickness_nm', label: 'Thickness', type: 'float', minimum: 0, dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm'], units: 'nm'}, {key: 'metadata', label: 'Metadata', type: 'json'}]};
 describe('创建表单', () => {
+  it('英文创建文案与单位标签使用集中目录', () => {
+    window.localStorage.setItem('tcad.locale.v1', 'en');
+    render(<I18nProvider><AddStepDialog template={template} busy={false} onCancel={() => {}} onConfirm={async () => {}} /></I18nProvider>);
+    expect(screen.getByRole('heading', {name: /Configure step/})).toBeVisible();
+    expect(screen.getByLabelText('Thickness (nm)')).toHaveValue(35);
+    expect(screen.getByLabelText('Thickness unit')).toHaveValue('nm');
+    expect(screen.getByRole('button', {name: 'Add step'})).toBeVisible();
+    expect(screen.getByRole('button', {name: 'Cancel'})).toBeVisible();
+  });
   it('有限的µm极值转换溢出呈现invalid并保留表单与输入', () => {
     const confirm = vi.fn(async () => {});
     render(<AddStepDialog template={template} busy={false} onCancel={() => {}} onConfirm={confirm} />);
