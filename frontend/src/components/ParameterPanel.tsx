@@ -283,6 +283,12 @@ function ParameterField({
     return conversion.units.includes(preferred as DisplayUnit) ? preferred as DisplayUnit : conversion.preferred;
   });
   const canonicalDisplay = (value: unknown, unit = displayUnit): DisplayValue => {
+    if (isChoice(spec) && typeof value === 'number' && choiceIndex(spec.choices, value) === '') {
+      const material = state.materials.find(item => item.id === value);
+      if (material !== undefined && choiceIndex(spec.choices, material.name) !== '') {
+        return choiceIndex(spec.choices, material.name);
+      }
+    }
     if (!conversion || unit === undefined || typeof value !== 'number') return initialDisplayValue(spec, value, t);
     return formatDisplayValue(fromCanonical(value, conversion.dimension, unit), spec.decimals ?? 2);
   };

@@ -134,6 +134,22 @@ async function mount(initial: InitView, api = apiStub(initial), strict = false) 
   return {...result, api};
 }
 
+it.each([[1, '0'], [2, '1'], [14, '2']])('renders numeric Structure material ID %s and saves a changed material name', async (id, selected) => {
+  const initial = init([step(0, {name: 'Structure Deposit', params: {material: id}, parameterSpecs: [{key: 'material', label: 'Material', type: 'enum', choices: [['Silicon', 'Silicon'], ['Silicon Dioxide', 'Silicon Dioxide'], ['Copper', 'Copper']]}]})]);
+  initial.materials = [{id: 1, name: 'Silicon', color: [1,1,1], enabled: true}, {id: 2, name: 'Silicon Dioxide', color: [1,1,1], enabled: true}, {id: 14, name: 'Copper', color: [1,1,1], enabled: true}];
+  const api = apiStub(initial, {setStep: vi.fn(async request => ({
+    step: {...initial.recipe[0], params: {material: request.params?.material === 'Copper' ? 14 : 1}},
+    statuses: ['dirty'], warnings: [],
+  }))});
+  await mount(initial, api);
+  const material = screen.getByRole('combobox', {name: '材料'});
+  expect(material).toHaveValue(selected);
+  fireEvent.change(material, {target: {value: id === 14 ? '0' : '2'}});
+  fireEvent.blur(material);
+  await waitFor(() => expect(api.setStep).toHaveBeenCalledWith(expect.objectContaining({params: {material: id === 14 ? 'Silicon' : 'Copper'}}), expect.any(AbortSignal)));
+  await waitFor(() => expect(material).toHaveValue(id === 14 ? '0' : '2'));
+});
+
 describe('Mask preview binding', () => {
   it('refreshes same-name revisions and retries failed previews when binding changes', async () => {
     const api = apiStub(init());
