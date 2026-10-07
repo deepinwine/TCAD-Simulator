@@ -62663,6 +62663,10 @@ def _webui_worker_main(
                     "present_material_ids": _present_material_ids(),
                     "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
+                    "factory_templates": [
+                        _webui_serialize_step(PROCESS_STEP_FACTORIES[name](material_db))
+                        for name in sorted(PROCESS_STEP_FACTORIES)
+                    ],
                     "backend_capabilities": dict(VOXEL_BACKEND_CAPABILITIES),
                     "demo_recipes": load_demo_flows(material_db),
                     "history": history_index,
@@ -71884,6 +71888,46 @@ def _webui_worker_main(
                     _webui_apply_admin_step_defaults(step, admin_cfg)
                 except Exception:
                     pass
+                # Configured creation validates a detached candidate before
+                # changing the recipe, runtime statuses or autosave history.
+                if "instance_name" in payload:
+                    label = payload["instance_name"]
+                    if not isinstance(label, str) or not 1 <= len(label.strip()) <= 80:
+                        raise ValueError("instance_name must contain 1–80 characters")
+                    step.instance_name = label.strip()
+                # Preserve old name-only exposure defaults. Configured clients
+                # can explicitly select Procedural before any step is inserted.
+                if isinstance(step, ExposureStep):
+                    step.params["mask_mode"] = "Custom"
+                if "params" in payload:
+                    from recipe_planner.schema import normalize_params, parameter_errors
+                    supplied = normalize_params(name, payload["params"])
+                    candidate_params = dict(step.params)
+                    candidate_params.update(supplied)
+                    if any(isinstance(value, bool) and "material" in key
+                           for key, value in candidate_params.items()):
+                        raise ValueError("Material must be a registered material, not a boolean")
+                    errors = parameter_errors(name, candidate_params, material_db=material_db)
+                    if errors:
+                        raise ValueError("; ".join(errors))
+                    step.params = candidate_params
+                    if name.startswith("Structure "):
+                        from structure_cad.operations import layers, number
+                        if name in ("Structure Wafer", "Structure Deposit"):
+                            count = layers(model, candidate_params["thickness_nm"], "thickness_nm")
+                            if count > model.grid.shape[2]:
+                                raise ValueError("Structure thickness exceeds domain height")
+                        elif name == "Structure Etch":
+                            layers(model, candidate_params["depth_nm"], "depth_nm")
+                            angle = number(candidate_params["sidewall_angle_deg"], "sidewall_angle_deg")
+                            if angle > 90:
+                                raise ValueError("sidewall_angle_deg must be in (0, 90]")
+                        elif name in ("Structure Fill", "Structure Planarize"):
+                            count = layers(model, candidate_params["height_nm"], "height_nm", zero=True)
+                            if count > model.grid.shape[2]:
+                                raise ValueError("Structure height exceeds domain height")
+                        elif name == "Structure Pattern" and candidate_params.get("mask_mode") == "Procedural":
+                            step.geometry_mask(model)
                 try:
                     msgs = _normalize_step_material_params(step, material_db, admin_cfg)
                     if msgs:
@@ -71893,12 +71937,6 @@ def _webui_worker_main(
                                 model._log(m)
                             except Exception:
                                 pass
-                except Exception:
-                    pass
-                # WebUI default: exposure uses Designer/Imported masks unless explicitly switched.
-                try:
-                    if isinstance(step, ExposureStep):
-                        step.params["mask_mode"] = "Custom"
                 except Exception:
                     pass
                 if insert_index is None:

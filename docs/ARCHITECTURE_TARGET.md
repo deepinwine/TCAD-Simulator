@@ -81,7 +81,7 @@ send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 | Endpoint | Method | Request (minimal) | Response |
 | --- | --- | --- | --- |
 | `/api/health` | GET | — | JSON |
-| `/api/init` | GET | — | JSON; `result`: `recipe`、`model`、`recipe_factories`、`materials`、`demo_recipes`、`recipes`、`ui_state`、`backend_capabilities`（加法能力矩阵）；`recipe[].parameter_specs[]` 的加法字段：`dimension`、`canonical_unit`、`display_units`、`capability_key` |
+| `/api/init` | GET | — | JSON; `result`: `recipe`、`model`、`recipe_factories`、`materials`、`demo_recipes`、`recipes`、`ui_state`、`backend_capabilities`（加法能力矩阵）；可选加法字段 `factory_templates` 为带 `parameter_specs` 的默认 Step 列表，供添加表单使用；`recipe[].parameter_specs[]` 的加法字段：`dimension`、`canonical_unit`、`display_units`、`capability_key` |
 | `/api/status` | GET | — | JSON |
 | `/api/log` | GET | — | JSON |
 | `/api/history` | GET | — | JSON（历史清单） |
@@ -94,7 +94,7 @@ send raw bytes on success (JSON error envelopes on 4xx/5xx). Contract tests:
 | `/api/recipe/set_name` | POST | `{name}` | JSON |
 | `/api/recipe/export` | GET | query `id` 或 `scope=current` | JSON（**裸 recipe blob**，无 `ok` 封套；含 `steps_full`） |
 | `/api/recipe/import` | POST | `{recipe, autosave_current?, current_name?}` | JSON |
-| `/api/recipe/add` | POST | `{name, insert_index?}` | JSON; `result`: step list |
+| `/api/recipe/add` | POST | `{name, insert_index?, params?, instance_name?}` | JSON; `result`: step list；可选 `params` 和 `instance_name` 在 detached candidate 校验后一次添加，非法输入为既有 `ok:false` JSON 封套，不改变配方；旧 name-only 行为保留 |
 | `/api/recipe/insert_steps` | POST | `{steps, insert_index?}` | JSON; `result`: step list |
 | `/api/recipe/remove` | POST | `{index}` | JSON; `result`: step list |
 | `/api/recipe/duplicate` | POST | `{index}` | JSON; `result`: step list |
