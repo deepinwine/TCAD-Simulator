@@ -733,3 +733,9 @@ describe('ParameterPanel', () => {
     unmount();
   });
 });
+it('initializer is edited through project settings and never ordinary process controls', async () => {
+  await mount(init([step(0, {name: 'Structure Wafer', parameterSpecs: [{key: 'thickness_nm', label: 'Thickness', type: 'float'}]})]));
+  fireEvent.click(screen.getByRole('button', {name: '选择步骤 0'}));
+  expect(screen.queryByLabelText('厚度')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', {name: '应用并构建到此步'})).not.toBeInTheDocument();
+});

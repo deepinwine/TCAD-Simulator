@@ -191,6 +191,10 @@ function recordingViewerRuntime() {
 }
 
 describe('Toolbar 配方管理', () => {
+  it('项目设置为直接可见的主工具栏入口', async () => {
+    render(<App api={apiStub()} viewerRuntimeFactory={stubViewerRuntime} />);
+    expect(await screen.findByRole('button', {name: '项目设置'})).toBeVisible();
+  });
   it('次要配方操作可展开且默认不占用主工具栏', async () => {
     render(<App api={apiStub()} viewerRuntimeFactory={stubViewerRuntime} />);
     const toggle = await screen.findByRole('button', {name: '配方操作'});

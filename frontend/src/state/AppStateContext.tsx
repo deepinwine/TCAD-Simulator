@@ -25,6 +25,7 @@ import {
 } from './appReducer';
 
 export interface AppStateActions {
+  setTypeCandidate(index: number, pending: boolean): void;
   updateDraftDisplay(index: number, key: string, rawValue: string | boolean, displayUnit: string): void;
   bootstrap(): Promise<void>;
   selectStep(index: number): void;
@@ -121,6 +122,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const sequenceRef = useRef<Record<string, number>>({});
   const savingRef = useRef<Record<string, number>>({});
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const candidateIndicesRef = useRef(new Set<number>());
   const pendingSaveCountRef = useRef(0);
   const timelineGenerationRef = useRef(0);
   const standaloneTimelineControllerRef = useRef<AbortController | null>(null);
@@ -281,6 +283,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const saveParameter = useCallback((index: number, key: string) => saveParameterInternal(index, key), [saveParameterInternal]);
 
   const beginMutation = useCallback((operation: Exclude<ActiveMutation, null>): boolean => {
+    if (candidateIndicesRef.current.size) return false;
     if (!mountedRef.current || applyingRef.current || mutationGateRef.current !== null || pendingSaveCountRef.current > 0) return false;
     const invalidDraft = Object.values(stateRef.current.drafts)
       .find(draft => draft.validation.status === 'invalid');
@@ -297,6 +300,11 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     dispatch({type: 'run/started', operation});
     return true;
   }, [cancelStandaloneTimeline, dispatch]);
+
+  const setTypeCandidate = useCallback((index: number, pending: boolean) => {
+    if (pending) candidateIndicesRef.current.add(index); else candidateIndicesRef.current.delete(index);
+    dispatch({type: 'candidate/pending', indices: [...candidateIndicesRef.current]});
+  }, [dispatch]);
 
   const finishMutation = useCallback((operation: Exclude<ActiveMutation, null>) => {
     if (!mountedRef.current || mutationGateRef.current !== operation) return;
@@ -381,6 +389,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [api, runMutation]);
 
   const applyAndRunTo = useCallback(async (index = stateRef.current.selectedStepIndex ?? undefined) => {
+    if (candidateIndicesRef.current.size) return;
     if (index === undefined || !mountedRef.current || applyingRef.current || mutationGateRef.current !== null) return;
     if (Object.values(stateRef.current.drafts).some(draft => draft.validation.status !== 'valid')) {
       dispatch({type: 'mutation/blocked', error: new TcadApiError('Invalid parameter draft', {status: 400, code: 'invalid_draft'})});
@@ -575,7 +584,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
       try {
         const payload = await api.setStep({index, name, ...configuration}, controller.signal);
         if (!mountedRef.current || controller.signal.aborted) return false;
-        dispatch({type: 'mask/uploaded', payload});
+        dispatch({type: 'step/typeReplaced', payload});
         try {const timeline = await api.getTimeline(controller.signal); if (mountedRef.current && !controller.signal.aborted) dispatch({type: 'timeline/loaded', payload: timeline});}
         catch (error) {if (mountedRef.current && !controller.signal.aborted) dispatch({type: 'timeline/loadFailed', error: normalizeError(error)});}
         return true;
@@ -841,6 +850,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     saveRecipe: saveRecipeAction,
     exportRecipe: exportRecipeAction,
     addStep: addStepAction,
+    setTypeCandidate,
     replaceStep,
     removeStep: removeStepAction,
     duplicateStep: duplicateStepAction,
@@ -850,6 +860,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }), [
     dispatch,
     addStepAction,
+    setTypeCandidate,
     replaceStep,
     bootstrap,
     duplicateStepAction,

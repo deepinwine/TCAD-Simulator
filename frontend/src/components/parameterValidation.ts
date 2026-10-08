@@ -6,6 +6,7 @@ export type ParameterValidationResult =
 
 export type ParameterValidationMessageKey =
   | 'validation.finite'
+  | 'validation.positive'
   | 'validation.integer'
   | 'validation.safeInteger'
   | 'validation.minimum'
@@ -28,6 +29,7 @@ function validateNumber(
   }
   const value = Number(text);
   if (!Number.isFinite(value)) return {ok: false, messageKey: 'validation.finite'};
+  if (spec.key === 'concentration_cm3' && value <= 0) return {ok: false, messageKey: 'validation.positive'};
   if (spec.capabilityKey === 'etch.incidence_angle' && value !== 0) {
     return {ok: false, messageKey: 'validation.unsupported'};
   }

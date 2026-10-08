@@ -16,7 +16,7 @@ export function StepStructureBar() {
   const [addChoice, setAddChoice] = useState('');
   const [mode, setMode] = useState('Deposit');
   const [renameValue, setRenameValue] = useState('');
-  const busy = state.phase === 'running' || state.activeMutation !== null || state.pendingSaves > 0;
+  const busy = state.phase === 'running' || state.activeMutation !== null || state.pendingSaves > 0 || state.pendingTypeEdits.length > 0;
   const selected = state.recipe.find(step => step.index === state.selectedStepIndex) ?? null;
   const selectedIndex = selected?.index ?? null;
   const position = selected === null

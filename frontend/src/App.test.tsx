@@ -1,4 +1,4 @@
-import {fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
 import {describe, expect, it, vi} from 'vitest';
 import {TcadApiError} from './api/client';
 import type {InitView, RuntimeStatus, StepView, TcadApi} from './api/types';
@@ -266,7 +266,7 @@ describe('App shell', () => {
     const runtimeFactory = vi.fn(() => runtime);
     render(<App api={api} viewerRuntimeFactory={runtimeFactory} />);
 
-    const etch = await screen.findByRole('option', {name: /Etch/});
+    const etch = await within(await screen.findByRole('listbox', {name: 'Process Flow'})).findByRole('option', {name: /Etch/});
     fireEvent.click(etch);
     const dose = screen.getByRole('textbox', {name: 'Dose'});
     fireEvent.change(dose, {target: {value: '-1'}});
@@ -274,7 +274,7 @@ describe('App shell', () => {
 
     expect(screen.getByRole('textbox', {name: 'Dose'})).toHaveValue('-1');
     expect(screen.getByText('Must be greater than or equal to 0')).toBeVisible();
-    expect(screen.getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
+    expect(within(screen.getByRole('listbox', {name: 'Process Flow'})).getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('button', {name: 'Run All'})).toBeVisible();
     expect(window.localStorage.getItem('tcad.locale.v1')).toBe('en');
     expect(api.init).toHaveBeenCalledTimes(1);
@@ -313,7 +313,7 @@ describe('App shell', () => {
     const runtimeFactory = vi.fn(() => runtime);
     render(<App api={api} viewerRuntimeFactory={runtimeFactory} />);
 
-    const etch = await screen.findByRole('option', {name: /Etch/});
+    const etch = await within(await screen.findByRole('listbox', {name: 'Process Flow'})).findByRole('option', {name: /Etch/});
     fireEvent.click(etch);
     const dose = screen.getByRole('textbox', {name: 'Dose'});
     dose.focus();
@@ -331,7 +331,7 @@ describe('App shell', () => {
 
     await screen.findByRole('button', {name: 'Run All'});
     expect(screen.getByRole('textbox', {name: 'Dose'})).toHaveValue('6.00');
-    expect(screen.getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
+    expect(within(screen.getByRole('listbox', {name: 'Process Flow'})).getByRole('option', {name: /Etch/})).toHaveAttribute('aria-selected', 'true');
     expect(api.setStep).not.toHaveBeenCalled();
     expect(api.init).toHaveBeenCalledTimes(1);
     expect(api.getTimeline).toHaveBeenCalledTimes(1);

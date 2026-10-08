@@ -1,4 +1,5 @@
 import {TcadApiError} from '../api/client';
+import {visibleSteps} from '../components/processCatalog';
 import type {
   InitView,
   DemoRecipeView,
@@ -36,6 +37,7 @@ export interface ParameterError {
 }
 
 export interface AppState {
+  pendingTypeEdits: number[];
   phase: AppPhase;
   recipe: StepView[];
   selectedStepIndex: number | null;
@@ -62,6 +64,8 @@ export interface AppState {
 }
 
 export type AppAction =
+  | {type: 'candidate/pending'; indices: number[]}
+  | {type: 'step/typeReplaced'; payload: SetStepView}
   | {type: 'parameter/pendingSaves'; count: number}
   | {type: 'parameter/displayChanged'; index: number; key: string; rawValue: string | boolean; displayUnit: string}
   | {type: 'bootstrap/started'}
@@ -113,6 +117,7 @@ export type AppAction =
   | {type: 'mutation/finished'};
 
 export const initialAppState: AppState = {
+  pendingTypeEdits: [],
   phase: 'booting',
   recipe: [],
   selectedStepIndex: null,
@@ -221,6 +226,7 @@ function canonicalizeTimeline(timeline: TimelineView): TimelineView {
 }
 
 export function appReducer(state: AppState, action: AppAction): AppState {
+  if (action.type === 'candidate/pending') return {...state, pendingTypeEdits: action.indices};
   switch (action.type) {
     case 'parameter/pendingSaves': return {...state, pendingSaves: action.count};
     case 'bootstrap/started':
@@ -230,7 +236,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         phase: 'ready',
         recipe: action.payload.recipe,
-        selectedStepIndex: action.payload.recipe[0]?.index ?? null,
+        selectedStepIndex: visibleSteps(action.payload.recipe)[0]?.index ?? null,
         previewGeneration: state.previewGeneration + 1,
         timeline: null,
         timelineStatus: 'idle',
@@ -432,7 +438,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         recipe: action.recipe,
-        selectedStepIndex: action.recipe[0]?.index ?? null,
+        selectedStepIndex: visibleSteps(action.recipe)[0]?.index ?? null,
         model: action.model ?? state.model,
         timeline: null,
         timelineStatus: 'idle',
@@ -454,7 +460,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         recipe: action.recipe,
         selectedStepIndex: selectedExists
           ? state.selectedStepIndex
-          : action.recipe[0]?.index ?? null,
+          : visibleSteps(action.recipe)[0]?.index ?? null,
         drafts: {},
         parameterErrors: {},
         stepErrors: {},
@@ -472,6 +478,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         globalError: null,
+      };
+    case 'step/typeReplaced':
+      return {
+        ...state,
+        recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
+        timeline: state.timeline === null ? null : {...state.timeline, items: state.timeline.items.map(item => item.index >= action.payload.step.index ? {...item, snapshotValid: false, runtimeStatus: action.payload.statuses[item.index] ?? item.runtimeStatus} : item)},
+        globalError: null,
+        previewGeneration: state.previewGeneration + 1,
       };
     case 'mask/assetApplied':
       return {...state, recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses), globalError: null, previewGeneration: state.previewGeneration + 1};

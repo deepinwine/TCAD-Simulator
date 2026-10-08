@@ -153,6 +153,15 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it('未确认类型候选阻止结构编辑和配方导入，取消后解锁', async () => {
+    const api = apiStub(); mount(api); await waitUntilReady();
+    act(() => captured!.actions.setTypeCandidate(0, true));
+    await act(async () => {await captured!.actions.moveStep('down'); await captured!.actions.removeStep(); await captured!.actions.importRecipe({recipe: {}});});
+    expect(api.moveStep).not.toHaveBeenCalled(); expect(api.removeStep).not.toHaveBeenCalled(); expect(api.importRecipe).not.toHaveBeenCalled();
+    act(() => captured!.actions.setTypeCandidate(0, false));
+    await act(async () => {await captured!.actions.moveStep('down');});
+    expect(api.moveStep).toHaveBeenCalledTimes(1);
+  });
   it('类型替换等待旧队列及最新草稿，互斥变更且只替换同索引一次', async () => {
     const first = deferred<SetStepView>();
     const events: string[] = [];
@@ -163,6 +172,7 @@ describe('失败恢复', () => {
     })});
     mount(api); await waitUntilReady();
     let saving!: Promise<void>; let replacing!: Promise<boolean>;
+    const oldPreview = captured!.state.previewGeneration;
     act(() => {captured!.actions.updateDraft(0, 'dose', 200); saving = captured!.actions.saveParameter(0, 'dose');});
     await waitFor(() => expect(events).toEqual(['save:200']));
     act(() => {captured!.actions.updateDraft(0, 'dose', 300); replacing = captured!.actions.replaceStep(0, 'Structure Strip', {params: {}});});
@@ -171,6 +181,7 @@ describe('失败恢复', () => {
     await act(async () => {first.resolve({step: step(0, {params: {dose: 200}}), statuses: ['dirty', 'dirty'], warnings: []}); await saving; expect(await replacing).toBe(true);});
     expect(events).toEqual(['save:200', 'save:300', 'Structure Strip']);
     expect(captured!.state.recipe[0].name).toBe('Structure Strip');
+    expect(captured!.state.previewGeneration).toBe(oldPreview + 1);
     expect(api.runTo).not.toHaveBeenCalled();
   });
   it('类型替换失败或无效草稿不改变原步骤，不运行', async () => {

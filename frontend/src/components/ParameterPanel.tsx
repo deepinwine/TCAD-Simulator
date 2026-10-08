@@ -135,6 +135,7 @@ function validationMessage(
 ): string {
   switch (messageKey) {
     case 'validation.finite':
+    case 'validation.positive':
     case 'validation.integer':
     case 'validation.safeInteger':
     case 'validation.boolean':
@@ -464,14 +465,15 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
           <div className="selected-step-heading">
             <div>
               <span className="selection-label">{t('parameter.currentStep')}</span>
-              <h3>{presentStep(step, state.materials, locale).title}</h3>
-              <p>{step.name.startsWith('Structure ') ? t(`cad.${step.name.slice(10).toLowerCase()}` as TranslationKey) : step.name}</p>
+              <h3>{isInitializer(step) ? t('project.initialization') : presentStep(step, state.materials, locale).title}</h3>
+              {!isInitializer(step) && <p>{step.name.startsWith('Structure ') ? t(`cad.${step.name.slice(10).toLowerCase()}` as TranslationKey) : step.name}</p>}
               <p>{presentStep(step, state.materials, locale).description}</p>
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
-          {!isInitializer(step) && <StepTypeEditor step={step} onCandidateChange={(index, pending) => setCandidates(old => ({...old, [index]: pending}))} />}
-          {!candidate && <>
+          <div hidden={isInitializer(step)}><StepTypeEditor step={step} onCandidateChange={(index, pending) => setCandidates(old => ({...old, [index]: pending}))} /></div>
+          {isInitializer(step) && <p>{t('project.openGuidance')}</p>}
+          {!candidate && !isInitializer(step) && <>
           <p role="status">{Object.keys(state.drafts).some(key => key.startsWith(`${step.index}:`)) ? t('parameter.unsavedChanges') : step.runtimeStatus === 'dirty' ? t('parameter.modifiedBuildRequired') : ''}</p>
           <button type="button" className="toolbar-button is-primary" disabled={disabled || Object.values(state.drafts).some(draft => draft.validation.status === 'invalid')} onClick={() => void actions.applyAndRunTo(step.index)}>{t('parameter.applyAndBuild')}</button>
           {runError !== undefined && (

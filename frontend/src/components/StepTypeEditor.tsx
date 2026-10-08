@@ -17,16 +17,18 @@ export function StepTypeEditor({step, onCandidateChange}: {step: StepView; onCan
   const factory = `Structure ${choice === 'Deposit' ? mode : choice}`;
   const available = state.factoryTemplates?.some(item => item.name === factory);
   function cancel(index: number) {
+    actions.setTypeCandidate(index, false);
     setCandidates(old => {const next = {...old}; delete next[index]; return next;});
     setChoices(old => {const next = {...old}; delete next[index]; return next;});
     setModes(old => {const next = {...old}; delete next[index]; return next;});
     onCandidateChange(index, false);
   }
   function configure(type: string, nextMode: string) {
+    if (candidates[step.index] && !window.confirm(t('typeEdit.discard'))) return;
     setChoices(old => ({...old, [step.index]: type})); setModes(old => ({...old, [step.index]: nextMode}));
     const template = state.factoryTemplates?.find(item => item.name === `Structure ${type === 'Deposit' ? nextMode : type}`);
-    if (template) {setCandidates(old => ({...old, [step.index]: candidateStep(step, template)})); onCandidateChange(step.index, true);}
-    else {setCandidates(old => {const next = {...old}; delete next[step.index]; return next;}); onCandidateChange(step.index, false);}
+    if (template) {setCandidates(old => ({...old, [step.index]: candidateStep(step, template, state.materials)})); actions.setTypeCandidate(step.index, true); onCandidateChange(step.index, true);}
+    else {setCandidates(old => {const next = {...old}; delete next[step.index]; return next;}); actions.setTypeCandidate(step.index, false); onCandidateChange(step.index, false);}
   }
   return <div className="step-type-editor">
     {!processCatalog.some(item => item.id === current) && <p>{t('typeEdit.legacy', {name: step.name})}</p>}

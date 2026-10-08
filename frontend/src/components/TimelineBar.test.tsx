@@ -36,6 +36,11 @@ function step(index: number, overrides: Partial<StepView> = {}): StepView {
 }
 
 const recipe = [step(0), step(1), step(2), step(3)];
+it('初始化快照明确显示项目初始化', async () => {
+  const api = apiStub({init: vi.fn(async () => ({...initView, recipe: [step(0, {name: 'Structure Wafer'}), step(1, {name: 'Structure Etch'})]}))});
+  render(<App api={api} viewerRuntimeFactory={stubViewerRuntime} />);
+  expect(await screen.findByText(/项目初始化.*完成/)).toBeVisible();
+});
 
 const initView: InitView = {
   recipe,

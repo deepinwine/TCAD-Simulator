@@ -13,7 +13,7 @@ function displayBound(value: number | undefined, conversion: ReturnType<typeof c
   catch (error) {if (error instanceof UnitConversionError) return undefined; throw error;}
 }
 
-export function AddStepDialog({template, busy, onCancel, onConfirm, inline = false}: {template: StepView; busy: boolean; inline?: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
+export function AddStepDialog({template, busy, onCancel, onConfirm, inline = false, project = false, canConfirm = true}: {template: StepView; busy: boolean; inline?: boolean; project?: boolean; canConfirm?: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
   const {locale, t} = useI18n();
   const [values, setValues] = useState<Record<string, unknown>>(() => Object.fromEntries(template.parameterSpecs.map(spec => [spec.key, template.params[spec.key] ?? spec.defaultValue])));
   const [name, setName] = useState(inline && template.instanceName !== template.name ? template.instanceName : '');
@@ -55,7 +55,7 @@ export function AddStepDialog({template, busy, onCancel, onConfirm, inline = fal
   const disabled = busy || submitting;
   const form = <form onSubmit={async event => {
       event.preventDefault();
-      if (!valid || disabled || gate.current) return;
+      if (!valid || !canConfirm || disabled || gate.current) return;
       gate.current = true; setSubmitting(true); setFailed(false);
       try {if (await onConfirm({params: Object.fromEntries(validated.map(({spec, result}) => [spec.key, result.ok ? result.value : undefined])), ...(name.trim() ? {instanceName: name.trim()} : {})}) === false) setFailed(true);}
       finally {gate.current = false; setSubmitting(false);}
@@ -88,9 +88,9 @@ export function AddStepDialog({template, busy, onCancel, onConfirm, inline = fal
           {!result.ok && <small role="alert">{t('addStep.invalid')}</small>}
         </div>;
       })}
-      <label htmlFor="add-step-name">{t('addStep.customName')}</label>
-      <input id="add-step-name" maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} />
-      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid}>{t(inline ? 'typeEdit.confirm' : 'addStep.confirm')}</button></div>
+      {!project && <><label htmlFor="add-step-name">{t('addStep.customName')}</label>
+      <input id="add-step-name" maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} /></>}
+      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid || !canConfirm}>{t(project ? 'project.confirm' : inline ? 'typeEdit.confirm' : 'addStep.confirm')}</button></div>
     </form>;
   return inline ? <div className="type-candidate">{form}</div> : <dialog ref={dialog} aria-modal="true" aria-labelledby="add-step-title" className="add-step-dialog" onCancel={event => {event.preventDefault(); if (!disabled) onCancel();}}>{form}</dialog>;
 }

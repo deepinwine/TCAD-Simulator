@@ -11,6 +11,11 @@ import {StepStructureBar} from './StepStructureBar';
 import {TcadApiError} from '../api/client';
 import {ParameterPanel} from './ParameterPanel';
 import {useAppState} from '../state/AppStateContext';
+import {ProjectSettings} from './ProjectSettings';
+import {I18nProvider} from '../i18n/I18nContext';
+import {LanguageSwitcher} from './LanguageSwitcher';
+import {processCatalog} from './processCatalog';
+function SelectionControls() {const {actions} = useAppState(); return <><button onClick={() => actions.selectStep(0)}>select 0</button><button onClick={() => actions.selectStep(1)}>select 1</button></>;}
 function SelectedPanel() {const {state} = useAppState(); return <ParameterPanel step={state.recipe.find(item => item.index === state.selectedStepIndex) ?? null} collapsed={false} />;}
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
@@ -144,6 +149,66 @@ describe('配置结构步骤', () => {
 afterEach(() => cleanup());
 
 describe('StepStructureBar', () => {
+  it('项目设置无效网格禁用确认，导入失败保留草稿与原配方', async () => {
+    const initial = step(0, {name: 'Structure Wafer', params: {thickness_nm: 200}, parameterSpecs: [{key: 'thickness_nm', label: 'Thickness', type: 'float', units: 'nm', minimum: 0}]});
+    const blob = {domain: {grid_shape: [32, 32, 64], voxel_size_nm: 5}, steps_full: [{name: initial.name, params_raw: initial.params}]};
+    const close = vi.fn(); const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [initial]})), exportRecipe: vi.fn(async () => ({text: async () => JSON.stringify(blob)} as Blob)), importRecipe: vi.fn(async () => {throw new TcadApiError('invalid project', {status: 400});})});
+    render(<AppStateProvider api={api}><ProjectSettings api={api} onClose={close} /></AppStateProvider>);
+    await screen.findByLabelText('网格 X');
+    fireEvent.change(screen.getByLabelText('网格 X'), {target: {value: '1e308'}});
+    expect(screen.getByRole('button', {name: '确认项目设置'})).toBeDisabled(); expect(api.importRecipe).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('网格 X'), {target: {value: '64'}});
+    fireEvent.click(screen.getByRole('button', {name: '确认项目设置'}));
+    await screen.findByText('导入失败，项目草稿已保留。');
+    expect(close).not.toHaveBeenCalled(); expect(screen.getByLabelText('网格 X')).toHaveValue(64);
+  });
+  it.each(processCatalog.flatMap(source => processCatalog.map(target => [source.id, target.id])))('任意八类 %s → %s 同索引原子替换', async (source, target) => {
+    const template = step(0, {name: `Structure ${target}`, instanceName: `Structure ${target}`, params: {target_default: target}});
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0, {name: `Structure ${source}`, instanceName: `Structure ${source}`, params: {thickness_nm: 999}})], factoryTemplates: [template]})), setStep: vi.fn(async () => ({step: template, statuses: ['dirty'] as RuntimeStatus[], warnings: []}))});
+    render(<AppStateProvider api={api}><SelectedPanel /></AppStateProvider>);
+    await screen.findByLabelText('工艺类型');
+    if (source === target) fireEvent.click(screen.getByRole('button', {name: '配置类型'}));
+    else fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: target}});
+    fireEvent.click(screen.getByRole('button', {name: '确认替换'}));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith({index: 0, name: `Structure ${target}`, params: {}}, expect.any(AbortSignal)));
+    expect(api.addStep).not.toHaveBeenCalled(); expect(api.removeStep).not.toHaveBeenCalled();
+  });
+  it('切换步骤及语言保留候选草稿，换目标需明确放弃确认', async () => {
+    const target = step(0, {name: 'Structure Etch', params: {depth_nm: 20}, parameterSpecs: [{key: 'depth_nm', label: 'Depth', type: 'float', minimum: 0, units: 'nm'}]});
+    const other = step(0, {name: 'Structure Strip'});
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0, {name: 'Legacy'}), step(1)], factoryTemplates: [target, other]}))});
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<I18nProvider><AppStateProvider api={api}><SelectionControls /><LanguageSwitcher /><SelectedPanel /><StepStructureBar /></AppStateProvider></I18nProvider>);
+    await screen.findByLabelText('工艺类型');
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Etch'}});
+    fireEvent.change(screen.getByLabelText('刻蚀深度（nm）'), {target: {value: '42'}});
+    expect(screen.getByRole('button', {name: '上移'})).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', {name: 'select 1'}));
+    fireEvent.click(screen.getByRole('button', {name: 'select 0'}));
+    expect(screen.getByLabelText('刻蚀深度（nm）')).toHaveValue(42);
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Strip'}});
+    expect(confirm).toHaveBeenCalledTimes(1); expect(screen.getByLabelText('工艺类型')).toHaveValue('Etch');
+    fireEvent.click(screen.getByRole('button', {name: 'EN'}));
+    expect(screen.getByLabelText('Etch depth (nm)')).toHaveValue(42);
+    confirm.mockRestore();
+  });
+  it('项目设置读取完整导出，确认一次原子导入并保留所有步骤原始字段', async () => {
+    const initial = step(0, {name: 'Initialize Wafer', params: {material: 'Silicon', thickness_nm: 200}, parameterSpecs: [{key: 'material', label: 'material', type: 'enum', choices: [['Silicon', 'Silicon'], ['Poly', 'Poly']]}, {key: 'thickness_nm', label: 'Thickness', type: 'float', minimum: 0, units: 'nm'}]});
+    const blob = {domain: {grid_shape: [32, 32, 64], voxel_size_nm: 5, threads: 4}, steps_full: [{name: initial.name, params_raw: {...initial.params, wafer_type: 'SOI', box_thickness_nm: 20}, params: initial.params, enabled: false, instance_name: 'SOI', loop: '2', group: 'start'}, {name: 'Structure Strip', params_raw: {}, instance_name: 'clean', enabled: false, group: 'A'}]};
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [initial]})), exportRecipe: vi.fn(async () => ({text: async () => JSON.stringify(blob)} as Blob))});
+    render(<AppStateProvider api={api}><ProjectSettings api={api} onClose={vi.fn()} /></AppStateProvider>);
+    await screen.findByLabelText('网格 X');
+    fireEvent.change(screen.getByLabelText('网格 X'), {target: {value: '64'}});
+    fireEvent.change(screen.getByLabelText('体素尺寸（nm）'), {target: {value: '10'}});
+    fireEvent.change(screen.getByLabelText('厚度（nm）'), {target: {value: '300'}});
+    fireEvent.click(screen.getByRole('button', {name: '确认项目设置'}));
+    await waitFor(() => expect(api.importRecipe).toHaveBeenCalledTimes(1));
+    const imported = vi.mocked(api.importRecipe).mock.calls[0][0].recipe as typeof blob;
+    expect(imported.domain).toEqual({grid_shape: [64, 32, 64], voxel_size_nm: 10, threads: 4});
+    expect(imported.steps_full[1]).toEqual(blob.steps_full[1]);
+    expect(imported.steps_full[0]).toMatchObject({params: {thickness_nm: 300, wafer_type: 'SOI'}, params_raw: {thickness_nm: 300, wafer_type: 'SOI'}, enabled: false, loop: '2', group: 'start'});
+    expect(api.setStep).not.toHaveBeenCalled();
+  });
   it('仅显示八类目录，旧服务器没有模板时禁止新增', async () => {
     const api = apiStub();
     mount(api);
@@ -154,6 +219,7 @@ describe('StepStructureBar', () => {
     fireEvent.click(screen.getByRole('button', {name: '添加步骤'}));
     expect(screen.getByRole('button', {name: '添加步骤'})).toBeDisabled();
     expect(api.addStep).not.toHaveBeenCalled();
+    expect(screen.getByText(/结构工艺模板不可用/)).toBeVisible();
   });
 
   it('旧步骤可内联改成任何目录类型，取消不请求且确认原子替换', async () => {

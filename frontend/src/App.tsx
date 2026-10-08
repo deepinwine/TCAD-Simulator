@@ -10,6 +10,7 @@ import {StepStructureBar} from './components/StepStructureBar';
 import {TimelineBar} from './components/TimelineBar';
 import {Toolbar} from './components/Toolbar';
 import {WorkspaceLayout} from './components/WorkspaceLayout';
+import {isStructureFlow} from './components/processCatalog';
 import {I18nProvider, useI18n} from './i18n/I18nContext';
 import {AppStateProvider, useAppState} from './state/AppStateContext';
 import {ThreeViewer} from './viewer/ThreeViewer';
@@ -105,6 +106,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
   return (
     <><main className="studio-shell" inert={workbench !== null || openingMask ? true : undefined}>
       <Toolbar
+        api={api}
         parametersCollapsed={parametersCollapsed}
         onToggleParameters={() => setParametersCollapsed(value => !value)}
       />
@@ -127,7 +129,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
         </div>
       )}
       <WorkspaceLayout collapsed={parametersCollapsed} left={<>
-          {!(state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '))) && <RecipeAssistant />}
+          {!isStructureFlow(state.recipe) && <RecipeAssistant />}
           <ProcessFlowPane
             recipe={state.recipe}
             selectedStepIndex={state.selectedStepIndex}

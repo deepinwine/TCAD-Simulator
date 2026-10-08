@@ -13,3 +13,8 @@ it('uses candidate defaults and only inherits compatible material and custom nam
   }
   expect(candidateStep(step('Structure Deposit', {material: 'W'}, 'contact'), template)).toMatchObject({params: {material: 'Si', depth_nm: 20}, instanceName: 'contact'});
 });
+it('resolves legacy material IDs before checking target choices', () => {
+  const template = step('Structure Epitaxy', {material: 'Si', thickness_nm: 30});
+  template.parameterSpecs = [{key: 'material', label: 'material', type: 'choice', choices: [['Si', 'Si'], ['Germanium', 'Germanium']]}];
+  expect(candidateStep(step('Legacy', {material: 8}), template, [{id: 8, name: 'Germanium', color: [1, 1, 1], enabled: true}]).params.material).toBe('Germanium');
+});

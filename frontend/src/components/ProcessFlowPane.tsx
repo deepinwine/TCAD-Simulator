@@ -4,6 +4,7 @@ import {presentStep} from './stepPresentation';
 import {useI18n} from '../i18n/I18nContext';
 import {zhCN} from '../i18n/catalogs';
 import {StatusBadge} from './StatusBadge';
+import {visibleSteps} from './processCatalog';
 
 interface ProcessFlowPaneProps {
   recipe: StepView[];
@@ -51,7 +52,8 @@ export function summarizeParams(
   return compactText(`${summary}${suffix}`, 92);
 }
 
-export function ProcessFlowPane({recipe, selectedStepIndex, onSelect, children, materials = []}: ProcessFlowPaneProps) {
+export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, children, materials = []}: ProcessFlowPaneProps) {
+  const recipe = visibleSteps(allSteps);
   const {t, locale} = useI18n();
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
   const pendingFocusRef = useRef<number | null>(null);

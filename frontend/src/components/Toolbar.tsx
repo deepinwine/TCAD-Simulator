@@ -4,8 +4,12 @@ import {useAppState} from '../state/AppStateContext';
 import {useI18n} from '../i18n/I18nContext';
 import {LanguageSwitcher} from './LanguageSwitcher';
 import type {TranslationKey} from '../i18n/catalogs';
+import type {TcadApi} from '../api/types';
+import {ProjectSettings} from './ProjectSettings';
+import {isStructureFlow} from './processCatalog';
 
 interface ToolbarProps {
+  api?: TcadApi;
   parametersCollapsed: boolean;
   onToggleParameters(): void;
 }
@@ -24,15 +28,16 @@ const operationKeys: Record<Exclude<ActiveMutation, null>, TranslationKey> = {
   apply: 'operation.to',
 };
 
-export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps) {
+export function Toolbar({api, parametersCollapsed, onToggleParameters}: ToolbarProps) {
   const {state, actions} = useAppState();
   const {t} = useI18n();
   const [recipeToolsOpen, setRecipeToolsOpen] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
   const [demoChoice, setDemoChoice] = useState('');
   const [recipeName, setRecipeName] = useState('');
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const demoRecipes = state.demoRecipes;
-  const structureMode = state.recipe.length > 0 && state.recipe.every(step => step.name.startsWith('Structure '));
+  const structureMode = isStructureFlow(state.recipe);
   const mutationActive = state.phase === 'running' || state.activeMutation !== null;
   const activeOperation = state.activeMutation;
   const online = state.phase === 'ready' || state.phase === 'running';
@@ -47,7 +52,7 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
     : '';
   const draftBlocked = hasUnsavedDrafts(state);
   const selectedMissing = state.selectedStepIndex === null;
-  const allRunsDisabled = mutationActive || draftBlocked || state.pendingSaves > 0;
+  const allRunsDisabled = mutationActive || draftBlocked || state.pendingSaves > 0 || state.pendingTypeEdits.length > 0;
   const describedBy = draftBlocked ? draftGuidanceId : undefined;
   return (
     <header className="studio-toolbar">
@@ -59,6 +64,8 @@ export function Toolbar({parametersCollapsed, onToggleParameters}: ToolbarProps)
         </div>
       </div>
       <div className="toolbar-run-group" aria-label={t('toolbar.processActions')}>
+        <button type="button" className="toolbar-button is-primary" disabled={allRunsDisabled || !api} onClick={() => setProjectOpen(true)}>{t('project.title')}</button>
+        {projectOpen && api && <ProjectSettings api={api} onClose={() => setProjectOpen(false)} />}
         <button type="button" className="toolbar-button is-primary" disabled={allRunsDisabled || demoRecipes?.['Structure CAD — Trench'] === undefined} aria-describedby={describedBy} onClick={() => {
           const recipe = demoRecipes?.['Structure CAD — Trench'];
           if (recipe !== undefined) void actions.importRecipe({recipe, name: 'Structure CAD — Trench'});

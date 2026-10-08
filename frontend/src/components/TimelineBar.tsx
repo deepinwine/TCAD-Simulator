@@ -6,6 +6,7 @@ import {useI18n} from '../i18n/I18nContext';
 import {ErrorNotice} from './ErrorNotice';
 import {StatusBadge} from './StatusBadge';
 import type {TranslationKey} from '../i18n/catalogs';
+import {isInitializer} from './processCatalog';
 
 const restoreDraftGuidanceId = 'mutation-draft-guidance';
 const timelineStateKeys: Partial<Record<string, TranslationKey>> = {
@@ -38,7 +39,7 @@ export function TimelineBar() {
   const timeline = state.timeline;
   const draftBlocked = hasUnsavedDrafts(state);
   const mutationActive = state.phase === 'running' || state.activeMutation !== null;
-  const restoreDisabled = mutationActive || draftBlocked;
+  const restoreDisabled = mutationActive || draftBlocked || state.pendingTypeEdits.length > 0;
   const neighbors = timeline === null
     ? {}
     : validNeighbors(timeline.items, timeline.current);
@@ -115,6 +116,8 @@ export function TimelineBar() {
         {timeline !== null && timeline.items.length > 0 && (
           <ol className="timeline-items">
             {timeline.items.map(item => {
+              const step = state.recipe.find(candidate => candidate.index === item.index);
+              const initial = step !== undefined && isInitializer(step);
               const current = item.index === timeline.current;
               const stateKey = Object.hasOwn(timelineStateKeys, item.state)
                 ? timelineStateKeys[item.state]
@@ -133,7 +136,7 @@ export function TimelineBar() {
                     disabled={restoreDisabled || !item.snapshotValid}
                     onClick={() => void actions.restoreTimeline(item.index)}
                   >
-                    <span>#{item.index + 1} {stateKey === undefined ? t('timeline.state.unknown') : t(stateKey)}</span>
+                    <span>{initial ? t('project.initialization') : `#${item.index + 1}`} {stateKey === undefined ? t('timeline.state.unknown') : t(stateKey)}</span>
                     <StatusBadge status={item.runtimeStatus} />
                     <span>{item.snapshotValid ? t('timeline.valid') : t('timeline.invalid')}</span>
                   </button>

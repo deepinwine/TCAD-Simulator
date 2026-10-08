@@ -18,6 +18,13 @@ function step(index: number, status: RuntimeStatus, params: Record<string, unkno
 }
 
 describe('ProcessFlowPane', () => {
+  it('结构晶圆初始化不占步骤列表和计数，底层工艺索引不变', () => {
+    const onSelect = vi.fn();
+    render(<ProcessFlowPane recipe={[{...step(0, 'ready'), name: 'Structure Wafer'}, {...step(1, 'ready'), name: 'Structure Etch'}]} selectedStepIndex={1} onSelect={onSelect} />);
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('option')); expect(onSelect).toHaveBeenCalledWith(1);
+    expect(screen.getByLabelText('1 个步骤')).toBeInTheDocument();
+  });
   it('使用 listbox/option 表达单选并显示所有状态文字', () => {
     const onSelect = vi.fn();
     const recipe = (['ready', 'dirty', 'running', 'done', 'error'] as RuntimeStatus[])

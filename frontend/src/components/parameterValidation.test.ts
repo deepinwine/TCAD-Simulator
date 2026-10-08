@@ -106,3 +106,6 @@ describe('validateParameter', () => {
     });
   });
 });
+it('concentration must be strictly positive even when schema minimum is zero', () => {
+  expect(validateParameter({key: 'concentration_cm3', label: 'Concentration', type: 'float', minimum: 0, maximum: 1e22}, 0).ok).toBe(false);
+});
