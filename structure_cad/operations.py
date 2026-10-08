@@ -9,7 +9,7 @@ OXIDIZABLE = ('Silicon', 'Polysilicon')
 
 def preflight_candidate(step, model, supplied=None, *, mask_asset_service=None):
     """Validate detached configuration; never execute against final recipe geometry."""
-    from recipe_planner.schema import normalize_params, parameter_errors
+    from recipe_planner.schema import normalize_params, parameter_errors, validate_wafer_stack
     params = dict(step.params)
     if supplied is not None:
         params.update(normalize_params(step.name, supplied))
@@ -18,6 +18,11 @@ def preflight_candidate(step, model, supplied=None, *, mask_asset_service=None):
     errors = parameter_errors(step.name, params, material_db=model.material_db)
     if errors:
         raise ValueError('; '.join(errors))
+    if step.name == 'Initialize Wafer':
+        validate_wafer_stack(params, capacity_nm=model.grid.shape[2] * model.voxel_size_nm)
+    elif step.name == 'Etch':
+        import tcad_simulator as tcad
+        tcad._prepare_etch_execution(params, model.material_db)
     step.params = params
     if not step.name.startswith('Structure '):
         return

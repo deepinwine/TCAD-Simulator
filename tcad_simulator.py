@@ -71723,7 +71723,8 @@ def _webui_worker_main(
                         raise ValueError("Unknown step")
                     candidate = PROCESS_STEP_FACTORIES[name](material_db)
                     _webui_apply_admin_step_defaults(candidate, admin_cfg)
-                    candidate.instance_name = step.instance_name
+                    if step.instance_name != step.name:
+                        candidate.instance_name = step.instance_name
                     candidate.enabled = step.enabled
                     candidate.group = step.group
                     candidate.loop = step.loop

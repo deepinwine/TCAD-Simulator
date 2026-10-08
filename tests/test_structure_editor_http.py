@@ -71,6 +71,21 @@ class StructureEditorHTTPTests(unittest.TestCase):
             self.assertEqual(result['name'],name)
             self.assertEqual(set(result['params']),{s['key'] for s in result['parameter_specs']})
 
+    def test_default_instance_label_follows_replaced_type(self):
+        steps = self.request('POST','/api/recipe/add',{'name':'Structure Deposit'})['result']
+        result = self.request('POST','/api/step/set',{'index':len(steps)-1,'name':'Structure Etch'})['result']
+        self.assertEqual(result['instance_name'],'Structure Etch')
+
+    def test_invalid_legacy_target_candidate_is_atomic(self):
+        before = self.request('POST','/api/recipe/add',{'name':'Structure Deposit'})['result']
+        timeline = self.request('POST','/api/timeline/get',{})['result']
+        for name, params in [('Initialize Wafer',{'wafer_type':'SOI','thickness_nm':100,'box_thickness_nm':80,'device_thickness_nm':80}),
+                             ('Etch',{'incidence_angle_deg':10})]:
+            with self.subTest(name=name):
+                self.request('POST','/api/step/set',{'index':len(before)-1,'name':name,'enabled':False,'params':params},ok=False)
+                self.assertEqual(before,self.request('GET','/api/init')['result']['recipe'])
+                self.assertEqual(timeline,self.request('POST','/api/timeline/get',{})['result'])
+
     def test_invalid_replacement_is_atomic_and_configuration_does_not_execute(self):
         steps = self.request('POST', '/api/recipe/add', {'name':'Structure Deposit'})['result']
         index = len(steps)-1
