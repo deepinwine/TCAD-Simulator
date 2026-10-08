@@ -31,7 +31,8 @@ tests/test_structure_editor_http.py；factory、候选校验、HTTP set_step、�
   项目设置从 `exportRecipe` 取完整服务端配方，仅修改初始化和 domain，使用已有
   `importRecipe` 原子应用；先确认会清空旧几何/快照，保留后续步骤与元数据。
 - [ ] `npm test -- --run` 观察目录/类型选择控件缺失。
-- [ ] 元数据驱动右侧换类型候选；复用 AddStepDialog 并加入替换语义及单位安全防护。
+- [ ] 元数据驱动右侧内联换类型候选；复用 AddStepDialog 的表单逻辑及单位安全防护，
+  右侧候选不是新增弹窗，原参数自动保存控件在候选编辑时隐藏。
   取消不发请求；确认一次 setStep，等待最新草稿队列，非法/失败不执行或丢原类型。
 - [ ] 使用 factory 默认值，只迁移自定义名和兼容材料；不迁移 thickness→depth。
 - [ ] 掺杂可视化复用服务端场数据，不在前端计算工艺，不伪造材料身份。
