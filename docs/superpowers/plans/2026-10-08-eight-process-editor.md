@@ -28,6 +28,8 @@ tests/test_structure_editor_http.py；factory、候选校验、HTTP set_step、�
 
 - [ ] 失败测试固定八类目录（光刻/刻蚀/沉积/氧化/外延/去胶/CMP/掺杂），填充为沉积模式；
   晶圆入口在项目设置，配方底层初始化保留。
+  项目设置从 `exportRecipe` 取完整服务端配方，仅修改初始化和 domain，使用已有
+  `importRecipe` 原子应用；先确认会清空旧几何/快照，保留后续步骤与元数据。
 - [ ] `npm test -- --run` 观察目录/类型选择控件缺失。
 - [ ] 元数据驱动右侧换类型候选；复用 AddStepDialog 并加入替换语义及单位安全防护。
   取消不发请求；确认一次 setStep，等待最新草稿队列，非法/失败不执行或丢原类型。
