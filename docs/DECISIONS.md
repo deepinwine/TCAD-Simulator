@@ -10,6 +10,16 @@ ViennaPS 求解；继续使用 React/Python/ProcessModel/Three.js 和既有 Reci
 既有仿真配方保留原语义。Structure UI 明确标识构建模式、网格精度和几何能力。
 ADR-014 的 Accurate 栈保持兼容；其新增功能与校准工作暂停，直至所有者恢复安排。
 
+ADR-028 — 结构编辑器采用八类工艺目录与原子步骤类型替换（2026-10-08）。
+Reason: 所有者要求只显示光刻、刻蚀、沉积、氧化、外延、去胶、CMP、掺杂，
+已有步骤也可在右侧改类型。
+Rules: 晶圆初始化保留为底层 Recipe 步骤并经项目设置编辑；填充归沉积模式，
+版图开口归光刻，平坦化归 CMP。旧工厂名称与仿真配方不自动迁移。
+右侧修改类型先配置候选；确认后通过 `/api/step/set` 的可选 `name` 加法字段
+完整校验再原子替换同索引，不使用 remove/add，不把厚度猜成刻蚀深度。
+氧化、外延使用目标几何尺寸，掺杂只写浓度区域，不预测速率、扩散或激活。
+掺杂颜色使用既有 `/api/preview/elements` 的真实场点云，不伪造材料编号。
+
 ---
 
 ADR-001 — Python `ProcessModel` stays the geometry/process backend (Fast Mode).
