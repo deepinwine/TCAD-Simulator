@@ -7,6 +7,43 @@ SEMICONDUCTORS = ('Silicon', 'Polysilicon', 'Germanium', 'Silicon Germanium')
 OXIDIZABLE = ('Silicon', 'Polysilicon')
 
 
+def preflight_candidate(step, model, supplied=None, *, mask_asset_service=None):
+    """Validate detached configuration; never execute against final recipe geometry."""
+    from recipe_planner.schema import normalize_params, parameter_errors
+    params = dict(step.params)
+    if supplied is not None:
+        params.update(normalize_params(step.name, supplied))
+    if any(isinstance(value, (bool, np.bool_)) and 'material' in key for key, value in params.items()):
+        raise ValueError('Material must be a registered material, not a boolean')
+    errors = parameter_errors(step.name, params, material_db=model.material_db)
+    if errors:
+        raise ValueError('; '.join(errors))
+    step.params = params
+    if not step.name.startswith('Structure '):
+        return
+    operation = getattr(step, 'operation', 'Pattern')
+    if operation in ('Wafer', 'Deposit', 'Oxidation', 'Epitaxy'):
+        count = layers(model, params['thickness_nm'], 'thickness_nm')
+        if count > model.grid.shape[2]:
+            raise ValueError('Structure thickness exceeds domain height')
+    elif operation in ('Etch', 'Doping'):
+        layers(model, params['depth_nm'], 'depth_nm')
+    elif operation in ('Fill', 'Planarize'):
+        count = layers(model, params['height_nm'], 'height_nm', zero=True)
+        if count > model.grid.shape[2]:
+            raise ValueError('Structure height exceeds domain height')
+    if operation == 'Etch':
+        angle = number(params['sidewall_angle_deg'], 'sidewall_angle_deg')
+        if angle > 90:
+            raise ValueError('sidewall_angle_deg must be in (0, 90]')
+    elif operation == 'Doping':
+        number(params['concentration_cm3'], 'concentration_cm3')
+    elif step.name == 'Structure Pattern':
+        if mask_asset_service is not None:
+            step.bind_mask_asset_service(mask_asset_service)
+        step.geometry_mask(model)
+
+
 def semiconductor_id(model, value, *, oxidation=False):
     mid = material_id(model, value)
     allowed = OXIDIZABLE if oxidation else SEMICONDUCTORS

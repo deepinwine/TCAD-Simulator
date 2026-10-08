@@ -2,6 +2,8 @@
 import json
 import tempfile
 import unittest
+import struct
+import numpy as np
 from pathlib import Path
 
 import tcad_simulator as tcad
@@ -41,6 +43,60 @@ class StructureEditorHTTPTests(unittest.TestCase):
         deposit = next(step for step in templates if step['name'] == 'Structure Deposit')
         self.assertIn('thickness_nm', {spec['key'] for spec in deposit['parameter_specs']})
         self.assertEqual(init['recipe'], self.request('GET', '/api/init')['result']['recipe'])
+
+    def test_atomic_type_replacement_uses_new_defaults_preserves_metadata(self):
+        steps = self.request('POST', '/api/recipe/add', {'name':'Structure Deposit', 'params':{'thickness_nm':35}, 'instance_name':'可编辑层'})['result']
+        index = len(steps)-1
+        self.request('POST', '/api/step/set', {'index':index, 'enabled':False, 'group':'工艺组', 'loop':'L'})
+        result = self.request('POST', '/api/step/set', {'index':index, 'name':'Structure Etch'})['result']
+        self.assertEqual(result['name'], 'Structure Etch')
+        self.assertEqual(result['instance_name'], '可编辑层')
+        self.assertFalse(result['enabled'])
+        self.assertEqual(result['group'], '工艺组')
+        self.assertEqual(result['loop'], 'L')
+        self.assertNotIn('thickness_nm', result['params'])
+        self.assertEqual(result['params']['depth_nm'], 100)
+        old = self.request('POST', '/api/step/set', {'index':index, 'params':{'depth_nm':10}})['result']
+        self.assertEqual(old['params']['depth_nm'],10)
+
+    def test_invalid_replacement_is_atomic_and_configuration_does_not_execute(self):
+        steps = self.request('POST', '/api/recipe/add', {'name':'Structure Deposit'})['result']
+        index = len(steps)-1
+        timeline = self.request('POST', '/api/timeline/get', {})['result']
+        for payload in ({'name':'Bogus'}, {'name':'Structure Etch','params':{'thickness_nm':35}},
+                        {'name':'Structure Deposit','params':{'thickness_nm':1e300}},
+                        {'name':'Structure Doping','params':{'depth_nm':.1}},
+                        {'name':'Structure Pattern','params':{'mask_mode':'Asset','mask_asset_id':'missing','mask_asset_revision':1}}):
+            with self.subTest(payload=payload):
+                self.request('POST', '/api/step/set', {'index':index,'enabled':False,**payload},ok=False)
+                self.assertEqual(steps,self.request('GET','/api/init')['result']['recipe'])
+                self.assertEqual(timeline,self.request('POST','/api/timeline/get',{})['result'])
+        # A step can be configured before the material required by execution exists.
+        result = self.request('POST','/api/step/set',{'index':index,'name':'Structure Epitaxy','params':{'material':'Germanium','seed_material':'Germanium','thickness_nm':10}})['result']
+        self.assertEqual(result['name'],'Structure Epitaxy')
+
+    def test_doping_real_field_pointcloud_timeline_and_undo(self):
+        self.request('POST','/api/recipe/import',{'recipe':{'steps_full':[
+            {'name':'Structure Wafer','params':{'material':'Silicon','thickness_nm':40}},
+            {'name':'Structure Doping','params':{'material':'Silicon','species':'B','concentration_cm3':1e19,'depth_nm':10,'coverage':'Full wafer'}}]}})
+        self.request('POST','/api/run/step',{'index':0})
+        before = self.request('GET','/api/preview/manifest')['result']['meshes']
+        self.request('POST','/api/run/step',{'index':1})
+        self.assertEqual({m['mat_id'] for m in before},{m['mat_id'] for m in self.request('GET','/api/preview/manifest')['result']['meshes']})
+        status, headers, raw = self._request(self.manager.url,self.cookie,'GET','/api/preview/elements?channels=dopant&quality=high&max_points=1000',None)
+        self.assertEqual(status,200)
+        magic, version, flags, count, size = struct.unpack('<8sIIII',raw[:24])
+        self.assertEqual(magic,b'TCADPNT0')
+        self.assertGreater(count,0)
+        meta = json.loads(raw[24:24+size])
+        self.assertTrue(any(c['name']=='Dopant(B)' for c in meta['channels']))
+        offset = 24 + size + (-size)%4
+        positions = np.frombuffer(raw,dtype='<f4',count=count*3,offset=offset)
+        self.assertTrue(np.isfinite(positions).all())
+        self.request('POST','/api/undo',{})
+        self.request('POST','/api/redo',{})
+        status, _, restored = self._request(self.manager.url,self.cookie,'GET','/api/preview/elements?channels=dopant&quality=high&max_points=1000',None)
+        self.assertGreater(struct.unpack('<8sIIII',restored[:24])[3],0)
 
     def test_configured_add_keeps_values_name_and_legacy_name_only(self):
         before = self.request('GET', '/api/init')['result']['recipe']

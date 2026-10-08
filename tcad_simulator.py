@@ -71717,6 +71717,43 @@ def _webui_worker_main(
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
                 step = steps[idx]
+                if "name" in payload:
+                    name = payload["name"]
+                    if not isinstance(name, str) or name not in PROCESS_STEP_FACTORIES:
+                        raise ValueError("Unknown step")
+                    candidate = PROCESS_STEP_FACTORIES[name](material_db)
+                    _webui_apply_admin_step_defaults(candidate, admin_cfg)
+                    candidate.instance_name = step.instance_name
+                    candidate.enabled = step.enabled
+                    candidate.group = step.group
+                    candidate.loop = step.loop
+                    for key in ("group", "loop"):
+                        if key in payload:
+                            setattr(candidate, key, str(payload.get(key, "") or "").strip()[:80])
+                    if "enabled" in payload:
+                        candidate.enabled = bool(payload["enabled"])
+                    if "instance_name" in payload:
+                        label = payload["instance_name"]
+                        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 80:
+                            raise ValueError("instance_name must contain 1–80 characters")
+                        candidate.instance_name = label.strip()
+                    if isinstance(candidate, ExposureStep) and "custom_mask" in payload:
+                        arr = np.asarray(payload["custom_mask"])
+                        if arr.ndim != 2 or not arr.size or arr.dtype.kind not in "biuf" or not np.isfinite(arr).all() or not np.isin(arr, [0, 1]).all():
+                            raise ValueError("custom_mask must be a non-empty 2D 0/1 mask")
+                        candidate.custom_mask = arr.astype(bool)
+                        candidate.params["mask_mode"] = "Custom"
+                    from structure_cad.operations import preflight_candidate
+                    preflight_candidate(candidate, model, payload.get("params") if "params" in payload else None, mask_asset_service=mask_asset_service)
+                    if "params" in payload and payload["params"] is None:
+                        raise ValueError("params must be an object")
+                    step_warn = _normalize_step_material_params(candidate, material_db, admin_cfg)
+                    steps[idx] = candidate
+                    _invalidate_step_runtime_statuses(idx)
+                    if not bool(payload.get("no_autosave", False)):
+                        _autosave(f"replace step {idx}")
+                    conn.send({"ok": True, "result": _serialize_step_for_client(idx), "statuses": list(step_runtime_statuses), "warnings": step_warn, "rid": rid})
+                    continue
                 # Validate the complete Etch candidate before changing even UI
                 # metadata; both old and new clients edit the same canonical step.
                 etch_params = None
@@ -71940,34 +71977,10 @@ def _webui_worker_main(
                 if isinstance(step, ExposureStep):
                     step.params["mask_mode"] = "Custom"
                 if "params" in payload:
-                    from recipe_planner.schema import normalize_params, parameter_errors
-                    supplied = normalize_params(name, payload["params"])
-                    candidate_params = dict(step.params)
-                    candidate_params.update(supplied)
-                    if any(isinstance(value, bool) and "material" in key
-                           for key, value in candidate_params.items()):
-                        raise ValueError("Material must be a registered material, not a boolean")
-                    errors = parameter_errors(name, candidate_params, material_db=material_db)
-                    if errors:
-                        raise ValueError("; ".join(errors))
-                    step.params = candidate_params
-                    if name.startswith("Structure "):
-                        from structure_cad.operations import layers, number
-                        if name in ("Structure Wafer", "Structure Deposit"):
-                            count = layers(model, candidate_params["thickness_nm"], "thickness_nm")
-                            if count > model.grid.shape[2]:
-                                raise ValueError("Structure thickness exceeds domain height")
-                        elif name == "Structure Etch":
-                            layers(model, candidate_params["depth_nm"], "depth_nm")
-                            angle = number(candidate_params["sidewall_angle_deg"], "sidewall_angle_deg")
-                            if angle > 90:
-                                raise ValueError("sidewall_angle_deg must be in (0, 90]")
-                        elif name in ("Structure Fill", "Structure Planarize"):
-                            count = layers(model, candidate_params["height_nm"], "height_nm", zero=True)
-                            if count > model.grid.shape[2]:
-                                raise ValueError("Structure height exceeds domain height")
-                        elif name == "Structure Pattern" and candidate_params.get("mask_mode") == "Procedural":
-                            step.geometry_mask(model)
+                    from structure_cad.operations import preflight_candidate
+                    if payload["params"] is None:
+                        raise ValueError("params must be an object")
+                    preflight_candidate(step, model, payload["params"], mask_asset_service=mask_asset_service)
                 try:
                     msgs = _normalize_step_material_params(step, material_db, admin_cfg)
                     if msgs:
