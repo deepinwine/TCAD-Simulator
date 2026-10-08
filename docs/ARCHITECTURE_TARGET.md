@@ -104,7 +104,7 @@ the frozen-core tests when changing those fields.
 | `/api/recipe/duplicate` | POST | `{index}` | JSON; `result`: step list |
 | `/api/recipe/move` | POST | `{index, direction}` 或 `{index, to}` | JSON; `result`: step list |
 | `/api/recipe/rename-step` | POST | `{index, instance_name (1–80 字符)}` | JSON; `result`: step |
-| `/api/step/set` | POST | `{index, name?, instance_name?, enabled?, params?, loop?, group?, no_autosave?}` | JSON; `result`: step、`statuses` 列表、`warnings?`；可选 `name` 配置 detached factory candidate 并原子替换同索引，失败不改配方/状态；未提供 `instance_name` 时保留原标签，旧不带 `name` 的参数编辑保持兼容 |
+| `/api/step/set` | POST | `{index, name?, instance_name?, enabled?, params?, loop?, group?, no_autosave?}` | JSON; `result`: step、`statuses` 列表、`warnings?`；可选 `name` 配置 detached factory candidate 并原子替换同索引，失败不改配方/状态；未提供 `instance_name` 时保留自定义标签，默认类型名随类型更新；旧不带 `name` 的参数编辑保持兼容 |
 | `/api/run/step` | POST | `{index}` | JSON；失败为平面结构化载荷（`step_index`、`instance_name`、`step_type`、`parameter_path`、`error`、`error_type`、`suggestion`、`rolled_back`） |
 | `/api/run/all` | POST | `{}` | JSON |
 | `/api/run/to`（dispatcher 别名 `/api/run/until`） | POST | `{index}` | JSON |
