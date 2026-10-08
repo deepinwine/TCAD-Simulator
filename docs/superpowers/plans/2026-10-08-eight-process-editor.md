@@ -35,12 +35,24 @@ tests/test_structure_editor_http.py；factory、候选校验、HTTP set_step、�
   右侧候选不是新增弹窗，原参数自动保存控件在候选编辑时隐藏。
   取消不发请求；确认一次 setStep，等待最新草稿队列，非法/失败不执行或丢原类型。
 - [ ] 使用 factory 默认值，只迁移自定义名和兼容材料；不迁移 thickness→depth。
-- [ ] 掺杂可视化复用服务端场数据，不在前端计算工艺，不伪造材料身份。
 - [ ] 补测试 `expect(replace).not.toHaveBeenCalled()`（取消/非法）、成功索引保持，
   语言切换、相机和 Viewer 挂载保持；`npm run build` 类型检查。
 - [ ] 中文小型提交；根代理记录契约、ADR 与验证。
 
-## 任务 3：审查及交付
+## 任务 3：真实掺杂场可视化
+
+文件：frontend/src/api/client.ts、viewer/elementPoints.ts、viewer/viewerRuntime.ts、
+viewer/ThreeViewer.tsx、i18n/catalogs.ts 和对应测试。任务 2 审查后顺序实现。
+
+- [ ] 失败测试 TCADPNT0 binary parser：24 字节 header、UTF-8 metadata、4 字节对齐、
+  count×3 Float32 的 µm 坐标、count×3 RGB；拒绝超长、截断、未知版本和非有限坐标。
+- [ ] `npm test -- --run` 观察 parser 缺失失败，最小实现并回归真实二进制 fixture。
+- [ ] 复用 GET `/api/preview/elements?channels=dopant`，Three.js Points 展示真实场。
+  开关只影响可视化；每个模型 revision 更新，取消旧请求并防 stale 覆盖，错误可重试。
+- [ ] 覆盖裁剪、空场、隐藏/显示缓存及卸载 dispose，不替换 material 身份或重挂 Viewer。
+- [ ] 专项、全量与 build 通过后提交并独立两阶段审查。
+
+## 任务 4：审查及交付
 
 - [ ] 全量前端、AGENTS 五模块 + Structure/editor、py_compile、grid128 基准。
 - [ ] 根代理浏览器验证八类目录、沉积换刻蚀、取消与构建可见差异。
