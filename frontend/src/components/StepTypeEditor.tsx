@@ -8,6 +8,7 @@ export function StepTypeEditor({step, onCandidateChange}: {step: StepView; onCan
   const {state, actions} = useAppState();
   const {t} = useI18n();
   const [candidates, setCandidates] = useState<Record<number, StepView>>({});
+  const [generations, setGenerations] = useState<Record<number, number>>({});
   const [choices, setChoices] = useState<Record<number, string>>({});
   const [modes, setModes] = useState<Record<number, string>>({});
   const current = step.name === 'Structure Fill' ? 'Deposit' : step.name.replace(/^Structure /, '');
@@ -27,7 +28,11 @@ export function StepTypeEditor({step, onCandidateChange}: {step: StepView; onCan
     if (candidates[step.index] && !window.confirm(t('typeEdit.discard'))) return;
     setChoices(old => ({...old, [step.index]: type})); setModes(old => ({...old, [step.index]: nextMode}));
     const template = state.factoryTemplates?.find(item => item.name === `Structure ${type === 'Deposit' ? nextMode : type}`);
-    if (template) {setCandidates(old => ({...old, [step.index]: candidateStep(step, template, state.materials)})); actions.setTypeCandidate(step.index, true); onCandidateChange(step.index, true);}
+    if (template) {
+      setGenerations(old => ({...old, [step.index]: (old[step.index] ?? 0) + 1}));
+      setCandidates(old => ({...old, [step.index]: candidateStep(step, template, state.materials)}));
+      actions.setTypeCandidate(step.index, true); onCandidateChange(step.index, true);
+    }
     else {setCandidates(old => {const next = {...old}; delete next[step.index]; return next;}); actions.setTypeCandidate(step.index, false); onCandidateChange(step.index, false);}
   }
   return <div className="step-type-editor">
@@ -41,7 +46,7 @@ export function StepTypeEditor({step, onCandidateChange}: {step: StepView; onCan
     {!available && <p>{t('structure.legacyServer')}</p>}
     {Object.entries(candidates).map(([indexText, candidate]) => {
       const index = Number(indexText);
-      return <div key={`${index}:${candidate.name}`} hidden={index !== step.index}>
+      return <div key={`${index}:${generations[index]}`} hidden={index !== step.index}>
         <p role="status">{t('typeEdit.notice')}</p>
         <AddStepDialog inline template={candidate} busy={busy} onCancel={() => cancel(index)} onConfirm={async configuration => {const applied = await actions.replaceStep(index, candidate.name, configuration); if (applied) cancel(index); return applied;}} />
       </div>;

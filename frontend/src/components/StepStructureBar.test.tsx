@@ -15,6 +15,10 @@ import {ProjectSettings} from './ProjectSettings';
 import {I18nProvider} from '../i18n/I18nContext';
 import {LanguageSwitcher} from './LanguageSwitcher';
 import {processCatalog} from './processCatalog';
+// Frozen factory metadata from _webui_serialize_step(PROCESS_STEP_FACTORIES[name](MaterialDatabase())).
+import wireFactoryTemplates from '../test/structureFactoryTemplates.json';
+import {parseStepEnvelope} from '../api/schemas';
+const factoryTemplates = wireFactoryTemplates.map((template, index) => parseStepEnvelope({ok: true, result: template}, index));
 function SelectionControls() {const {actions} = useAppState(); return <><button onClick={() => actions.selectStep(0)}>select 0</button><button onClick={() => actions.selectStep(1)}>select 1</button></>;}
 function SelectedPanel() {const {state} = useAppState(); return <ParameterPanel step={state.recipe.find(item => item.index === state.selectedStepIndex) ?? null} collapsed={false} />;}
 
@@ -149,6 +153,45 @@ describe('配置结构步骤', () => {
 afterEach(() => cleanup());
 
 describe('StepStructureBar', () => {
+  it('同类型重新配置确认丢弃会重置参数和名称，拒绝丢弃保留草稿', async () => {
+    const target = step(0, {name: 'Structure Etch', instanceName: 'Structure Etch', params: {depth_nm: 20}, parameterSpecs: [{key: 'depth_nm', label: 'Depth', type: 'float', minimum: 0, units: 'nm', dimension: 'length', canonicalUnit: 'nm', displayUnits: ['nm', 'µm']}]});
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [target], factoryTemplates: [target]})), setStep: vi.fn(async () => ({step: target, statuses: ['dirty'] as RuntimeStatus[], warnings: []}))});
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<AppStateProvider api={api}><SelectedPanel /></AppStateProvider>);
+    await screen.findByLabelText('工艺类型');
+    fireEvent.click(screen.getByRole('button', {name: '配置类型'}));
+    fireEvent.change(screen.getByLabelText('刻蚀深度（nm）'), {target: {value: '42'}});
+    fireEvent.change(screen.getByLabelText('自定义名称（可选）'), {target: {value: 'draft name'}});
+    fireEvent.click(screen.getByRole('button', {name: '配置类型'}));
+    expect(screen.getByLabelText('刻蚀深度（nm）')).toHaveValue(42);
+    expect(screen.getByLabelText('自定义名称（可选）')).toHaveValue('draft name');
+    fireEvent.change(screen.getByLabelText('刻蚀深度单位'), {target: {value: 'µm'}});
+    fireEvent.change(screen.getByLabelText('刻蚀深度（µm）'), {target: {value: '-1'}});
+    expect(screen.getByRole('button', {name: '确认替换'})).toBeDisabled();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', {name: '配置类型'}));
+    expect(screen.getByLabelText('刻蚀深度（nm）')).toHaveValue(20);
+    expect(screen.getByLabelText('刻蚀深度单位')).toHaveValue('nm');
+    expect(screen.getByLabelText('自定义名称（可选）')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', {name: '确认替换'}));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith({index: 0, name: 'Structure Etch', params: {depth_nm: 20}}, expect.any(AbortSignal)));
+    confirm.mockRestore();
+  });
+  it('多个候选表单字段和标题ID唯一，标签绑定各自的输入框', async () => {
+    const target = step(0, {name: 'Structure Etch', params: {depth_nm: 20}, parameterSpecs: [{key: 'depth_nm', label: 'Depth', type: 'float', units: 'nm'}]});
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0), step(1)], factoryTemplates: [target]}))});
+    const {container} = render(<AppStateProvider api={api}><SelectionControls /><SelectedPanel /></AppStateProvider>);
+    await screen.findByLabelText('工艺类型');
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Etch'}});
+    fireEvent.click(screen.getByRole('button', {name: 'select 1'}));
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Etch'}});
+    const ids = Array.from(container.querySelectorAll('[id]'), element => element.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const label of container.querySelectorAll<HTMLLabelElement>('.type-candidate label')) {
+      expect(label.control).not.toBeNull();
+      expect(label.closest('.type-candidate')!.contains(label.control)).toBe(true);
+    }
+  });
   it.each(['Initialize Wafer', 'Structure Wafer'])('stale选中 %s 禁止删除复制上下移动，普通首步不能越过初始化', async initial => {
     const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0, {name: initial}), step(1, {name: 'Deposit'}), step(2, {name: 'Etch'})]}))});
     render(<AppStateProvider api={api}><SelectionControls /><StepStructureBar /></AppStateProvider>);
@@ -172,14 +215,14 @@ describe('StepStructureBar', () => {
     expect(close).not.toHaveBeenCalled(); expect(screen.getByLabelText('网格 X')).toHaveValue(64);
   });
   it.each(processCatalog.flatMap(source => processCatalog.map(target => [source.id, target.id])))('任意八类 %s → %s 同索引原子替换', async (source, target) => {
-    const template = step(0, {name: `Structure ${target}`, instanceName: `Structure ${target}`, params: {target_default: target}});
+    const template = {...factoryTemplates.find(item => item.name === `Structure ${target}`)!, index: 0};
     const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0, {name: `Structure ${source}`, instanceName: `Structure ${source}`, params: {thickness_nm: 999}})], factoryTemplates: [template]})), setStep: vi.fn(async () => ({step: template, statuses: ['dirty'] as RuntimeStatus[], warnings: []}))});
     render(<AppStateProvider api={api}><SelectedPanel /></AppStateProvider>);
     await screen.findByLabelText('工艺类型');
     if (source === target) fireEvent.click(screen.getByRole('button', {name: '配置类型'}));
     else fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: target}});
     fireEvent.click(screen.getByRole('button', {name: '确认替换'}));
-    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith({index: 0, name: `Structure ${target}`, params: {}}, expect.any(AbortSignal)));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith({index: 0, name: `Structure ${target}`, params: template.params}, expect.any(AbortSignal)));
     expect(api.addStep).not.toHaveBeenCalled(); expect(api.removeStep).not.toHaveBeenCalled();
   });
   it('切换步骤及语言保留候选草稿，换目标需明确放弃确认', async () => {

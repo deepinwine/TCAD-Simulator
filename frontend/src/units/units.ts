@@ -1,6 +1,6 @@
-export type Dimension = 'length' | 'time' | 'angle' | 'rate';
-export type DisplayUnit = 'nm' | 'µm' | 'ms' | 's' | 'min' | '°' | 'rad' | 'nm/s' | 'µm/min';
-export const canonicalUnits: Record<Dimension, string> = {length: 'nm', time: 's', angle: 'degree', rate: 'nm/s'};
+export type Dimension = 'length' | 'time' | 'angle' | 'rate' | 'concentration';
+export type DisplayUnit = 'nm' | 'µm' | 'ms' | 's' | 'min' | '°' | 'rad' | 'nm/s' | 'µm/min' | 'cm^-3';
+export const canonicalUnits: Record<Dimension, string> = {length: 'nm', time: 's', angle: 'degree', rate: 'nm/s', concentration: 'cm^-3'};
 export class UnitConversionError extends Error {
   constructor(readonly code: 'invalid_unit' | 'nonfinite_value' | 'invalid_decimals') {
     super(code);
@@ -12,6 +12,7 @@ const factors: Record<Dimension, Partial<Record<DisplayUnit, number>>> = {
   time: {ms: 0.001, s: 1, min: 60},
   angle: {'°': 1, rad: 180 / Math.PI},
   rate: {'nm/s': 1, 'µm/min': 1000 / 60},
+  concentration: {'cm^-3': 1},
 };
 
 function finite(value: number): number {

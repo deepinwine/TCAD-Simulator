@@ -1,0 +1,1105 @@
+[
+  {
+    "name": "Structure Pattern",
+    "instance_name": "Structure Pattern",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "pattern": "Lines",
+      "critical_dimension": 80,
+      "pitch": 160,
+      "orientation": 0,
+      "mask_mode": "Procedural",
+      "mask_name": "",
+      "mask_file": "",
+      "mask_asset_id": "",
+      "mask_asset_revision": 0
+    },
+    "parameter_specs": [
+      {
+        "key": "pattern",
+        "label": "Mask pattern",
+        "type": "enum",
+        "default": "Lines",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Lines",
+            "Lines"
+          ],
+          [
+            "Grid",
+            "Grid (orthogonal lines)"
+          ],
+          [
+            "Checkerboard",
+            "Checkerboard"
+          ],
+          [
+            "Contacts",
+            "Contacts"
+          ],
+          [
+            "Vias",
+            "Via array"
+          ],
+          [
+            "Circular",
+            "Circular"
+          ],
+          [
+            "Open",
+            "Full open"
+          ],
+          [
+            "Manual",
+            "Manual"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "critical_dimension",
+        "label": "Critical dimension",
+        "type": "float",
+        "default": 80,
+        "minimum": 1,
+        "maximum": 10000,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "pitch",
+        "label": "Pitch",
+        "type": "float",
+        "default": 160,
+        "minimum": 1,
+        "maximum": 10000,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "orientation",
+        "label": "Orientation",
+        "type": "float",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 180,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "°",
+        "tooltip": "",
+        "dimension": "angle",
+        "canonical_unit": "degree",
+        "display_units": [
+          "°",
+          "rad"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "mask_mode",
+        "label": "Mask source",
+        "type": "enum",
+        "default": "Procedural",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Procedural",
+            "Procedural"
+          ],
+          [
+            "Custom",
+            "Custom/Imported"
+          ],
+          [
+            "Asset",
+            "Versioned Mask Asset"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "Built-in procedural pattern or custom designer/image mask.",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "mask_name",
+        "label": "Designer mask name",
+        "type": "text",
+        "default": "",
+        "minimum": null,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "Name for the designed mask.",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "mask_file",
+        "label": "Image file",
+        "type": "text",
+        "default": "",
+        "minimum": null,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "Path to imported mask image (PNG/BMP/JPG/NPY).",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "mask_asset_id",
+        "label": "Mask asset",
+        "type": "text",
+        "default": "",
+        "minimum": null,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "Immutable versioned Mask Asset identifier.",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "mask_asset_revision",
+        "label": "Mask asset revision",
+        "type": "int",
+        "default": 0,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "Exact immutable Mask Asset revision used for exposure.",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Etch",
+    "instance_name": "Structure Etch",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "material": "Silicon Dioxide",
+      "depth_nm": 100,
+      "sidewall_angle_deg": 90
+    },
+    "parameter_specs": [
+      {
+        "key": "material",
+        "label": "Material",
+        "type": "enum",
+        "default": "Silicon Dioxide",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Silicon Dioxide",
+            "Silicon Dioxide"
+          ],
+          [
+            "Silicon Nitride",
+            "Silicon Nitride"
+          ],
+          [
+            "Photoresist",
+            "Photoresist"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ],
+          [
+            "SiGe",
+            "SiGe"
+          ],
+          [
+            "HfO2",
+            "HfO2"
+          ],
+          [
+            "TiN",
+            "TiN"
+          ],
+          [
+            "TaN",
+            "TaN"
+          ],
+          [
+            "SiC",
+            "SiC"
+          ],
+          [
+            "Carbon",
+            "Carbon"
+          ],
+          [
+            "SiON",
+            "SiON"
+          ],
+          [
+            "Tungsten",
+            "Tungsten"
+          ],
+          [
+            "Copper",
+            "Copper"
+          ],
+          [
+            "Aluminum",
+            "Aluminum"
+          ],
+          [
+            "Tantalum",
+            "Tantalum"
+          ],
+          [
+            "Titanium",
+            "Titanium"
+          ],
+          [
+            "Cobalt",
+            "Cobalt"
+          ],
+          [
+            "Ruthenium",
+            "Ruthenium"
+          ],
+          [
+            "Nickel",
+            "Nickel"
+          ],
+          [
+            "Platinum",
+            "Platinum"
+          ],
+          [
+            "Gold",
+            "Gold"
+          ],
+          [
+            "Al2O3",
+            "Al2O3"
+          ],
+          [
+            "ZrO2",
+            "ZrO2"
+          ],
+          [
+            "TiO2",
+            "TiO2"
+          ],
+          [
+            "SiCOH",
+            "SiCOH"
+          ],
+          [
+            "Polyimide",
+            "Polyimide"
+          ],
+          [
+            "Germanium",
+            "Germanium"
+          ],
+          [
+            "GaAs",
+            "GaAs"
+          ],
+          [
+            "InGaAs",
+            "InGaAs"
+          ],
+          [
+            "InP",
+            "InP"
+          ],
+          [
+            "GaN",
+            "GaN"
+          ],
+          [
+            "Molybdenum",
+            "Molybdenum"
+          ],
+          [
+            "Chromium",
+            "Chromium"
+          ],
+          [
+            "PSG",
+            "PSG"
+          ],
+          [
+            "BPSG",
+            "BPSG"
+          ],
+          [
+            "SOD",
+            "SOD"
+          ],
+          [
+            "CoSi2",
+            "CoSi2"
+          ],
+          [
+            "NiSi",
+            "NiSi"
+          ],
+          [
+            "SiGeSn",
+            "SiGeSn"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "depth_nm",
+        "label": "Depth",
+        "type": "float",
+        "default": 100,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "sidewall_angle_deg",
+        "label": "Sidewall angle",
+        "type": "float",
+        "default": 90,
+        "minimum": 0,
+        "maximum": 90,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "°",
+        "tooltip": "",
+        "dimension": "angle",
+        "canonical_unit": "degree",
+        "display_units": [
+          "°",
+          "rad"
+        ],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Deposit",
+    "instance_name": "Structure Deposit",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "material": "Silicon Dioxide",
+      "thickness_nm": 100,
+      "coverage": "Full wafer"
+    },
+    "parameter_specs": [
+      {
+        "key": "material",
+        "label": "Material",
+        "type": "enum",
+        "default": "Silicon Dioxide",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Silicon Dioxide",
+            "Silicon Dioxide"
+          ],
+          [
+            "Silicon Nitride",
+            "Silicon Nitride"
+          ],
+          [
+            "Photoresist",
+            "Photoresist"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ],
+          [
+            "SiGe",
+            "SiGe"
+          ],
+          [
+            "HfO2",
+            "HfO2"
+          ],
+          [
+            "TiN",
+            "TiN"
+          ],
+          [
+            "TaN",
+            "TaN"
+          ],
+          [
+            "SiC",
+            "SiC"
+          ],
+          [
+            "Carbon",
+            "Carbon"
+          ],
+          [
+            "SiON",
+            "SiON"
+          ],
+          [
+            "Tungsten",
+            "Tungsten"
+          ],
+          [
+            "Copper",
+            "Copper"
+          ],
+          [
+            "Aluminum",
+            "Aluminum"
+          ],
+          [
+            "Tantalum",
+            "Tantalum"
+          ],
+          [
+            "Titanium",
+            "Titanium"
+          ],
+          [
+            "Cobalt",
+            "Cobalt"
+          ],
+          [
+            "Ruthenium",
+            "Ruthenium"
+          ],
+          [
+            "Nickel",
+            "Nickel"
+          ],
+          [
+            "Platinum",
+            "Platinum"
+          ],
+          [
+            "Gold",
+            "Gold"
+          ],
+          [
+            "Al2O3",
+            "Al2O3"
+          ],
+          [
+            "ZrO2",
+            "ZrO2"
+          ],
+          [
+            "TiO2",
+            "TiO2"
+          ],
+          [
+            "SiCOH",
+            "SiCOH"
+          ],
+          [
+            "Polyimide",
+            "Polyimide"
+          ],
+          [
+            "Germanium",
+            "Germanium"
+          ],
+          [
+            "GaAs",
+            "GaAs"
+          ],
+          [
+            "InGaAs",
+            "InGaAs"
+          ],
+          [
+            "InP",
+            "InP"
+          ],
+          [
+            "GaN",
+            "GaN"
+          ],
+          [
+            "Molybdenum",
+            "Molybdenum"
+          ],
+          [
+            "Chromium",
+            "Chromium"
+          ],
+          [
+            "PSG",
+            "PSG"
+          ],
+          [
+            "BPSG",
+            "BPSG"
+          ],
+          [
+            "SOD",
+            "SOD"
+          ],
+          [
+            "CoSi2",
+            "CoSi2"
+          ],
+          [
+            "NiSi",
+            "NiSi"
+          ],
+          [
+            "SiGeSn",
+            "SiGeSn"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "thickness_nm",
+        "label": "Thickness",
+        "type": "float",
+        "default": 100,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "coverage",
+        "label": "Coverage",
+        "type": "enum",
+        "default": "Full wafer",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Full wafer",
+            "Full wafer"
+          ],
+          [
+            "Open mask",
+            "Open mask"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Oxidation",
+    "instance_name": "Structure Oxidation",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "material": "Silicon",
+      "thickness_nm": 20,
+      "coverage": "Full wafer"
+    },
+    "parameter_specs": [
+      {
+        "key": "material",
+        "label": "Substrate",
+        "type": "enum",
+        "default": "Silicon",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "thickness_nm",
+        "label": "Target thickness",
+        "type": "float",
+        "default": 20,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "coverage",
+        "label": "Coverage",
+        "type": "enum",
+        "default": "Full wafer",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Full wafer",
+            "Full wafer"
+          ],
+          [
+            "Open mask",
+            "Open mask"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Epitaxy",
+    "instance_name": "Structure Epitaxy",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "material": "Silicon",
+      "seed_material": "Silicon",
+      "thickness_nm": 20,
+      "coverage": "Full wafer"
+    },
+    "parameter_specs": [
+      {
+        "key": "material",
+        "label": "Material",
+        "type": "enum",
+        "default": "Silicon",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ],
+          [
+            "Germanium",
+            "Germanium"
+          ],
+          [
+            "SiGe",
+            "SiGe"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "seed_material",
+        "label": "Seed surface",
+        "type": "enum",
+        "default": "Silicon",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ],
+          [
+            "Germanium",
+            "Germanium"
+          ],
+          [
+            "SiGe",
+            "SiGe"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "thickness_nm",
+        "label": "Target thickness",
+        "type": "float",
+        "default": 20,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "coverage",
+        "label": "Coverage",
+        "type": "enum",
+        "default": "Full wafer",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Full wafer",
+            "Full wafer"
+          ],
+          [
+            "Open mask",
+            "Open mask"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Strip",
+    "instance_name": "Structure Strip",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {},
+    "parameter_specs": []
+  },
+  {
+    "name": "Structure Planarize",
+    "instance_name": "Structure Planarize",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "height_nm": 100
+    },
+    "parameter_specs": [
+      {
+        "key": "height_nm",
+        "label": "Absolute height",
+        "type": "float",
+        "default": 100,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      }
+    ]
+  },
+  {
+    "name": "Structure Doping",
+    "instance_name": "Structure Doping",
+    "group": "Structure",
+    "loop": "",
+    "enabled": true,
+    "params": {
+      "material": "Silicon",
+      "depth_nm": 20,
+      "coverage": "Full wafer",
+      "species": "B",
+      "concentration_cm3": 10000000000000000000
+    },
+    "parameter_specs": [
+      {
+        "key": "material",
+        "label": "Material",
+        "type": "enum",
+        "default": "Silicon",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Silicon",
+            "Silicon"
+          ],
+          [
+            "Polysilicon",
+            "Polysilicon"
+          ],
+          [
+            "Germanium",
+            "Germanium"
+          ],
+          [
+            "SiGe",
+            "SiGe"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "depth_nm",
+        "label": "Depth",
+        "type": "float",
+        "default": 20,
+        "minimum": 0,
+        "maximum": null,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "nm",
+        "tooltip": "",
+        "dimension": "length",
+        "canonical_unit": "nm",
+        "display_units": [
+          "nm",
+          "µm"
+        ],
+        "capability_key": null
+      },
+      {
+        "key": "coverage",
+        "label": "Coverage",
+        "type": "enum",
+        "default": "Full wafer",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "Full wafer",
+            "Full wafer"
+          ],
+          [
+            "Open mask",
+            "Open mask"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "species",
+        "label": "Species",
+        "type": "enum",
+        "default": "B",
+        "minimum": null,
+        "maximum": null,
+        "choices": [
+          [
+            "B",
+            "B"
+          ],
+          [
+            "P",
+            "P"
+          ],
+          [
+            "As",
+            "As"
+          ],
+          [
+            "Sb",
+            "Sb"
+          ]
+        ],
+        "decimals": 2,
+        "step": null,
+        "units": "",
+        "tooltip": "",
+        "dimension": null,
+        "canonical_unit": null,
+        "display_units": [],
+        "capability_key": null
+      },
+      {
+        "key": "concentration_cm3",
+        "label": "Concentration (same species replaces)",
+        "type": "float",
+        "default": 10000000000000000000,
+        "minimum": 0,
+        "maximum": 1e+22,
+        "choices": null,
+        "decimals": 2,
+        "step": null,
+        "units": "cm^-3",
+        "tooltip": "",
+        "dimension": "concentration",
+        "canonical_unit": "cm^-3",
+        "display_units": [
+          "cm^-3"
+        ],
+        "capability_key": null
+      }
+    ]
+  }
+]

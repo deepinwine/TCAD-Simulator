@@ -153,6 +153,20 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it('排队中的旧字段保存失败会阻止候选替换并保留原步骤和错误草稿', async () => {
+    const first = deferred<SetStepView>();
+    const api = apiStub({setStep: vi.fn(async () => first.promise)});
+    mount(api); await waitUntilReady();
+    const original = captured!.state.recipe;
+    let saving!: Promise<void>; let replacing!: Promise<boolean>;
+    act(() => {captured!.actions.updateDraft(0, 'dose', 200); saving = captured!.actions.saveParameter(0, 'dose');});
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledTimes(1));
+    act(() => {replacing = captured!.actions.replaceStep(0, 'Structure Strip', {params: {}});});
+    await act(async () => {first.reject(new TcadApiError('save failed', {status: 400})); await saving; expect(await replacing).toBe(false);});
+    expect(api.setStep).toHaveBeenCalledTimes(1); expect(captured!.state.recipe).toEqual(original);
+    expect(captured!.state.drafts['0:dose']).toBeDefined(); expect(captured!.state.parameterErrors['0:dose']).toBeDefined();
+    expect(api.runTo).not.toHaveBeenCalled();
+  });
   it.each(['Initialize Wafer', 'Structure Wafer'])('操作层保护 %s 的stale选择，首普通步上移不请求', async initial => {
     const api = apiStub({init: vi.fn(async () => ({...initView, recipe: [step(0, {name: initial}), step(1, {name: 'Deposit'})]}))});
     mount(api); await waitUntilReady();

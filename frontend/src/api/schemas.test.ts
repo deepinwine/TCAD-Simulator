@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import structureFactoryTemplates from '../test/structureFactoryTemplates.json';
 
 import {
   ApiContractError,
@@ -395,4 +396,9 @@ describe('Mask Asset schemas', () => {
       expect.objectContaining({path}),
     );
   });
+});
+it('parses complete real Structure factory templates including concentration identity metadata', () => {
+  const parsed = parseInitEnvelope({...validInit, result: {...validInit.result, factory_templates: structureFactoryTemplates}});
+  expect(parsed.factoryTemplates).toHaveLength(8);
+  expect(parsed.factoryTemplates!.find(step => step.name === 'Structure Doping')!.parameterSpecs.find(spec => spec.key === 'concentration_cm3')).toMatchObject({dimension: 'concentration', canonicalUnit: 'cm^-3', displayUnits: ['cm^-3']});
 });

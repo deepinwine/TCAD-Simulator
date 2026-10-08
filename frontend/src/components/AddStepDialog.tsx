@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useId, useRef, useState} from 'react';
 import type {StepView} from '../api/types';
 import {useI18n} from '../i18n/I18nContext';
 import {zhCN, type TranslationKey} from '../i18n/catalogs';
@@ -15,6 +15,9 @@ function displayBound(value: number | undefined, conversion: ReturnType<typeof c
 
 export function AddStepDialog({template, busy, onCancel, onConfirm, inline = false, project = false, canConfirm = true}: {template: StepView; busy: boolean; inline?: boolean; project?: boolean; canConfirm?: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
   const {locale, t} = useI18n();
+  const instanceId = useId();
+  const titleId = `${instanceId}-title`;
+  const nameId = `${instanceId}-name`;
   const [values, setValues] = useState<Record<string, unknown>>(() => Object.fromEntries(template.parameterSpecs.map(spec => [spec.key, template.params[spec.key] ?? spec.defaultValue])));
   const [name, setName] = useState(inline && template.instanceName !== template.name ? template.instanceName : '');
   const [units, setUnits] = useState<Record<string, DisplayUnit>>(() => Object.fromEntries(template.parameterSpecs.flatMap(spec => {const conversion = conversionSpec(spec); return conversion ? [[spec.key, conversion.preferred]] : [];})));
@@ -60,11 +63,11 @@ export function AddStepDialog({template, busy, onCancel, onConfirm, inline = fal
       try {if (await onConfirm({params: Object.fromEntries(validated.map(({spec, result}) => [spec.key, result.ok ? result.value : undefined])), ...(name.trim() ? {instanceName: name.trim()} : {})}) === false) setFailed(true);}
       finally {gate.current = false; setSubmitting(false);}
     }}>
-      <h2 id="add-step-title">{t('addStep.title')} · {presentStep(template, [], locale).type}</h2>
+      <h2 id={titleId}>{t('addStep.title')} · {presentStep(template, [], locale).type}</h2>
       <p>{presentStep(template, [], locale).description}</p>
       {failed && <p role="alert">{t(inline ? 'typeEdit.failed' : 'addStep.failed')}</p>}
       {validated.map(({spec, result, baseResult, conversion, editable}) => {
-        const id = `add-step-${spec.key}`;
+        const id = `${instanceId}-${spec.key}`;
         const label = Object.hasOwn(zhCN, `cad.${spec.key}`) ? t(`cad.${spec.key}` as TranslationKey) : spec.label;
         return <div className="parameter-field" key={spec.key}>
           <label htmlFor={id}>{spec.units ? t('addStep.fieldWithUnit', {label, unit: units[spec.key] ?? spec.units}) : label}</label>
@@ -88,9 +91,9 @@ export function AddStepDialog({template, busy, onCancel, onConfirm, inline = fal
           {!result.ok && <small role="alert">{t('addStep.invalid')}</small>}
         </div>;
       })}
-      {!project && <><label htmlFor="add-step-name">{t('addStep.customName')}</label>
-      <input id="add-step-name" maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} /></>}
+      {!project && <><label htmlFor={nameId}>{t('addStep.customName')}</label>
+      <input id={nameId} maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} /></>}
       <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid || !canConfirm}>{t(project ? 'project.confirm' : inline ? 'typeEdit.confirm' : 'addStep.confirm')}</button></div>
     </form>;
-  return inline ? <div className="type-candidate">{form}</div> : <dialog ref={dialog} aria-modal="true" aria-labelledby="add-step-title" className="add-step-dialog" onCancel={event => {event.preventDefault(); if (!disabled) onCancel();}}>{form}</dialog>;
+  return inline ? <div className="type-candidate">{form}</div> : <dialog ref={dialog} aria-modal="true" aria-labelledby={titleId} className="add-step-dialog" onCancel={event => {event.preventDefault(); if (!disabled) onCancel();}}>{form}</dialog>;
 }

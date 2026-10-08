@@ -6,6 +6,7 @@ describe('canonical units', () => {
     ['length', 'µm', 1000, 1], ['time', 'min', 120, 2],
     ['angle', 'rad', 180, Math.PI], ['rate', 'µm/min', 10, 0.6],
     ['time', 'ms', 1, 1000],
+    ['concentration', 'cm^-3', 1e19, 1e19],
   ])('converts %s using %s without drift', (dimension, unit, canonical, display) => {
     expect(fromCanonical(canonical, dimension, unit)).toBeCloseTo(display, 12);
     expect(toCanonical(display, dimension, unit)).toBeCloseTo(canonical, 12);

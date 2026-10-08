@@ -262,7 +262,7 @@ function parseParameterSpec(value: unknown, path: string): ParameterSpecView {
   // specs. A declared unit contract, however, must be internally consistent.
   if (dimension !== undefined || canonicalUnit !== undefined || parsed.displayUnits?.length) {
     if (dimension === undefined || !Object.hasOwn(canonicalUnits, dimension)) {
-      throw new ApiContractError(`${path}.dimension`, 'length, time, angle, or rate');
+      throw new ApiContractError(`${path}.dimension`, 'length, time, angle, rate, or concentration');
     }
     const validatedDimension = dimension as Dimension;
     if (canonicalUnit !== canonicalUnits[validatedDimension]) {
