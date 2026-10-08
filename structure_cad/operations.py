@@ -3,7 +3,7 @@ import math
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-SEMICONDUCTORS = ('Silicon', 'Polysilicon', 'Germanium', 'Silicon Germanium')
+SEMICONDUCTORS = ('Silicon', 'Polysilicon', 'Germanium', 'SiGe')
 OXIDIZABLE = ('Silicon', 'Polysilicon')
 
 

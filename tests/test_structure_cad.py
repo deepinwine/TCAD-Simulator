@@ -45,6 +45,12 @@ class StructureCADTests(unittest.TestCase):
         self.assertTrue(np.all(self.model.grid[1:, :, 4:6] == self.db.id_for('Germanium')))
         self.assertFalse(self.model.grid[0, :, 4:].any())
 
+    def test_sige_epitaxy_and_doping_are_registered_semiconductors(self):
+        self.step('Structure Wafer', material='SiGe', thickness_nm=20)
+        self.step('Structure Epitaxy', material='SiGe', seed_material='SiGe', thickness_nm=10)
+        self.step('Structure Doping', material='SiGe', depth_nm=5)
+        self.assertTrue(np.all(self.model.dopant_species_fields['B'][:, :, 5] > 0))
+
     def test_strip_only_resist_resets_mask_and_clears_fields(self):
         self.step('Structure Wafer', thickness_nm=20)
         self.step('Structure Deposit', material='Photoresist', thickness_nm=10)
