@@ -125,6 +125,8 @@ def layers(model, value, label, *, zero=False):
     if not math.isfinite(scaled):
         raise ValueError(f'{label} exceeds the representable grid range')
     count = int(math.floor(scaled + .5))
+    if count > np.iinfo(np.intp).max:
+        raise ValueError(f'{label} exceeds the representable grid range')
     if value > 0 and count == 0:
         raise ValueError(f'{label} is below half the grid spacing')
     return count

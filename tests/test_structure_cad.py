@@ -101,6 +101,14 @@ class StructureCADTests(unittest.TestCase):
             self.step('Structure Doping', material='Silicon', depth_nm=10)
         np.testing.assert_array_equal(before, self.model.doping)
 
+    def test_extreme_depth_rejected_as_unrepresentable_before_field_mutation(self):
+        self.step('Structure Wafer', thickness_nm=40)
+        for name in ('Structure Doping', 'Structure Etch'):
+            before = self.model.grid.copy()
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError,'representable'):
+                self.step(name, material='Silicon', depth_nm=1e300)
+            np.testing.assert_array_equal(before,self.model.grid)
+
     def test_overflow_and_invalid_values_are_atomic(self):
         self.step('Structure Wafer', thickness_nm=20)
         before = self.model.grid.copy()
