@@ -51,6 +51,7 @@ export interface AppStateActions {
   saveRecipe(name: string): Promise<void>;
   exportRecipe(): Promise<void>;
   addStep(name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean>;
+  replaceStep(index: number, name: string, configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean>;
   removeStep(): Promise<void>;
   duplicateStep(): Promise<void>;
   moveStep(direction: 'up' | 'down'): Promise<void>;
@@ -552,6 +553,36 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [api, beginMutation, createController, dispatch, finishMutation, releaseController]);
 
   const selectedStepIndexForOps = () => stateRef.current.selectedStepIndex;
+  const replaceStep = useCallback(async (index: number, name: string, configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean> => {
+    if (!mountedRef.current || applyingRef.current || mutationGateRef.current !== null) return false;
+    if (Object.values(stateRef.current.drafts).some(draft => draft.validation.status !== 'valid')) {
+      dispatch({type: 'mutation/blocked', error: new TcadApiError('Invalid parameter draft', {status: 400, code: 'invalid_draft'})});
+      return false;
+    }
+    cancelStandaloneTimeline();
+    applyingRef.current = true;
+    dispatch({type: 'run/started', operation: 'apply'});
+    try {
+      await saveQueueRef.current;
+      if (Object.keys(stateRef.current.parameterErrors).length) return false;
+      for (const draftKey of Object.keys(stateRef.current.drafts)) {
+        const split = draftKey.indexOf(':');
+        await saveParameterInternal(Number(draftKey.slice(0, split)), draftKey.slice(split + 1), true);
+        if (Object.keys(stateRef.current.parameterErrors).length) return false;
+      }
+      if (!mountedRef.current || hasUnsavedDrafts(stateRef.current)) return false;
+      const controller = createController();
+      try {
+        const payload = await api.setStep({index, name, ...configuration}, controller.signal);
+        if (!mountedRef.current || controller.signal.aborted) return false;
+        dispatch({type: 'mask/uploaded', payload});
+        try {const timeline = await api.getTimeline(controller.signal); if (mountedRef.current && !controller.signal.aborted) dispatch({type: 'timeline/loaded', payload: timeline});}
+        catch (error) {if (mountedRef.current && !controller.signal.aborted) dispatch({type: 'timeline/loadFailed', error: normalizeError(error)});}
+        return true;
+      } catch (error) {if (mountedRef.current && !isAbortError(error, controller.signal)) dispatch({type: 'mutation/blocked', error: normalizeError(error)}); return false;}
+      finally {releaseController(controller);}
+    } finally {applyingRef.current = false; dispatch({type: 'mutation/finished'});}
+  }, [api, cancelStandaloneTimeline, createController, dispatch, releaseController, saveParameterInternal]);
 
   const addStepAction = useCallback(async (name: string, configuration?: {params: Record<string, unknown>; instanceName?: string}) => {
     let applied = false;
@@ -810,6 +841,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
     saveRecipe: saveRecipeAction,
     exportRecipe: exportRecipeAction,
     addStep: addStepAction,
+    replaceStep,
     removeStep: removeStepAction,
     duplicateStep: duplicateStepAction,
     moveStep: moveStepAction,
@@ -818,6 +850,7 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }), [
     dispatch,
     addStepAction,
+    replaceStep,
     bootstrap,
     duplicateStepAction,
     exportRecipeAction,

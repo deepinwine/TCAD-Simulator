@@ -9,6 +9,9 @@ import type {
 import {AppStateProvider} from '../state/AppStateContext';
 import {StepStructureBar} from './StepStructureBar';
 import {TcadApiError} from '../api/client';
+import {ParameterPanel} from './ParameterPanel';
+import {useAppState} from '../state/AppStateContext';
+function SelectedPanel() {const {state} = useAppState(); return <ParameterPanel step={state.recipe.find(item => item.index === state.selectedStepIndex) ?? null} collapsed={false} />;}
 
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
@@ -141,16 +144,34 @@ describe('配置结构步骤', () => {
 afterEach(() => cleanup());
 
 describe('StepStructureBar', () => {
-  it('列出工厂类型，选择后添加步骤调用 addStep', async () => {
+  it('仅显示八类目录，旧服务器没有模板时禁止新增', async () => {
     const api = apiStub();
     mount(api);
     const select = await screen.findByRole('combobox', {name: '添加步骤类型'});
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent);
-    expect(options).toContain('Initialize Wafer');
-
-    fireEvent.change(select, {target: {value: 'deposit'}});
+    expect(options.slice(1)).toEqual(['光刻 / Lithography', '刻蚀 / Etch', '沉积 / Deposition', '氧化 / Oxidation', '外延 / Epitaxy', '去胶 / Strip', 'CMP', '掺杂 / Doping']);
+    fireEvent.change(select, {target: {value: 'Structure Deposit'}});
     fireEvent.click(screen.getByRole('button', {name: '添加步骤'}));
-    await waitFor(() => expect(api.addStep).toHaveBeenCalledWith('deposit', expect.any(AbortSignal)));
+    expect(screen.getByRole('button', {name: '添加步骤'})).toBeDisabled();
+    expect(api.addStep).not.toHaveBeenCalled();
+  });
+
+  it('旧步骤可内联改成任何目录类型，取消不请求且确认原子替换', async () => {
+    const source = step(0, {name: 'Legacy', instanceName: 'contact', params: {thickness_nm: 500}});
+    const target = step(0, {name: 'Structure Etch', instanceName: 'Structure Etch', params: {depth_nm: 20}, parameterSpecs: [{key: 'depth_nm', label: 'depth', type: 'float', minimum: 0, units: 'nm'}]});
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [source], factoryTemplates: [target]})), setStep: vi.fn(async () => ({step: target, statuses: ['dirty'] as RuntimeStatus[], warnings: []}))});
+    render(<AppStateProvider api={api}><SelectedPanel /></AppStateProvider>);
+    await screen.findByText('当前为旧配方类型：Legacy');
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Etch'}});
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('刻蚀深度（nm）')).toHaveValue(20);
+    fireEvent.click(screen.getByRole('button', {name: '取消'}));
+    expect(api.setStep).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('工艺类型'), {target: {value: 'Etch'}});
+    fireEvent.change(screen.getByLabelText('刻蚀深度（nm）'), {target: {value: '42'}});
+    fireEvent.click(screen.getByRole('button', {name: '确认替换'}));
+    await waitFor(() => expect(api.setStep).toHaveBeenCalledWith({index: 0, name: 'Structure Etch', instanceName: 'contact', params: {depth_nm: 42}}, expect.any(AbortSignal)));
+    expect(api.addStep).not.toHaveBeenCalled(); expect(api.removeStep).not.toHaveBeenCalled(); expect(api.runTo).not.toHaveBeenCalled();
   });
 
   it('默认选中首步：上移禁用、下移可用，操作按选中索引调用', async () => {

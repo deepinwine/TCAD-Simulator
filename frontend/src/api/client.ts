@@ -359,6 +359,8 @@ export function createTcadApi(): TcadApi {
         '/api/step/set',
         {
           index,
+          ...(request.name !== undefined ? {name: request.name} : {}),
+          ...(request.instanceName !== undefined ? {instance_name: request.instanceName} : {}),
           ...(request.enabled !== undefined ? {enabled: request.enabled} : {}),
           ...(request.params !== undefined ? {params: request.params} : {}),
           ...(request.loop !== undefined ? {loop: request.loop} : {}),

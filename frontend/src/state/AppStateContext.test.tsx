@@ -153,6 +153,36 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it('类型替换等待旧队列及最新草稿，互斥变更且只替换同索引一次', async () => {
+    const first = deferred<SetStepView>();
+    const events: string[] = [];
+    const api = apiStub({setStep: vi.fn(async request => {
+      events.push(request.name ?? `save:${request.params?.dose}`);
+      if (request.params?.dose === 200) return first.promise;
+      return {step: step(request.index, {name: request.name ?? 'old', params: request.params!}), statuses: ['dirty', 'dirty'] as RuntimeStatus[], warnings: []};
+    })});
+    mount(api); await waitUntilReady();
+    let saving!: Promise<void>; let replacing!: Promise<boolean>;
+    act(() => {captured!.actions.updateDraft(0, 'dose', 200); saving = captured!.actions.saveParameter(0, 'dose');});
+    await waitFor(() => expect(events).toEqual(['save:200']));
+    act(() => {captured!.actions.updateDraft(0, 'dose', 300); replacing = captured!.actions.replaceStep(0, 'Structure Strip', {params: {}});});
+    await act(async () => {await captured!.actions.runAll(); await captured!.actions.addStep('Structure Deposit');});
+    expect(api.runAll).not.toHaveBeenCalled(); expect(api.addStep).not.toHaveBeenCalled();
+    await act(async () => {first.resolve({step: step(0, {params: {dose: 200}}), statuses: ['dirty', 'dirty'], warnings: []}); await saving; expect(await replacing).toBe(true);});
+    expect(events).toEqual(['save:200', 'save:300', 'Structure Strip']);
+    expect(captured!.state.recipe[0].name).toBe('Structure Strip');
+    expect(api.runTo).not.toHaveBeenCalled();
+  });
+  it('类型替换失败或无效草稿不改变原步骤，不运行', async () => {
+    const api = apiStub({setStep: vi.fn(async () => {throw new TcadApiError('invalid candidate', {status: 400});})});
+    mount(api); await waitUntilReady();
+    const old = captured!.state.recipe;
+    await act(async () => {expect(await captured!.actions.replaceStep(0, 'Structure Strip', {params: {}})).toBe(false);});
+    expect(captured!.state.recipe).toEqual(old);
+    act(() => captured!.actions.updateDraft(0, 'dose', -1, {status: 'invalid'}));
+    await act(async () => {expect(await captured!.actions.replaceStep(0, 'Structure Strip', {params: {}})).toBe(false);});
+    expect(api.setStep).toHaveBeenCalledTimes(1); expect(api.runAll).not.toHaveBeenCalled();
+  });
   it('原子配置添加成功选中新步骤并打开其参数', async () => {
     const added = step(2, {name: 'Structure Deposit', instanceName: '铜保护层', params: {material: 'Copper', thickness_nm: 35}});
     const api = apiStub({addStep: vi.fn(async () => [...initView.recipe, added])});

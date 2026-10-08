@@ -13,10 +13,10 @@ function displayBound(value: number | undefined, conversion: ReturnType<typeof c
   catch (error) {if (error instanceof UnitConversionError) return undefined; throw error;}
 }
 
-export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: StepView; busy: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
+export function AddStepDialog({template, busy, onCancel, onConfirm, inline = false}: {template: StepView; busy: boolean; inline?: boolean; onCancel(): void; onConfirm(configuration: {params: Record<string, unknown>; instanceName?: string}): Promise<boolean | void>}) {
   const {locale, t} = useI18n();
   const [values, setValues] = useState<Record<string, unknown>>(() => Object.fromEntries(template.parameterSpecs.map(spec => [spec.key, template.params[spec.key] ?? spec.defaultValue])));
-  const [name, setName] = useState('');
+  const [name, setName] = useState(inline && template.instanceName !== template.name ? template.instanceName : '');
   const [units, setUnits] = useState<Record<string, DisplayUnit>>(() => Object.fromEntries(template.parameterSpecs.flatMap(spec => {const conversion = conversionSpec(spec); return conversion ? [[spec.key, conversion.preferred]] : [];})));
   const [submitting, setSubmitting] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -28,13 +28,14 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
     setConversionErrors(current => ({...current, [key]: false}));
   }
   useEffect(() => {
+    if (inline) return;
     const previous = document.activeElement as HTMLElement | null;
     const element = dialog.current;
     if (typeof element?.showModal === 'function') element.showModal();
     else element?.setAttribute('open', '');
     element?.querySelector<HTMLElement>('select, input, button')?.focus();
     return () => previous?.focus();
-  }, []);
+  }, [inline]);
   const validated = template.parameterSpecs.map(spec => {
     const conversion = conversionSpec(spec);
     const editable = ['float', 'int', 'integer', 'bool', 'boolean', 'choice', 'enum', 'string', 'str', 'text'].includes(spec.type);
@@ -52,8 +53,7 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
   });
   const valid = validated.every(item => item.result.ok) && name.trim().length <= 80;
   const disabled = busy || submitting;
-  return <dialog ref={dialog} aria-modal="true" aria-labelledby="add-step-title" className="add-step-dialog" onCancel={event => {event.preventDefault(); if (!disabled) onCancel();}}>
-    <form onSubmit={async event => {
+  const form = <form onSubmit={async event => {
       event.preventDefault();
       if (!valid || disabled || gate.current) return;
       gate.current = true; setSubmitting(true); setFailed(false);
@@ -62,7 +62,7 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
     }}>
       <h2 id="add-step-title">{t('addStep.title')} · {presentStep(template, [], locale).type}</h2>
       <p>{presentStep(template, [], locale).description}</p>
-      {failed && <p role="alert">{t('addStep.failed')}</p>}
+      {failed && <p role="alert">{t(inline ? 'typeEdit.failed' : 'addStep.failed')}</p>}
       {validated.map(({spec, result, baseResult, conversion, editable}) => {
         const id = `add-step-${spec.key}`;
         const label = Object.hasOwn(zhCN, `cad.${spec.key}`) ? t(`cad.${spec.key}` as TranslationKey) : spec.label;
@@ -90,7 +90,7 @@ export function AddStepDialog({template, busy, onCancel, onConfirm}: {template: 
       })}
       <label htmlFor="add-step-name">{t('addStep.customName')}</label>
       <input id="add-step-name" maxLength={80} value={name} disabled={disabled} onChange={event => setName(event.target.value)} />
-      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid}>{t('addStep.confirm')}</button></div>
-    </form>
-  </dialog>;
+      <div className="dialog-actions"><button type="button" disabled={disabled} onClick={onCancel}>{t('addStep.cancel')}</button><button type="submit" disabled={disabled || !valid}>{t(inline ? 'typeEdit.confirm' : 'addStep.confirm')}</button></div>
+    </form>;
+  return inline ? <div className="type-candidate">{form}</div> : <dialog ref={dialog} aria-modal="true" aria-labelledby="add-step-title" className="add-step-dialog" onCancel={event => {event.preventDefault(); if (!disabled) onCancel();}}>{form}</dialog>;
 }

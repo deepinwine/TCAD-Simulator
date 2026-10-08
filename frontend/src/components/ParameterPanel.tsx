@@ -13,6 +13,8 @@ import {StatusBadge} from './StatusBadge';
 import {validateParameter} from './parameterValidation';
 import {toCanonical, fromCanonical, formatDisplayValue, type DisplayUnit} from '../units/units';
 import {conversionSpec} from '../units/parameterUnits';
+import {StepTypeEditor} from './StepTypeEditor';
+import {isInitializer} from './processCatalog';
 
 interface ParameterPanelProps {
   step: StepView | null;
@@ -438,6 +440,8 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
   const {t, locale} = useI18n();
   const disabled = state.phase === 'running' || state.activeMutation !== null;
   const runError = step === null ? undefined : state.stepErrors[step.index];
+  const [candidates, setCandidates] = useState<Record<number, boolean>>({});
+  const candidate = step !== null && candidates[step.index];
 
   return (
     <section
@@ -466,6 +470,8 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
             </div>
             <StatusBadge status={step.runtimeStatus} />
           </div>
+          {!isInitializer(step) && <StepTypeEditor step={step} onCandidateChange={(index, pending) => setCandidates(old => ({...old, [index]: pending}))} />}
+          {!candidate && <>
           <p role="status">{Object.keys(state.drafts).some(key => key.startsWith(`${step.index}:`)) ? t('parameter.unsavedChanges') : step.runtimeStatus === 'dirty' ? t('parameter.modifiedBuildRequired') : ''}</p>
           <button type="button" className="toolbar-button is-primary" disabled={disabled || Object.values(state.drafts).some(draft => draft.validation.status === 'invalid')} onClick={() => void actions.applyAndRunTo(step.index)}>{t('parameter.applyAndBuild')}</button>
           {runError !== undefined && (
@@ -487,7 +493,7 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
                   : spec.defaultValue;
                 return (
                   <ParameterField
-                    key={`${step.index}:${spec.key}`}
+                    key={`${step.index}:${step.name}:${spec.key}`}
                     stepIndex={step.index}
                     stepName={step.name}
                     spec={spec}
@@ -511,6 +517,7 @@ export function ParameterPanel({step, collapsed, onEditMask}: ParameterPanelProp
               assetRevision={typeof step.params.mask_asset_revision === 'number' ? step.params.mask_asset_revision : undefined}
             />
           )}
+          </>}
         </div>
       )}
     </section>

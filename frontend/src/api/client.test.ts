@@ -17,6 +17,13 @@ const wireStep = {
   parameter_specs: [],
   runtime_status: 'ready',
 };
+it('atomic replacement sends name and snake case custom label in a single request', async () => {
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ok: true, result: wireStep, statuses: ['dirty']}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  vi.stubGlobal('fetch', fetcher);
+  await createTcadApi().setStep({index: 0, name: 'Structure Strip', instanceName: 'clean', params: {}});
+  expect(JSON.parse((fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].body as string)).toEqual({index: 0, name: 'Structure Strip', instance_name: 'clean', params: {}});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
 
 it('配置添加一次提交params和可选name，旧调用维持name-only', async () => {
   const fetcher = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ok: true, result: [wireStep]}), {status: 200, headers: {'Content-Type': 'application/json'}}));

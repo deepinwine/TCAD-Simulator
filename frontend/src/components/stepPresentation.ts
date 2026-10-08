@@ -1,12 +1,18 @@
 import type {MaterialView, StepView} from '../api/types';
 import type {Locale} from '../i18n/catalogs';
+import {en, zhCN} from '../i18n/catalogs';
+import {processCatalog} from './processCatalog';
 const operations: Record<string, [string, string, string, string]> = {
   Wafer: ['晶圆', 'Wafer', '创建指定材料与厚度的基础晶圆。', 'Create the base wafer with the selected material and thickness.'],
   Deposit: ['沉积', 'Deposit', '在表面添加指定材料；厚度为新增膜厚。', 'Add material to the surface; thickness is the added film thickness.'],
   Etch: ['刻蚀', 'Etch', '移除指定材料；深度为向下移除的距离。', 'Remove the selected material downward by the specified depth.'],
-  Pattern: ['图形', 'Pattern', '定义后续结构操作使用的掩膜开口。', 'Define mask openings for subsequent structure operations.'],
+  Pattern: ['光刻', 'Lithography', '定义后续结构操作使用的掩膜开口。', 'Define mask openings for subsequent structure operations.'],
   Fill: ['填充', 'Fill', '将开口填充至指定的绝对高度。', 'Fill openings up to the specified absolute height.'],
-  Planarize: ['平坦化', 'Planarize', '移除指定绝对高度以上的材料。', 'Remove material above the specified absolute height.'],
+  Planarize: ['CMP', 'CMP', '移除指定绝对高度以上的材料。', 'Remove material above the specified absolute height.'],
+  Oxidation: ['氧化', 'Oxidation', '按目标厚度构造氧化层。', 'Construct an oxide layer of the target thickness.'],
+  Epitaxy: ['外延', 'Epitaxy', '在种子材料上构造指定厚度的材料。', 'Construct material of the specified thickness on seed material.'],
+  Strip: ['去胶', 'Strip', '移除光刻胶材料。', 'Remove photoresist material.'],
+  Doping: ['掺杂', 'Doping', '在目标深度内写入浓度区域，不预测扩散或激活。', 'Set concentration regions to the target depth; no diffusion or activation prediction.'],
 };
 export function materialLabel(value: unknown, materials: MaterialView[]): string {
   const name = typeof value === 'number' ? materials.find(material => material.id === value)?.name ?? String(value) : typeof value === 'string' ? value : '';
@@ -20,11 +26,13 @@ export function presentStep(step: StepView, materials: MaterialView[], locale: L
   const english = locale === 'en';
   const label = copy[english ? 1 : 0];
   const material = materialLabel(step.params.material, materials);
-  const key = operation === 'Etch' ? (structure ? 'depth_nm' : 'time') : operation === 'Fill' || operation === 'Planarize' ? 'height_nm' : operation === 'Pattern' ? 'critical_dimension' : 'thickness_nm';
+  const key = operation === 'Doping' ? 'depth_nm' : operation === 'Etch' ? (structure ? 'depth_nm' : 'time') : operation === 'Fill' || operation === 'Planarize' ? 'height_nm' : operation === 'Pattern' ? 'critical_dimension' : 'thickness_nm';
   const value = step.params[key] ?? (operation === 'Deposit' ? step.params.thickness : undefined);
   const legacyEtch = !structure && operation === 'Etch';
-  const prefix = operation === 'Etch' ? (legacyEtch ? (english ? 'Time ' : '时间 ') : english ? 'Depth ' : '深度 ') : operation === 'Fill' || operation === 'Planarize' ? (english ? 'Height ' : '高度 ') : operation === 'Pattern' ? 'CD ' : '';
+  const prefix = operation === 'Etch' || operation === 'Doping' ? (legacyEtch ? (english ? 'Time ' : '时间 ') : english ? 'Depth ' : '深度 ') : operation === 'Fill' || operation === 'Planarize' ? (english ? 'Height ' : '高度 ') : operation === 'Pattern' ? 'CD ' : '';
   const summary = [label, material, typeof value === 'number' ? `${prefix}${value} ${legacyEtch ? 's' : 'nm'}` : ''].filter(Boolean).join(' · ');
   const description = legacyEtch ? (english ? 'Legacy etching uses time and rate. Select Structure Etch to construct by depth.' : '旧配方刻蚀按时间与速率运行；按深度构建请选择结构刻蚀。') : copy[english ? 3 : 2];
-  return {title: step.instanceName && step.instanceName !== step.name ? step.instanceName : summary, type: `${label} / ${copy[1]}`, description};
+  const category = processCatalog.find(item => item.id === (operation === 'Fill' ? 'Deposit' : operation));
+  const type = category ? (english ? en : zhCN)[category.key] : `${label} / ${copy[1]}`;
+  return {title: step.instanceName && step.instanceName !== step.name ? step.instanceName : summary, type, description};
 }

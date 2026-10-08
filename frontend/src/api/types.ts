@@ -64,6 +64,8 @@ export interface InitView {
 
 export interface SetStepRequest {
   index: number;
+  name?: string;
+  instanceName?: string;
   enabled?: boolean;
   params?: Record<string, unknown>;
   loop?: string;
