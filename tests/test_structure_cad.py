@@ -29,6 +29,72 @@ class StructureCADTests(unittest.TestCase):
         self.assertEqual(np.count_nonzero(self.model.grid == self.db.id_for('Silicon')), 12*12*4)
         self.assertEqual(self.model.current_time_s, 0)
 
+    def test_oxidation_consumes_selected_exposed_silicon_and_grows_oxide(self):
+        self.step('Structure Wafer', thickness_nm=40)
+        self.model.grid[0, 0, 7] = self.db.id_for('Copper')
+        self.step('Structure Oxidation', material='Silicon', thickness_nm=20)
+        self.assertTrue(np.all(self.model.grid[1:, :, 6:10] == self.db.id_for('Silicon Dioxide')))
+        self.assertEqual(self.model.grid[0, 0, 7], self.db.id_for('Copper'))
+        self.assertEqual(self.model.height_map[1, 1], 10)
+        self.assertEqual(self.model.current_time_s, 0)
+
+    def test_epitaxy_only_grows_on_selected_semiconductor_seed(self):
+        self.step('Structure Wafer', thickness_nm=20)
+        self.model.grid[0, :, 3] = self.db.id_for('Silicon Dioxide')
+        self.step('Structure Epitaxy', material='Germanium', seed_material='Silicon', thickness_nm=10)
+        self.assertTrue(np.all(self.model.grid[1:, :, 4:6] == self.db.id_for('Germanium')))
+        self.assertFalse(self.model.grid[0, :, 4:].any())
+
+    def test_strip_only_resist_resets_mask_and_clears_fields(self):
+        self.step('Structure Wafer', thickness_nm=20)
+        self.step('Structure Deposit', material='Photoresist', thickness_nm=10)
+        self.model.doping = np.full(self.model.grid.shape, 7.0)
+        self.model.open_mask.fill(False)
+        self.step('Structure Strip')
+        self.assertTrue(self.model.open_mask.all())
+        self.assertTrue(np.all(self.model.grid[:, :, :4] == self.db.id_for('Silicon')))
+        self.assertFalse(self.model.grid[:, :, 4:].any())
+        self.assertFalse(self.model.doping[:, :, 4:6].any())
+
+    def test_doping_assigns_species_depth_mask_and_same_species_replaces(self):
+        self.step('Structure Wafer', thickness_nm=40)
+        self.model.open_mask.fill(False)
+        self.model.open_mask[:6] = True
+        grid, height = self.model.grid.copy(), self.model.height_map.copy()
+        self.step('Structure Doping', material='Silicon', species='B', concentration_cm3=1e19, depth_nm=10, coverage='Open mask')
+        self.assertTrue(np.all(self.model.dopant_species_fields['B'][:6, :, 6:8] == np.float32(1e19)))
+        self.assertFalse(self.model.doping[6:].any())
+        self.assertFalse(self.model.doping[:, :, :6].any())
+        snapshot = self.model.snapshot_state()
+        self.step('Structure Doping', material='Silicon', species='B', concentration_cm3=2e19, depth_nm=10, coverage='Open mask')
+        self.step('Structure Doping', material='Silicon', species='P', concentration_cm3=3e19, depth_nm=10, coverage='Open mask')
+        np.testing.assert_allclose(self.model.doping[:6, :, 6:8], 5e19, rtol=1e-6)
+        np.testing.assert_array_equal(grid, self.model.grid)
+        np.testing.assert_array_equal(height, self.model.height_map)
+        self.model.restore_state(snapshot)
+        np.testing.assert_allclose(self.model.doping[:6, :, 6:8], 1e19, rtol=1e-6)
+        self.assertEqual(self.model.current_time_s, 0)
+
+    def test_new_operations_fail_atomically_on_domain_no_target_and_readonly(self):
+        self.step('Structure Wafer', thickness_nm=40)
+        self.model.doping = np.full(self.model.grid.shape, 7.0)
+        self.model.dopant_species_fields['P'] = np.ones(self.model.grid.shape, dtype=np.float32)
+        cases = [('Structure Oxidation', {'thickness_nm':100}),
+                 ('Structure Epitaxy', {'material':'Copper'}),
+                 ('Structure Strip', {}), ('Structure Doping', {'material':'Germanium'}),
+                 ('Structure Doping', {'concentration_cm3':1e300})]
+        for name, params in cases:
+            before = [a.copy() for a in self.model._spatial_volume_arrays()]
+            with self.subTest(name=name, params=params), self.assertRaises(ValueError):
+                self.step(name, **params)
+            for a, expected in zip(self.model._spatial_volume_arrays(), before):
+                np.testing.assert_array_equal(a, expected)
+        self.model.dopant_species_fields['P'].flags.writeable = False
+        before = self.model.doping.copy()
+        with self.assertRaisesRegex(ValueError, 'writable'):
+            self.step('Structure Doping', material='Silicon', depth_nm=10)
+        np.testing.assert_array_equal(before, self.model.doping)
+
     def test_overflow_and_invalid_values_are_atomic(self):
         self.step('Structure Wafer', thickness_nm=20)
         before = self.model.grid.copy()

@@ -20418,6 +20418,22 @@ class StructureGeometryStep(ProcessStep):
 
     def parameter_specs(self) -> Sequence[ParameterSpec]:
         specs = []
+        if self.operation == "Strip":
+            return ()
+        if self.operation in {"Oxidation", "Epitaxy", "Doping"}:
+            from structure_cad.operations import SEMICONDUCTORS, OXIDIZABLE
+            allowed = OXIDIZABLE if self.operation == "Oxidation" else SEMICONDUCTORS
+            names = [name for name in allowed if name in self.material_db.names()]
+            specs.append(ParameterSpec("material", "Substrate" if self.operation == "Oxidation" else "Material", "enum", "Silicon", choices=[(n, n) for n in names]))
+            if self.operation == "Epitaxy":
+                specs.append(ParameterSpec("seed_material", "Seed surface", "enum", "Silicon", choices=[(n, n) for n in names]))
+            key = "depth_nm" if self.operation == "Doping" else "thickness_nm"
+            specs.append(ParameterSpec(key, "Depth" if key == "depth_nm" else "Target thickness", "float", 20.0, 0.0, None, units="nm", dimension="length", canonical_unit="nm", display_units=("nm", "µm")))
+            specs.append(ParameterSpec("coverage", "Coverage", "enum", "Full wafer", choices=[("Full wafer", "Full wafer"), ("Open mask", "Open mask")]))
+            if self.operation == "Doping":
+                specs.append(ParameterSpec("species", "Species", "enum", "B", choices=[(s, s) for s in ("B", "P", "As", "Sb")]))
+                specs.append(ParameterSpec("concentration_cm3", "Concentration (same species replaces)", "float", 1e19, 0.0, 1e22, units="cm^-3", dimension="concentration", canonical_unit="cm^-3", display_units=("cm^-3",)))
+            return tuple(specs)
         if self.operation != "Planarize":
             specs.append(ParameterSpec("material", "Material", "enum", "Silicon" if self.operation == "Wafer" else "Silicon Dioxide", choices=[(n, n) for n in self.material_db.names() if n != "Void"]))
         key = "depth_nm" if self.operation == "Etch" else "height_nm" if self.operation in {"Fill", "Planarize"} else "thickness_nm"
@@ -20457,6 +20473,26 @@ class StructureFillStep(StructureGeometryStep):
 class StructurePlanarizeStep(StructureGeometryStep):
     name = "Structure Planarize"
     operation = "Planarize"
+
+
+class StructureOxidationStep(StructureGeometryStep):
+    name = "Structure Oxidation"
+    operation = "Oxidation"
+
+
+class StructureEpitaxyStep(StructureGeometryStep):
+    name = "Structure Epitaxy"
+    operation = "Epitaxy"
+
+
+class StructureStripStep(StructureGeometryStep):
+    name = "Structure Strip"
+    operation = "Strip"
+
+
+class StructureDopingStep(StructureGeometryStep):
+    name = "Structure Doping"
+    operation = "Doping"
 
 
 class StructurePatternStep(ExposureStep):
@@ -20510,6 +20546,10 @@ PROCESS_STEP_FACTORIES: Dict[str, Callable[[MaterialDatabase], ProcessStep]] = {
     "Structure Etch": StructureEtchStep,
     "Structure Fill": StructureFillStep,
     "Structure Planarize": StructurePlanarizeStep,
+    "Structure Oxidation": StructureOxidationStep,
+    "Structure Epitaxy": StructureEpitaxyStep,
+    "Structure Strip": StructureStripStep,
+    "Structure Doping": StructureDopingStep,
     "Initialize Wafer": InitializeWaferStep,
     "Spin Resist": SpinResistStep,
     "Mask Exposure": ExposureStep,

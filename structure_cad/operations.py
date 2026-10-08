@@ -3,6 +3,67 @@ import math
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
+SEMICONDUCTORS = ('Silicon', 'Polysilicon', 'Germanium', 'Silicon Germanium')
+OXIDIZABLE = ('Silicon', 'Polysilicon')
+
+
+def semiconductor_id(model, value, *, oxidation=False):
+    mid = material_id(model, value)
+    allowed = OXIDIZABLE if oxidation else SEMICONDUCTORS
+    if model.material_db.material(mid).name not in allowed:
+        raise ValueError('Structure requires a supported semiconductor material')
+    return mid
+
+
+def coverage_mask(model, coverage):
+    if coverage not in ('Full wafer', 'Open mask'):
+        raise ValueError('Unknown Structure coverage')
+    return np.ones(model.grid.shape[:2], dtype=bool) if coverage == 'Full wafer' else np.asarray(model.open_mask, dtype=bool)
+
+
+def exposed_columns(grid, mid, opened):
+    h = heights(grid)
+    x, y = np.nonzero(opened & (h > 0))
+    eligible = np.zeros(grid.shape[:2], dtype=bool)
+    eligible[x, y] = grid[x, y, h[x, y]-1] == mid
+    return h, eligible
+
+
+def dope(model, params):
+    """Assign one species; repeat assignments replace it, different species add to total."""
+    mid = semiconductor_id(model, params['material'])
+    species = params['species']
+    if species not in ('B', 'P', 'As', 'Sb'):
+        raise ValueError('Unknown Structure Doping species')
+    concentration = number(params['concentration_cm3'], 'concentration_cm3')
+    if concentration > 1e22:
+        raise ValueError('concentration_cm3 must not exceed 1e22')
+    n = layers(model, params['depth_nm'], 'depth_nm')
+    h, eligible = exposed_columns(model.grid, mid, coverage_mask(model, params['coverage']))
+    z = np.arange(model.grid.shape[2])[None, None, :]
+    selected = eligible[..., None] & (z >= (h-n)[..., None]) & (z < h[..., None]) & (model.grid == mid)
+    # Stop depth at the first non-selected material or void, rather than crossing a barrier.
+    contiguous = np.zeros_like(selected)
+    active = eligible.copy()
+    for depth in range(min(n, model.grid.shape[2])):
+        index = h - 1 - depth
+        active &= index >= 0
+        x, y = np.nonzero(active)
+        active[x, y] &= model.grid[x, y, index[x, y]] == mid
+        x, y = np.nonzero(active)
+        contiguous[x, y, index[x, y]] = True
+    selected &= contiguous
+    if not selected.any():
+        raise ValueError('Structure Doping: no exposed target material or effective opening')
+    model._require_writable_spatial_volumes('Structure Doping')
+    model._ensure_doping_field()
+    field = model._ensure_dopant_species_field(species)
+    delta = np.float32(concentration) - field[selected]
+    model.doping[selected] = np.maximum(0, model.doping[selected] + delta)
+    field[selected] = np.float32(concentration)
+    model.last_implant_species = species
+    return int(selected.sum())
+
 
 def top(model):
     if model.active_side != 'top':
@@ -66,12 +127,32 @@ def commit(model, candidate, operation):
 
 def construct(model, operation, **params):
     top(model)
+    if operation == 'Doping':
+        return dope(model, params)
     candidate = model.grid.copy()
     nz = candidate.shape[2]
     z = np.arange(nz)[None, None, :]
     if operation in ('Wafer', 'Deposit', 'Fill', 'Etch'):
         mid = material_id(model, params['material'])
-    if operation == 'Wafer':
+    if operation in ('Oxidation', 'Epitaxy'):
+        n = layers(model, params['thickness_nm'], 'thickness_nm')
+        seed = semiconductor_id(model, params['material'] if operation == 'Oxidation' else params['seed_material'], oxidation=operation == 'Oxidation')
+        mid = material_id(model, 'Silicon Dioxide') if operation == 'Oxidation' else semiconductor_id(model, params['material'])
+        h, eligible = exposed_columns(candidate, seed, coverage_mask(model, params['coverage']))
+        if not eligible.any():
+            raise ValueError(f'Structure {operation}: no exposed target material or effective opening')
+        consumed = max(1, int(math.floor(n / 2.27 + .5))) if operation == 'Oxidation' else 0
+        if np.any(h[eligible] + n - consumed > nz):
+            raise ValueError(f'Structure {operation} exceeds domain height')
+        if consumed:
+            # Every consumed voxel must belong to the selected substrate.
+            region = eligible[..., None] & (z >= (h-consumed)[..., None]) & (z < h[..., None])
+            if np.any(h[eligible] < consumed) or np.any(candidate[region] != seed):
+                raise ValueError('Structure Oxidation exceeds selected substrate thickness')
+        candidate[eligible[..., None] & (z >= (h-consumed)[..., None]) & (z < (h+n-consumed)[..., None])] = mid
+    elif operation == 'Strip':
+        candidate[candidate == material_id(model, 'Photoresist')] = 0
+    elif operation == 'Wafer':
         n = layers(model, params['thickness_nm'], 'thickness_nm')
         if n > nz:
             raise ValueError('Structure Wafer exceeds domain height')
@@ -123,4 +204,7 @@ def construct(model, operation, **params):
             candidate[xs, ys, index[xs, ys]] = 0
     else:
         raise ValueError(f'Unknown structure operation {operation}')
-    return commit(model, candidate, f'Structure {operation}')
+    changed = commit(model, candidate, f'Structure {operation}')
+    if operation == 'Strip':
+        model.open_mask = np.ones(candidate.shape[:2], dtype=bool)
+    return changed
