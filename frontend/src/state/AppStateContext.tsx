@@ -10,6 +10,7 @@ import {
   useRef,
 } from 'react';
 import {TcadApiError} from '../api/client';
+import {isInitializer} from '../components/processCatalog';
 import type {
   StepView, MaskAssetApplyView,
   RecipeLoadView,RunView, TcadApi} from '../api/types';
@@ -606,18 +607,26 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   const removeStepAction = useCallback(() => {
     const index = selectedStepIndexForOps();
     if (index === null) return Promise.resolve();
+    const step = stateRef.current.recipe.find(item => item.index === index);
+    if (step === undefined || isInitializer(step)) return Promise.resolve();
     return structureMutation(signal => api.removeStep(index, signal));
   }, [api, structureMutation]);
 
   const duplicateStepAction = useCallback(() => {
     const index = selectedStepIndexForOps();
     if (index === null) return Promise.resolve();
+    const step = stateRef.current.recipe.find(item => item.index === index);
+    if (step === undefined || isInitializer(step)) return Promise.resolve();
     return structureMutation(signal => api.duplicateStep(index, signal));
   }, [api, structureMutation]);
 
   const moveStepAction = useCallback((direction: 'up' | 'down') => {
     const index = selectedStepIndexForOps();
     if (index === null) return Promise.resolve();
+    const recipe = stateRef.current.recipe;
+    const position = recipe.findIndex(item => item.index === index);
+    if (position < 0 || isInitializer(recipe[position])) return Promise.resolve();
+    if (direction === 'up' && position > 0 && isInitializer(recipe[position - 1])) return Promise.resolve();
     return structureMutation(signal => api.moveStep(index, direction, signal));
   }, [api, structureMutation]);
 

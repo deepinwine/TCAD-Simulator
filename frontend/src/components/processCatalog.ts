@@ -7,7 +7,7 @@ export const processCatalog: readonly {id: string; key: TranslationKey}[] = [
 ];
 export function isInitializer(step: StepView): boolean {return step.index === 0 && ['Structure Wafer', 'Initialize Wafer'].includes(step.name);}
 export function isStructureFlow(recipe: readonly StepView[]): boolean {return recipe.length > 0 && recipe.every(step => step.name.startsWith('Structure ') || isInitializer(step));}
-export function visibleSteps(recipe: StepView[]): StepView[] {return isStructureFlow(recipe) ? recipe.filter(step => !isInitializer(step)) : recipe;}
+export function visibleSteps(recipe: StepView[]): StepView[] {return recipe.filter(step => !isInitializer(step));}
 export function candidateStep(source: StepView, template: StepView, materials: MaterialView[] = []): StepView {
   const params = {...template.params};
   const material = template.parameterSpecs.find(spec => spec.key === 'material');

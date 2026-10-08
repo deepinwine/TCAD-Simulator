@@ -18,6 +18,11 @@ function step(index: number, status: RuntimeStatus, params: Record<string, unkno
 }
 
 describe('ProcessFlowPane', () => {
+  it.each([['Initialize Wafer', 'Deposit'], ['Structure Wafer', 'Legacy']])('旧或混合配方 %s 初始化不占列表/count', (initial, process) => {
+    render(<ProcessFlowPane recipe={[{...step(0, 'ready'), name: initial}, {...step(1, 'ready'), name: process}]} selectedStepIndex={0} onSelect={vi.fn()} />);
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    expect(screen.getByLabelText('1 个步骤')).toBeVisible();
+  });
   it('结构晶圆初始化不占步骤列表和计数，底层工艺索引不变', () => {
     const onSelect = vi.fn();
     render(<ProcessFlowPane recipe={[{...step(0, 'ready'), name: 'Structure Wafer'}, {...step(1, 'ready'), name: 'Structure Etch'}]} selectedStepIndex={1} onSelect={onSelect} />);

@@ -32,6 +32,10 @@ const initView: InitView = {
   materials: [],
   uiState: {},
 };
+it.each([['Initialize Wafer', 'Deposit'], ['Structure Wafer', 'Legacy']])('旧或混合流程 %s 默认选择普通工艺', (initial, process) => {
+  const payload = {...initView, recipe: [step(0, {name: initial}), step(1, {name: process})]};
+  expect(appReducer(initialAppState, {type: 'bootstrap/succeeded', payload}).selectedStepIndex).toBe(1);
+});
 it('默认选择可见工艺步骤，晶圆初始化保留在底层', () => {
   const payload = {...initView, recipe: [step(0, {name: 'Structure Wafer'}), step(1, {name: 'Structure Etch'})]};
   const state = appReducer(initialAppState, {type: 'bootstrap/succeeded', payload});

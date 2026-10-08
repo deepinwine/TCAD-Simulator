@@ -153,6 +153,15 @@ async function waitUntilReady() {
 }
 
 describe('失败恢复', () => {
+  it.each(['Initialize Wafer', 'Structure Wafer'])('操作层保护 %s 的stale选择，首普通步上移不请求', async initial => {
+    const api = apiStub({init: vi.fn(async () => ({...initView, recipe: [step(0, {name: initial}), step(1, {name: 'Deposit'})]}))});
+    mount(api); await waitUntilReady();
+    act(() => captured!.actions.selectStep(0));
+    await act(async () => {await captured!.actions.removeStep(); await captured!.actions.duplicateStep(); await captured!.actions.moveStep('down'); await captured!.actions.moveStep('up');});
+    act(() => captured!.actions.selectStep(1));
+    await act(async () => captured!.actions.moveStep('up'));
+    expect(api.removeStep).not.toHaveBeenCalled(); expect(api.duplicateStep).not.toHaveBeenCalled(); expect(api.moveStep).not.toHaveBeenCalled();
+  });
   it('未确认类型候选阻止结构编辑和配方导入，取消后解锁', async () => {
     const api = apiStub(); mount(api); await waitUntilReady();
     act(() => captured!.actions.setTypeCandidate(0, true));

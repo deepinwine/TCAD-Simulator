@@ -1,4 +1,4 @@
-import {useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
+import {useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
 import type {MaterialView, StepView} from '../api/types';
 import {presentStep} from './stepPresentation';
 import {useI18n} from '../i18n/I18nContext';
@@ -53,7 +53,7 @@ export function summarizeParams(
 }
 
 export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, children, materials = []}: ProcessFlowPaneProps) {
-  const recipe = visibleSteps(allSteps);
+  const recipe = useMemo(() => visibleSteps(allSteps), [allSteps]);
   const {t, locale} = useI18n();
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
   const pendingFocusRef = useRef<number | null>(null);

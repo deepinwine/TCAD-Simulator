@@ -19,11 +19,12 @@ export function StepStructureBar() {
   const busy = state.phase === 'running' || state.activeMutation !== null || state.pendingSaves > 0 || state.pendingTypeEdits.length > 0;
   const selected = state.recipe.find(step => step.index === state.selectedStepIndex) ?? null;
   const selectedIndex = selected?.index ?? null;
+  const selectedInitial = selected !== null && isInitializer(selected);
   const position = selected === null
     ? -1
     : state.recipe.findIndex(step => step.index === selectedIndex);
-  const canMoveUp = position > 0 && !isInitializer(state.recipe[position - 1]);
-  const canMoveDown = position >= 0 && position < state.recipe.length - 1;
+  const canMoveUp = !selectedInitial && position > 0 && !isInitializer(state.recipe[position - 1]);
+  const canMoveDown = !selectedInitial && position >= 0 && position < state.recipe.length - 1;
   const renameTrimmed = renameValue.trim();
   const renameValid = renameTrimmed.length >= 1 && renameTrimmed.length <= 80;
   const factories = processCatalog.map(item => `Structure ${item.id}`);
@@ -72,14 +73,14 @@ export function StepStructureBar() {
       </button>
       <button
         type="button"
-        disabled={busy || selectedIndex === null}
+        disabled={busy || selectedInitial || selectedIndex === null}
         onClick={() => void actions.duplicateStep()}
       >
         {t('structure.duplicate')}
       </button>
       <button
         type="button"
-        disabled={busy || selectedIndex === null || state.recipe.length <= 1}
+        disabled={busy || selectedInitial || selectedIndex === null || state.recipe.length <= 1}
         onClick={() => void actions.removeStep()}
       >
         {t('structure.remove')}

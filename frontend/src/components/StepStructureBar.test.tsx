@@ -149,6 +149,15 @@ describe('配置结构步骤', () => {
 afterEach(() => cleanup());
 
 describe('StepStructureBar', () => {
+  it.each(['Initialize Wafer', 'Structure Wafer'])('stale选中 %s 禁止删除复制上下移动，普通首步不能越过初始化', async initial => {
+    const api = apiStub({init: vi.fn(async () => ({...initView(), recipe: [step(0, {name: initial}), step(1, {name: 'Deposit'}), step(2, {name: 'Etch'})]}))});
+    render(<AppStateProvider api={api}><SelectionControls /><StepStructureBar /></AppStateProvider>);
+    await waitFor(() => expect(screen.getByRole('button', {name: '下移'})).not.toBeDisabled());
+    expect(screen.getByRole('button', {name: '上移'})).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', {name: 'select 0'}));
+    for (const name of ['删除', '复制', '上移', '下移']) expect(screen.getByRole('button', {name})).toBeDisabled();
+    expect(api.removeStep).not.toHaveBeenCalled(); expect(api.duplicateStep).not.toHaveBeenCalled(); expect(api.moveStep).not.toHaveBeenCalled();
+  });
   it('项目设置无效网格禁用确认，导入失败保留草稿与原配方', async () => {
     const initial = step(0, {name: 'Structure Wafer', params: {thickness_nm: 200}, parameterSpecs: [{key: 'thickness_nm', label: 'Thickness', type: 'float', units: 'nm', minimum: 0}]});
     const blob = {domain: {grid_shape: [32, 32, 64], voxel_size_nm: 5}, steps_full: [{name: initial.name, params_raw: initial.params}]};
