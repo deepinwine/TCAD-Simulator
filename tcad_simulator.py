@@ -74898,7 +74898,7 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
                 status=200,
                 extra_headers={
-                    "Content-Disposition": f"attachment; filename=\"{safe}\"",
+                    "Content-Disposition": f"attachment; filename=\"recipe.json\"; filename*=UTF-8''{urllib.parse.quote(safe, safe='')}",
                     "Cache-Control": "no-store",
                 },
                 set_cookie=set_cookie,

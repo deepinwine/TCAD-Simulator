@@ -234,4 +234,12 @@ def prepare_import(blob, material_db, *, grid_shape, voxel_size_nm, threads=1, r
         rebuilt.append(step)
     candidate = tcad.ProcessModel(material_db, grid_shape=tuple(effective["grid_shape"]),
                                   voxel_size_nm=effective["voxel_size_nm"], max_workers=count)
+    try:
+        from structure_cad.operations import preflight_candidate
+        for step in rebuilt:
+            if isinstance(step, tcad.StructureGeometryStep):
+                preflight_candidate(step, candidate)
+    except Exception:
+        candidate.parallel.shutdown()
+        raise
     return candidate, rebuilt

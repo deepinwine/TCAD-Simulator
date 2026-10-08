@@ -98,6 +98,31 @@ class StructureEditorHTTPTests(unittest.TestCase):
         status, _, restored = self._request(self.manager.url,self.cookie,'GET','/api/preview/elements?channels=dopant&quality=high&max_points=1000',None)
         self.assertGreater(struct.unpack('<8sIIII',restored[:24])[3],0)
 
+    def test_project_settings_export_import_preserves_steps_and_rejects_invalid_domain(self):
+        self.request('POST','/api/recipe/import',{'recipe':{'name':'项目设置配方','steps_full':[
+            {'name':'Structure Wafer','instance_name':'基础晶圆','params':{'material':'Silicon','thickness_nm':40}},
+            {'name':'Structure Deposit','instance_name':'氧化层','group':'绝缘','loop':'A','params':{'material':'Silicon Dioxide','thickness_nm':10}}]}})
+        self.request('POST','/api/run/all',{})
+        status, _, raw = self._request(self.manager.url,self.cookie,'GET','/api/recipe/export?scope=current',None)
+        exported = json.loads(raw)
+        self.assertEqual(status,200)
+        exported['domain'] = {'grid_shape':[14,10,24],'voxel_size_nm':5,'threads':1}
+        for key in ('params','params_raw'):
+            exported['steps_full'][0][key].update(material='Polysilicon',thickness_nm=30)
+        self.request('POST','/api/recipe/import',{'recipe':exported})
+        init = self.request('GET','/api/init')['result']
+        self.assertEqual(init['recipe'][1]['instance_name'],'氧化层')
+        self.assertEqual(init['recipe'][1]['group'],'绝缘')
+        self.assertEqual(init['recipe'][1]['loop'],'A')
+        self.assertEqual(init['model']['grid_shape'],[14,10,24])
+        self.request('POST','/api/run/all',{})
+        before = self.request('GET','/api/init')['result']['recipe']
+        timeline = self.request('POST','/api/timeline/get',{})['result']
+        exported['domain']['grid_shape'][2] = 2
+        self.request('POST','/api/recipe/import',{'recipe':exported},ok=False)
+        self.assertEqual(before,self.request('GET','/api/init')['result']['recipe'])
+        self.assertEqual(timeline,self.request('POST','/api/timeline/get',{})['result'])
+
     def test_configured_add_keeps_values_name_and_legacy_name_only(self):
         before = self.request('GET', '/api/init')['result']['recipe']
         steps = self.request('POST', '/api/recipe/add', {
