@@ -59,6 +59,18 @@ class StructureEditorHTTPTests(unittest.TestCase):
         old = self.request('POST', '/api/step/set', {'index':index, 'params':{'depth_nm':10}})['result']
         self.assertEqual(old['params']['depth_nm'],10)
 
+    def test_any_structure_step_can_switch_to_every_editor_factory(self):
+        steps = self.request('POST','/api/recipe/add',{'name':'Structure Etch'})['result']
+        index = len(steps)-1
+        for name in ('Structure Pattern','Structure Doping','Structure Strip','Structure Oxidation',
+                     'Structure Epitaxy','Structure Planarize','Structure Deposit','Structure Fill','Structure Etch'):
+            payload = {'index':index,'name':name}
+            if name == 'Structure Pattern':
+                payload['params'] = {'mask_mode':'Procedural','pattern':'Open'}
+            result = self.request('POST','/api/step/set',payload)['result']
+            self.assertEqual(result['name'],name)
+            self.assertEqual(set(result['params']),{s['key'] for s in result['parameter_specs']})
+
     def test_invalid_replacement_is_atomic_and_configuration_does_not_execute(self):
         steps = self.request('POST', '/api/recipe/add', {'name':'Structure Deposit'})['result']
         index = len(steps)-1

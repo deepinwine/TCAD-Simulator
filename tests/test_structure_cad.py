@@ -109,6 +109,79 @@ class StructureCADTests(unittest.TestCase):
                 self.step(name, material='Silicon', depth_nm=1e300)
             np.testing.assert_array_equal(before,self.model.grid)
 
+    def test_new_steps_geometry_and_fields_with_all_physics_entrypoints_blocked(self):
+        from contextlib import ExitStack
+        self.step('Structure Wafer',thickness_nm=40)
+        with ExitStack() as patches:
+            for name in ('deposit_material','etch_material','strip_materials','implant','anneal','surface_reaction'):
+                if hasattr(self.model,name):
+                    patches.enter_context(mock.patch.object(self.model,name,side_effect=AssertionError('physics')))
+            self.step('Structure Epitaxy',material='Silicon',seed_material='Silicon',thickness_nm=5)
+            self.step('Structure Doping',material='Silicon',depth_nm=5)
+            self.step('Structure Oxidation',material='Silicon',thickness_nm=10)
+            self.step('Structure Deposit',material='Photoresist',thickness_nm=5)
+            self.step('Structure Strip')
+        self.assertEqual(self.model.height_map[0,0],10)
+        self.assertEqual(self.model.current_time_s,0)
+        self.assertFalse(self.model.dopant_species_fields['B'].any())
+
+    def test_every_geometry_change_clears_all_colocated_fields_and_invalidates_cache(self):
+        for name, params in [('Structure Oxidation',{'thickness_nm':10}),
+                             ('Structure Epitaxy',{'material':'Silicon','thickness_nm':10}),
+                             ('Structure Strip',{})]:
+            self.step('Structure Wafer',thickness_nm=40)
+            if name == 'Structure Strip':
+                self.step('Structure Deposit',material='Photoresist',thickness_nm=5)
+            self.model.doping = np.full(self.model.grid.shape,7.0,dtype=np.float32)
+            self.model.active_dopants = np.full(self.model.grid.shape,3.0,dtype=np.float32)
+            self.model.dopant_species_fields['B'] = np.ones(self.model.grid.shape,dtype=np.float32)
+            old = self.model.grid.copy()
+            self.model._mesh_cache[self.db.id_for('Silicon')] = 'stale'
+            self.model._mesh_cache[self.db.id_for('Photoresist')] = 'stale'
+            self.step(name,**params)
+            changed = old != self.model.grid
+            for field in (self.model.doping,self.model.active_dopants,self.model.dopant_species_fields['B']):
+                self.assertFalse(field[changed].any())
+            for mid in np.unique(old[changed]):
+                self.assertNotIn(int(mid),self.model._mesh_cache)
+
+    def test_new_geometry_readonly_rejects_before_grid_or_mask_mutation(self):
+        self.step('Structure Wafer',thickness_nm=40)
+        for name, params in [('Structure Oxidation',{'thickness_nm':10}),
+                             ('Structure Epitaxy',{'material':'Silicon','thickness_nm':10}),
+                             ('Structure Strip',{})]:
+            self.model.doping = None
+            if name == 'Structure Strip':
+                self.step('Structure Deposit',material='Photoresist',thickness_nm=5)
+            self.model.doping = np.ones(self.model.grid.shape,dtype=np.float32)
+            self.model.doping.flags.writeable = False
+            before = {key:getattr(self.model,key).copy() for key in ('grid','height_map','open_mask','doping')}
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'writable'):
+                self.step(name,**params)
+            for key,expected in before.items():
+                np.testing.assert_array_equal(getattr(self.model,key),expected)
+
+    def test_mixed_column_overflow_rejects_entire_growth_and_coverage_can_exclude_it(self):
+        self.step('Structure Wafer',thickness_nm=40)
+        self.model.grid[0,0,:19] = self.db.id_for('Silicon')
+        self.model._rebuild_height_map()
+        self.model.doping = np.ones(self.model.grid.shape,dtype=np.float32)
+        self.model.dopant_species_fields['B'] = np.ones(self.model.grid.shape,dtype=np.float32)
+        for name,params in [('Structure Oxidation',{'thickness_nm':20}),
+                            ('Structure Epitaxy',{'material':'Silicon','thickness_nm':10})]:
+            before = {key:getattr(self.model,key).copy() for key in ('grid','height_map','open_mask','doping')}
+            field = self.model.dopant_species_fields['B'].copy()
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'domain'):
+                self.step(name,**params)
+            for key,expected in before.items():
+                np.testing.assert_array_equal(getattr(self.model,key),expected)
+            np.testing.assert_array_equal(self.model.dopant_species_fields['B'],field)
+        self.model.open_mask.fill(True)
+        self.model.open_mask[0,0] = False
+        self.step('Structure Epitaxy',material='Silicon',thickness_nm=10,coverage='Open mask')
+        self.assertEqual(self.model.height_map[0,0],19)
+        self.assertEqual(self.model.height_map[1,1],10)
+
     def test_overflow_and_invalid_values_are_atomic(self):
         self.step('Structure Wafer', thickness_nm=20)
         before = self.model.grid.copy()
