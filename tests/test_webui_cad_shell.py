@@ -964,14 +964,14 @@ class M2ApiContractTests(unittest.TestCase):
     must be covered here (ADR-019).
     """
 
-    def _start_manager(self, temp_dir):
+    def _start_manager(self, temp_dir, grid_shape=None):
         manager = tcad.WebUIServerManager(
             host="127.0.0.1",
             port=0,
             max_users=1,
             storage_root=Path(temp_dir),
             enable_ai_agent=False,
-            default_domain={"grid_shape": [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
+            default_domain={"grid_shape": grid_shape or [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
         )
         manager.start()
         return manager
@@ -1001,6 +1001,76 @@ class M2ApiContractTests(unittest.TestCase):
             normalized_path = str(path).split("?", 1)[0]
             self._contract_requests.add((str(method).upper(), normalized_path))
         return status, resp_headers, raw
+
+    def _assert_material_slice(self, result, axis, index, shape, index_max):
+        import base64
+        import numpy as np
+
+        self.assertEqual(result["axis"], axis)
+        self.assertEqual(result["index"], index)
+        self.assertEqual(result["index_max"], index_max)
+        self.assertEqual(result["shape"], list(shape))
+        self.assertEqual(result["dtype"], "u16")
+        data = base64.b64decode(result["data_b64"], validate=True)
+        self.assertEqual(len(data), shape[0] * shape[1] * 2)
+        return np.frombuffer(data, dtype="<u2").reshape(shape)
+
+    def test_material_slice_three_axes_preserve_recipe_and_state_over_http(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir, grid_shape=[5, 7, 9])
+            try:
+                _session, cookie = manager.create_session()
+                base = manager.url
+                for path, body in (
+                    ("/api/recipe/new", {"name": "Slice orientation"}),
+                    ("/api/step/set", {"index": 0, "params": {
+                        "wafer_type": "SOI", "material": "Silicon", "thickness_nm": 30.0,
+                        "box_material": "Silicon Dioxide", "box_thickness_nm": 10.0,
+                        "device_material": "Germanium", "device_thickness_nm": 5.0,
+                    }, "no_autosave": True}),
+                    ("/api/run/to", {"index": 0}),
+                ):
+                    status, _headers, raw = self._request(base, cookie, "POST", path, body)
+                    self.assertEqual(status, 200, raw[:300])
+                    self.assertTrue(json.loads(raw)["ok"], raw[:300])
+
+                def read_state():
+                    state = {}
+                    for path in ("/api/init", "/api/recipe/export?scope=current", "/api/timeline/get"):
+                        method = "POST" if path == "/api/timeline/get" else "GET"
+                        status, _headers, raw = self._request(base, cookie, method, path, {} if method == "POST" else None)
+                        self.assertEqual(status, 200, raw[:300])
+                        payload = json.loads(raw)
+                        # rid 是每次请求的关联标识；正式状态在 result 中。
+                        state[path] = payload["result"] if "result" in payload else payload
+                        if path.startswith("/api/recipe/export"):
+                            # 导出响应生成的时间不是 recipe 的持久状态。
+                            self.assertIsInstance(state[path].pop("exported_at"), str)
+                    return state
+
+                before = read_state()
+                material_db = tcad.MaterialDatabase()
+                profile = [material_db.id_for("Silicon")] * 3 + [material_db.id_for("Silicon Dioxide")] * 2 + [material_db.id_for("Germanium")] + [0] * 3
+                # 独立的 row-major 期望值：X=(Z,Y)、Y=(Z,X)、Z=(Y,X)。
+                for axis, index, shape, maximum, expected in (
+                    ("X", 2, (9, 7), 4, np.repeat(np.array(profile)[:, None], 7, axis=1)),
+                    ("Y", 3, (9, 5), 6, np.repeat(np.array(profile)[:, None], 5, axis=1)),
+                    ("Z", 4, (7, 5), 8, np.full((7, 5), material_db.id_for("Silicon Dioxide"))),
+                ):
+                    status, headers, raw = self._request(base, cookie, "GET", f"/api/slice?axis={axis}&index={index}&kind=material")
+                    self.assertEqual(status, 200, raw[:300])
+                    self.assertIn("application/json", headers.get("content-type", ""))
+                    payload = json.loads(raw)
+                    self.assertTrue(payload["ok"], raw[:300])
+                    actual = self._assert_material_slice(payload["result"], axis, index, shape, maximum)
+                    np.testing.assert_array_equal(actual, expected)
+                status, _headers, raw = self._request(base, cookie, "POST", "/api/slice", {"axis": "Z", "index": 4, "kind": "material"})
+                self.assertEqual(status, 404, raw[:300])
+                self.assertEqual(read_state(), before)
+            finally:
+                manager.stop()
 
     @staticmethod
     def _first_string_ending(obj, suffixes):
@@ -1193,7 +1263,7 @@ class M2ApiContractTests(unittest.TestCase):
                 status, _h, raw = self._request(base, cookie, "GET", "/api/slice?axis=Z&index=0&kind=material")
                 self.assertEqual(status, 200, raw[:200])
                 result = json.loads(raw)["result"]
-                self.assertIn("data_b64", result)
+                self._assert_material_slice(result, "Z", 0, (12, 12), 15)
 
                 # 方法是契约的一部分：GET 打 POST-only 端点必须 404
                 status, _h, raw = self._request(base, cookie, "GET", "/api/timeline/get")
@@ -1616,7 +1686,7 @@ class M2ApiContractTests(unittest.TestCase):
                 status, headers, raw = self._request(base, cookie, "GET", "/api/slice?axis=Z&index=0&kind=material")
                 self.assertEqual(status, 200, raw[:200])
                 check_json(raw, "/api/slice")
-                self.assertIn("data_b64", json.loads(raw)["result"])
+                self._assert_material_slice(json.loads(raw)["result"], "Z", 0, (12, 12), 15)
 
                 status, headers, raw = self._request(
                     base, cookie, "POST", "/api/render/gbuffer", {"axis": "Z", "kind": "material", "index": 0}
