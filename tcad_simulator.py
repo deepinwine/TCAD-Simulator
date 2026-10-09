@@ -7272,6 +7272,7 @@ def _tcad_snapshot_estimate_bytes(snapshot: Any) -> int:
     # Core payloads.
     _add(snapshot.get("grid_payload"))
     for k in (
+        "display_owners",
         "doping",
         "active_dopants",
         "interstitials",
@@ -7815,6 +7816,8 @@ class ProcessModel:
     # -- core state -------------------------------------------------------------
 
     def reset_state(self) -> None:
+        from structure_cad.display_provenance import DisplayProvenance
+        self.display_provenance = DisplayProvenance()
         nx, ny, nz = self.grid_shape
         self.grid = np.zeros((nx, ny, nz), dtype=np.uint16)
         # Large per-voxel physics fields are allocated lazily (multi-user WebUI keeps one ProcessModel
@@ -8236,7 +8239,7 @@ class ProcessModel:
         except Exception:
             pass
 
-    def _rebuild_height_map(self, dirty_materials: Optional[Iterable[int]] = None) -> None:
+    def _rebuild_height_map(self, dirty_materials: Optional[Iterable[int]] = None, *, preserve_display: bool = False) -> None:
         # Height-map recompute can be memory-heavy on large grids if we build a full 3D occupancy
         # boolean (`grid != 0`). Use a parallel Numba scan (or a 2D-buffer scan fallback) for
         # large domains to keep peak RSS bounded without changing results.
@@ -8287,7 +8290,7 @@ class ProcessModel:
                 else:
                     self.height_map = np.zeros(self.grid.shape[:2], dtype=np.int32)
         self._refresh_open_mask()
-        self._invalidate_mesh_cache(dirty_materials)
+        self._invalidate_mesh_cache(dirty_materials, geometry_changed=not preserve_display)
 
     def _update_height_map_only(self) -> None:
         """Recompute height map without touching caches/open-mask.
@@ -8359,7 +8362,9 @@ class ProcessModel:
         top_material = np.take_along_axis(self.grid, top_indices[..., None], axis=2).squeeze(axis=2)
         self.open_mask = ~((top > 0) & (top_material == np.uint16(resist_id_i)))
 
-    def _invalidate_mesh_cache(self, mat_ids: Optional[Iterable[int]] = None) -> None:
+    def _invalidate_mesh_cache(self, mat_ids: Optional[Iterable[int]] = None, *, geometry_changed: bool = False) -> None:
+        if geometry_changed:
+            self.display_provenance.invalidate()
         # Visualization + analysis caches are invalidated together because they all depend on `grid`.
         self._material_z_cache = None
         self._material_layer_summary_cache = None
@@ -8786,7 +8791,7 @@ class ProcessModel:
 
     def _ensure_height_cache(self) -> None:
         if self.height_map is None:
-            self._rebuild_height_map()
+            self._rebuild_height_map(preserve_display=True)
 
     def snapshot_state(
         self,
@@ -8949,6 +8954,8 @@ class ProcessModel:
             "grid_compression": grid_blob["mode"],
             "grid_shape": tuple(int(v) for v in grid_blob["shape"]),
             "grid_payload": grid_blob["payload"],
+            "display_owners": _pack_field(self.display_provenance.owners, "display_owners"),
+            "display_step_ids": dict(self.display_provenance.step_ids),
             # Optional large fields (zlib-packed to keep undo/autosave memory bounded).
             "doping": _pack_field(getattr(self, "doping", None), "doping"),
             "active_dopants": _pack_field(getattr(self, "active_dopants", None), "active_dopants"),
@@ -9135,6 +9142,10 @@ class ProcessModel:
                 "payload": state.get("grid_payload"),
             }
             self.grid = decompress_voxel_grid(blob)
+        display_owners = _unpack_field(state.get("display_owners"))
+        if state.get("display_owners") is not None and display_owners is None:
+            raise ValueError("Invalid Structure display owner snapshot")
+        self.display_provenance.restore(display_owners, state.get("display_step_ids", {}), self.grid)
         if emit_log:
             self._log(f"{log_prefix}Restore 1/3: grid done ({time.perf_counter() - t0_grid:.2f}s)")
 
@@ -9401,7 +9412,7 @@ class ProcessModel:
         else:
             self._resist_state = None
         self._refresh_open_mask()
-        self._invalidate_mesh_cache({mat_id})
+        self._invalidate_mesh_cache({mat_id}, geometry_changed=True)
         self._log(
             "Spin resist: material={} type={} final={:.1f} nm (shrink {:.1f}%), softbake {}°C/{:.0f}s".format(
                 mat_name,
@@ -10032,7 +10043,7 @@ class ProcessModel:
                             top_val -= 1
                         self.height_map[x, y] = top_val
         self._refresh_open_mask()
-        self._invalidate_mesh_cache([resist_id])
+        self._invalidate_mesh_cache([resist_id], geometry_changed=True)
 
     def expose_resist(
         self,
@@ -10413,7 +10424,7 @@ class ProcessModel:
                 self.height_map[roi_xy] = heights_new
 
         self._refresh_open_mask()
-        self._invalidate_mesh_cache([mat_resist])
+        self._invalidate_mesh_cache([mat_resist], geometry_changed=True)
 
         mean_rate = float(rate_nm_s[resist_mask_roi].mean() * 60.0) if np.any(resist_mask_roi) else 0.0
         self._log(
@@ -10521,7 +10532,7 @@ class ProcessModel:
             added_voxels = int(self._deposit_generic(mat_id, coverage_mask, thickness_nm))
         exec_time = time.perf_counter() - start_time
         self._refresh_open_mask()
-        self._invalidate_mesh_cache([mat_id])
+        self._invalidate_mesh_cache([mat_id], geometry_changed=True)
 
         dopant_voxels = 0
         try:
@@ -13488,7 +13499,7 @@ class ProcessModel:
         summary = ", ".join(self.material_db.material(mid).name for mid in touched_materials) or "no material removed"
         if touched_materials:
             self._refresh_open_mask()
-            self._invalidate_mesh_cache(touched_materials)
+            self._invalidate_mesh_cache(touched_materials, geometry_changed=True)
         self._log(
             "Advanced dry etch via {} {:.1f}s @{} mTorr/{:.0f} V → {}".format(
                 chemistry,
@@ -13850,7 +13861,7 @@ class ProcessModel:
         )
         if np.any(removed):
             self._refresh_open_mask()
-            self._invalidate_mesh_cache({int(material_id)})
+            self._invalidate_mesh_cache({int(material_id)}, geometry_changed=True)
 
     def _wet_etch_controller(
         self,
@@ -14111,7 +14122,7 @@ class ProcessModel:
                         top_val -= 1
                     self.height_map[x, y] = top_val
         self._refresh_open_mask()
-        self._invalidate_mesh_cache({material_id})
+        self._invalidate_mesh_cache({material_id}, geometry_changed=True)
 
         columns = max(int(np.count_nonzero(occupancy.any(axis=2))), 1)
         mean_removal_nm = removed_voxels * voxel_nm / columns
@@ -14173,7 +14184,7 @@ class ProcessModel:
             bias_nm=0.0,
         )
         self._refresh_open_mask()
-        self._invalidate_mesh_cache({material_id})
+        self._invalidate_mesh_cache({material_id}, geometry_changed=True)
 
         active = removed_layers[removed_layers > 0]
         mean_removal_nm = float(active.mean()) * voxel_nm if active.size else 0.0
@@ -14377,7 +14388,7 @@ class ProcessModel:
                         top_val -= 1
                     self.height_map[x, y] = top_val
         self._refresh_open_mask()
-        self._invalidate_mesh_cache({material_id})
+        self._invalidate_mesh_cache({material_id}, geometry_changed=True)
 
         columns = max(int(np.count_nonzero(target.any(axis=2))), 1)
         mean_removal_nm = float(removed_voxels) * voxel_nm / float(columns)
@@ -15220,7 +15231,7 @@ class ProcessModel:
 
         self._refresh_open_mask()
         if removed_ids:
-            self._invalidate_mesh_cache(removed_ids)
+            self._invalidate_mesh_cache(removed_ids, geometry_changed=True)
         final_heights_nm = self.height_map.astype(np.float32, copy=False) * np.float32(voxel_nm)
         removal_nm = np.clip(initial_heights_nm - final_heights_nm, 0.0, None)
         mean_all = float(removal_nm.mean()) if removal_nm.size else 0.0
@@ -16434,7 +16445,7 @@ class ProcessModel:
 
             if removed_vox or added_vox:
                 self._refresh_open_mask()
-                self._invalidate_mesh_cache({mid})
+                self._invalidate_mesh_cache({mid}, geometry_changed=True)
                 self._log(
                     f"Anneal reflow {name}: shrink={shrink*100:.2f}% sigma={sigma_px:.2f}px Δvox={added_vox-removed_vox:+d}"
                 )
@@ -17295,7 +17306,7 @@ class ProcessModel:
             mean_out_eff = float(out_layers) * voxel_nm
 
         self._refresh_open_mask()
-        self._invalidate_mesh_cache({product_id, *base_ids})
+        self._invalidate_mesh_cache({product_id, *base_ids}, geometry_changed=True)
         self._log(
             "{} {} ({}, {:.0f}°C, {:.1f}s) → {} | mean growth {:.2f} nm (out {:.2f} / in {:.2f}), Δvox={} conv={} cols={}".format(
                 "Surface reaction",
@@ -18974,6 +18985,8 @@ class ProcessStep:
     group = "General"
 
     def __init__(self, material_db: MaterialDatabase) -> None:
+        from structure_cad.display_provenance import normalize_step_id
+        self.step_id = normalize_step_id()
         self.material_db = material_db
         self.enabled = True
         self.params: Dict[str, Any] = {}
@@ -20446,7 +20459,7 @@ class StructureGeometryStep(ProcessStep):
 
     def execute(self, model: ProcessModel) -> str:
         from structure_cad.operations import construct
-        changed = construct(model, self.operation, **self.params)
+        changed = construct(model, self.operation, step_id=self.step_id, **self.params)
         return f"{self.name}: {changed} voxels constructed"
 
 
@@ -20664,6 +20677,8 @@ def _headless_deserialize_step(step_blob: Dict[str, Any], material_db: MaterialD
     if not name or name not in PROCESS_STEP_FACTORIES:
         return None
     step = PROCESS_STEP_FACTORIES[name](material_db)
+    from structure_cad.display_provenance import normalize_step_id
+    step.step_id = normalize_step_id(step_blob.get("step_id"))
     try:
         grp = step_blob.get("group", None)
         if isinstance(grp, str):
@@ -20850,6 +20865,8 @@ def simulate_headless(
             dummy.params = dict(sb.get("params", {})) if isinstance(sb.get("params", {}), dict) else {}
             steps.append(dummy)
 
+    from structure_cad.display_provenance import normalize_step_identities
+    normalize_step_identities(steps)
     last = len(steps) - 1
     if upto_step_index is not None and last >= 0:
         last = int(np.clip(int(upto_step_index), 0, int(last)))
@@ -26771,6 +26788,8 @@ class SimulatorController:
             if not new_steps:
                 self.view.append_log("Recipe file contained no valid steps.")
                 return
+            from structure_cad.display_provenance import normalize_step_identities
+            normalize_step_identities(new_steps)
             self.steps = new_steps
             self.view.refresh_step_list(self.steps)
             self.view.set_selected_step(0)
@@ -26809,6 +26828,8 @@ class SimulatorController:
             self.steps.extend(new_steps)
         else:
             self.steps = new_steps
+        from structure_cad.display_provenance import normalize_step_identities
+        normalize_step_identities(self.steps)
         self.view.refresh_step_list(self.steps)
         self.view.set_selected_step(0)
         self.view.append_log(f"{note}: applied {len(new_steps)} steps ({'append' if append else 'replace'}).")
@@ -26982,6 +27003,7 @@ class SimulatorController:
         legacy_params = _recipe_params_legacy_material_names(self.material_db, raw_params)
         data: Dict[str, Any] = {
             "name": step.name,
+            "step_id": step.step_id,
             "enabled": step.enabled,
             # Keep Desktop recipe files readable by older builds (expect material names).
             "params": legacy_params if isinstance(legacy_params, dict) else raw_params,
@@ -27002,6 +27024,8 @@ class SimulatorController:
         if not name or name not in PROCESS_STEP_FACTORIES:
             return None
         step = PROCESS_STEP_FACTORIES[name](self.material_db)
+        from structure_cad.display_provenance import normalize_step_id
+        step.step_id = normalize_step_id(data.get("step_id"))
         # Prefer params_raw when present (newer exports include both legacy `params` and canonical `params_raw`).
         params_raw = data.get("params_raw", None)
         params = params_raw if isinstance(params_raw, dict) and params_raw else data.get("params", {})
@@ -32721,7 +32745,7 @@ def _webui_step_execution_error(step: ProcessStep, step_index: int, transaction:
     return response
 
 
-def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
+def _webui_serialize_step(step: ProcessStep, *, include_identity: bool = True) -> Dict[str, Any]:
     from recipe_planner.schema import normalize_params
     data: Dict[str, Any] = {
         "name": step.name,
@@ -32732,6 +32756,8 @@ def _webui_serialize_step(step: ProcessStep) -> Dict[str, Any]:
         "params": normalize_params(step.name, step.params) if isinstance(step, EtchStep) else dict(step.params),
         "parameter_specs": [_webui_serialize_parameter_spec(spec) for spec in step.parameter_specs()],
     }
+    if include_identity:
+        data["step_id"] = step.step_id
     if isinstance(step, ExposureStep):
         if getattr(step, "custom_mask", None) is not None:
             data["custom_mask"] = step.custom_mask.astype(int).tolist()
@@ -32746,6 +32772,8 @@ def _webui_deserialize_step(data: Dict[str, Any], material_db: MaterialDatabase)
     if not name or name not in PROCESS_STEP_FACTORIES:
         return None
     step = PROCESS_STEP_FACTORIES[name](material_db)
+    from structure_cad.display_provenance import normalize_step_id
+    step.step_id = normalize_step_id(data.get("step_id"))
     instance_name = data.get("instance_name")
     if not isinstance(instance_name, str) or not instance_name.strip():
         legacy_label = data.get("label")
@@ -37494,6 +37522,8 @@ def _webui_worker_main(
     step_runtime_errors: Dict[int, Dict[str, Any]] = {}
 
     def _serialize_recipe_for_client() -> List[Dict[str, Any]]:
+        from structure_cad.display_provenance import normalize_step_identities
+        normalize_step_identities(steps)
         nonlocal step_runtime_statuses
         step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
         result: List[Dict[str, Any]] = []
@@ -58750,6 +58780,8 @@ def _webui_worker_main(
             if step is None:
                 raise ValueError(f"History recipe step {index} could not be restored.")
             rebuilt.append(step)
+        from structure_cad.display_provenance import normalize_step_identities
+        normalize_step_identities(rebuilt)
         return rebuilt
 
     def _history_trim(stack: List[Any]) -> None:
@@ -62704,7 +62736,7 @@ def _webui_worker_main(
                     "recipe": _serialize_recipe_for_client(),
                     "recipe_factories": sorted(PROCESS_STEP_FACTORIES.keys()),
                     "factory_templates": [
-                        _webui_serialize_step(PROCESS_STEP_FACTORIES[name](material_db))
+                        _webui_serialize_step(PROCESS_STEP_FACTORIES[name](material_db), include_identity=False)
                         for name in sorted(PROCESS_STEP_FACTORIES)
                     ],
                     "backend_capabilities": dict(VOXEL_BACKEND_CAPABILITIES),
@@ -71722,6 +71754,7 @@ def _webui_worker_main(
                     if not isinstance(name, str) or name not in PROCESS_STEP_FACTORIES:
                         raise ValueError("Unknown step")
                     candidate = PROCESS_STEP_FACTORIES[name](material_db)
+                    candidate.step_id = step.step_id
                     _webui_apply_admin_step_defaults(candidate, admin_cfg)
                     if step.instance_name != step.name:
                         candidate.instance_name = step.instance_name

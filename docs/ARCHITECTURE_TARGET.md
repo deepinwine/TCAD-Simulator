@@ -144,6 +144,16 @@ Fast/voxel 声明 `etch.target_depth=estimated`、`etch.sidewall_angle=approxima
 optional 数值的默认值与未设置参数保留 JSON `null`。旧响应缺少加法元数据时，React 仍按 `units` 静态显示，
 不猜测能力或换算。M4 视图仅将上述字段名映射为 camelCase，不改变物理含义。
 
+步骤来源加法字段：真实 Recipe step blob 的 `step_id` 是持久化 UUID；旧文件缺失或非法
+identity 时生成新值，同配方重复 identity 保留首个并为后续步骤生成新值。改参数、改类型、
+移动及历史恢复保留 identity，复制步骤生成新 identity；`factory_templates` 不携带 identity。
+正常 Structure 构建同时记录显示用 uint32 owner 数组（0 为未知）和 owner→step_id 映射，
+显式新增/替换区域归当前步骤，未变区域保留，删除区域清零。Pattern/Doping 不产生材料实体。
+材料 grid 仍是 canonical；旧 snapshot 来源未知，不回放补算。来源沿用 snapshot 压缩、
+溢出与删除生命周期，失败工艺事务一并回滚。128³ owner 数组约 8 MiB，首次分配前
+限制 256 MiB 和 65,536 个登记身份；reset 释放。未跟踪来源的旧工艺几何变更使来源
+失效为未知，纯缓存清理保留来源。本基础不新增步骤眼睛 API 或渲染过滤。
+
 Mask Asset 加法契约（ADR-026）：`mask_asset_id` 与正整数 `mask_asset_revision` 绑定不可变
 revision；schema、资源预算、SHA-256 与栅格预检全部成功后才原子发布。保存/导入与步骤
 应用是一个 worker 事务，失败时恢复步骤、manifest 和 revision 文件。JSON 不依赖 gdstk；

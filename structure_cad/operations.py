@@ -155,25 +155,31 @@ def heights(grid):
     return np.where(occupied.any(axis=2), grid.shape[2] - occupied[..., ::-1].argmax(axis=2), 0)
 
 
-def commit(model, candidate, operation):
+def commit(model, candidate, operation, *, step_id=None, additions=None):
     changed = candidate != model.grid
     if not changed.any():
         raise ValueError(f'{operation}: no geometry changed (no exposed target material or effective opening)')
     arrays = model._require_writable_spatial_volumes(operation)
+    source = model.display_provenance
+    if step_id is not None:
+        source.prepare(candidate.shape, step_id, additions)
     mask = model.open_mask.copy()
     dirty = set(int(v) for v in np.unique(model.grid[changed])) | set(int(v) for v in np.unique(candidate[changed]))
     model._clear_spatial_volume_mask((slice(None),)*3, changed, arrays=arrays)
     model.grid[...] = candidate
-    model._rebuild_height_map(dirty)
+    model._rebuild_height_map(dirty, preserve_display=step_id is not None)
+    if step_id is not None:
+        source.record(candidate, step_id, additions)
     model.open_mask = mask
     return int(changed.sum())
 
 
-def construct(model, operation, **params):
+def construct(model, operation, *, step_id=None, **params):
     top(model)
     if operation == 'Doping':
         return dope(model, params)
     candidate = model.grid.copy()
+    additions = None
     nz = candidate.shape[2]
     z = np.arange(nz)[None, None, :]
     if operation in ('Wafer', 'Deposit', 'Fill', 'Etch'):
@@ -193,7 +199,8 @@ def construct(model, operation, **params):
             region = eligible[..., None] & (z >= (h-consumed)[..., None]) & (z < h[..., None])
             if np.any(h[eligible] < consumed) or np.any(candidate[region] != seed):
                 raise ValueError('Structure Oxidation exceeds selected substrate thickness')
-        candidate[eligible[..., None] & (z >= (h-consumed)[..., None]) & (z < (h+n-consumed)[..., None])] = mid
+        additions = eligible[..., None] & (z >= (h-consumed)[..., None]) & (z < (h+n-consumed)[..., None])
+        candidate[additions] = mid
     elif operation == 'Strip':
         candidate[candidate == material_id(model, 'Photoresist')] = 0
     elif operation == 'Wafer':
@@ -202,6 +209,7 @@ def construct(model, operation, **params):
             raise ValueError('Structure Wafer exceeds domain height')
         candidate.fill(0)
         candidate[:, :, :n] = mid
+        additions = np.broadcast_to(z < n, candidate.shape)
     elif operation == 'Deposit':
         n = layers(model, params['thickness_nm'], 'thickness_nm')
         if n > nz:
@@ -213,13 +221,15 @@ def construct(model, operation, **params):
         h = heights(candidate)
         if np.any(h[opened] + n > nz):
             raise ValueError('Structure Deposit exceeds domain height')
-        candidate[opened[..., None] & (z >= h[..., None]) & (z < (h+n)[..., None])] = mid
+        additions = opened[..., None] & (z >= h[..., None]) & (z < (h+n)[..., None])
+        candidate[additions] = mid
     elif operation in ('Fill', 'Planarize'):
         n = layers(model, params['height_nm'], 'height_nm', zero=True)
         if n > nz:
             raise ValueError(f'Structure {operation} exceeds domain height')
         if operation == 'Fill':
-            candidate[(candidate == 0) & (z < n)] = mid
+            additions = (candidate == 0) & (z < n)
+            candidate[additions] = mid
         else:
             candidate[:, :, n:] = 0
     elif operation == 'Etch':
@@ -248,7 +258,7 @@ def construct(model, operation, **params):
             candidate[xs, ys, index[xs, ys]] = 0
     else:
         raise ValueError(f'Unknown structure operation {operation}')
-    changed = commit(model, candidate, f'Structure {operation}')
+    changed = commit(model, candidate, f'Structure {operation}', step_id=step_id, additions=additions)
     if operation == 'Strip':
         model.open_mask = np.ones(candidate.shape[:2], dtype=bool)
     return changed
