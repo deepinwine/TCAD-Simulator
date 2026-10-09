@@ -118,7 +118,7 @@ the frozen-core tests when changing those fields.
 | `/api/preview/geom` | GET | query `mat_id`、`rev`、`mode` | **binary** `application/octet-stream` |
 | `/api/preview/stl` | GET | query `mat_id`、`rev`、`mode` | **binary** STL（`application/sla`） |
 | `/api/preview/elements` | GET | query `max_points`、`channels`、`quality` | **binary**（动态 content-type） |
-| `/api/slice` | GET | query `axis`、`index`、`kind` | JSON（`result.data_b64` 内嵌二进制） |
+| `/api/slice` | GET | query `axis=X/Y/Z`、`index`、`kind=material` | JSON；`result` 为 `axis`、`index`、`index_max`、`shape=[rows,columns]`、`dtype="u16"`、`data_b64`（按行排列的材料 ID）；X 的列/行为 Y/Z，Y 为 X/Z，Z 为 X/Y；端点保持原有索引钳制语义 |
 | `/api/render/gbuffer` | POST | render 设置 JSON | **binary**（支持 gzip），JSON error |
 | `/api/material_colors` | POST | `{action, mode?, …}` | JSON |
 | `/api/mask/preview` | GET | query `file`（已上传掩膜文件名） | **binary** `image/*`（`.npy` → `image/png`，其他支持格式保留源 MIME），JSON error |
@@ -180,9 +180,12 @@ frontend/
 React is a parallel client against the existing backend; the legacy WebUI stays until
 React passes feature parity and regression tests (M5). Never delete the old WebUI early.
 The built bundle is served same-origin at `/studio/` by the Python WebUI (ADR-012);
-Three.js visualization is browser-local — camera/projection/clipping/material/pick/measure
-operations never issue API requests, only `preview/manifest` + `preview/stl` on model
-revision changes.
+Three.js visualization is browser-local — camera/projection/material/pick/measure
+operations do not recompute process geometry. Solid section rendering (ADR-029) may read
+`slice` when an axis/index needs uncached material data, followed by a lightweight manifest
+revision check. STL downloads remain tied to actual model revision changes, not camera or
+clipping movement. Section coloring only renders Python-returned material IDs; it never
+reconstructs deposited/etched geometry in JavaScript.
 
 ## Migration Strategy — Strangler, Never Big Bang
 

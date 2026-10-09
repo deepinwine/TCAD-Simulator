@@ -53,10 +53,12 @@ ADR-006 — Desktop GUI is maintained but not the primary CAD surface.
 Reason: the WebUI session/worker model fits the CAD shell better; Qt stays compatible.
 Constraint: no feature may exist in only one UI's private execution path.
 
-ADR-007 — Viewer interactions are browser-local.
+ADR-007 — Viewer interactions are browser-local (solid sections extended by ADR-029).
 Reason: camera, projection, clipping, and material visibility must feel instant.
 Rule: they must not trigger worker recomputes, `preview/manifest` refetches, or geometry
 re-downloads; only lightweight UI state is persisted.
+Exception: ADR-029 allows read-only section data and revision verification, without
+process recomputes or unnecessary STL downloads.
 
 ADR-008 — Timeline restore is view-only; undo/redo is atomic with metadata.
 Reason: reviewing a snapshot must never silently recompute; history restores model state
@@ -209,3 +211,17 @@ Rules:
 - GDS 导出通过 `LayoutAdapter.boolean` 对同层普通轮廓求并集后减显式 hole；结果经
   adapter 内部 gdstk fracture 拆为最多 5 顶点的简单 polygon，避免 GDS 孔洞的重复
   桥接边违反可编辑 polygon 的严格拓扑契约，并保留重导入后的孔洞和面积。
+
+ADR-029 — 真实材料截面封口，扩展 ADR-007 的裁剪读取限制（2026-10-09）。
+Reason: 所有者要求实心结构剖面不呈空壳，真实沟槽和孔洞不能被假平面填满。
+Rules:
+- 复用既有 `/api/slice` 读取 Python 材料截面，React 只映射材料 ID 到颜色和透明度。
+  空气透明，未知非零材料使用可见中性色并提示；不计算工艺、不改正式模型或历史。
+- 坐标以当前 STL 实测体素中心 `i*voxel` 为准，完整 domain 边界为
+  `[-0.5, n-0.5]*voxel`；截面放在实际裁剪平面，界面处取保留的负侧材料。
+- 缺少缓存的轴/索引允许读取 slice，再以轻量 manifest 验证 revision。
+  新模型、旧请求、异常数据不能混用；只在 revision 确实变化时重新加载几何。
+  相机、投影、透明度不触发工艺重建，Viewer 不重挂。
+- 三轴方向、组合裁剪、材质隐藏、真实像素拾取和资源释放须有回归；纹理预算
+  和错误必须显式处理。截面保留体素阶梯，不声称连续光滑或物理校准精度。
+- 步骤眼睛的隔离跳步重建是后续独立功能，不借此修改正式 Recipe.enabled。
