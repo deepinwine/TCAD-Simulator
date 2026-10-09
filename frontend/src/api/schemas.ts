@@ -1,4 +1,5 @@
 import type {
+  MaterialSliceView,
   BoundingBoxView,
   HistoryView,
   InitView,
@@ -25,6 +26,32 @@ import type {
   TimelineView,
   Vec3,
 } from './types';
+
+export function parseMaterialSliceEnvelope(payload: unknown): MaterialSliceView {
+  const source = requireOkResult(payload);
+  if (!['X', 'Y', 'Z'].includes(String(source.axis))) throw new ApiContractError('result.axis', 'X, Y, Z');
+  if (source.dtype !== 'u16') throw new ApiContractError('result.dtype', 'u16');
+  const indexMax = requireInteger(source.index_max, 'result.index_max', 0);
+  const index = requireInteger(source.index, 'result.index', 0);
+  if (!Number.isSafeInteger(indexMax) || !Number.isSafeInteger(index)) throw new ApiContractError('result.index', 'safe integers');
+  if (index > indexMax) throw new ApiContractError('result.index', 'within index_max');
+  const shape = requireArray(source.shape, 'result.shape');
+  if (shape.length !== 2) throw new ApiContractError('result.shape', 'two dimensions');
+  const rows = requireInteger(shape[0], 'result.shape[0]', 1);
+  const cols = requireInteger(shape[1], 'result.shape[1]', 1);
+  const count = rows * cols;
+  if (!Number.isSafeInteger(count) || count > 16_777_216 || rows > 4096 || cols > 4096) throw new ApiContractError('result.shape', 'at most 4096 per dimension and 16777216 pixels');
+  const encoded = requireString(source.data_b64, 'result.data_b64');
+  if (encoded.length !== Math.ceil(count * 2 / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+    throw new ApiContractError('result.data_b64', 'exact-length base64 uint16 data');
+  }
+  const bytes = atob(encoded);
+  if (btoa(bytes) !== encoded) throw new ApiContractError('result.data_b64', 'canonical base64');
+  if (bytes.length !== count * 2) throw new ApiContractError('result.data_b64', 'shape-sized uint16 data');
+  const data = new Uint16Array(count);
+  for (let i = 0; i < count; i++) data[i] = bytes.charCodeAt(i * 2) | (bytes.charCodeAt(i * 2 + 1) << 8);
+  return {axis: String(source.axis).toLowerCase() as MaterialSliceView['axis'], index, indexMax, shape: [rows, cols], data};
+}
 import {canonicalUnits, toCanonical, type Dimension, type DisplayUnit} from '../units/units';
 
 export class ApiContractError extends Error {

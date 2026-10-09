@@ -249,6 +249,7 @@ export interface MaskAssetApplyView {
 }
 
 export interface TcadApi {
+  getMaterialSlice?(request: {axis: 'x' | 'y' | 'z'; index: number}, signal?: AbortSignal): Promise<MaterialSliceView>;
   init(signal?: AbortSignal): Promise<InitView>;
   setStep(request: SetStepRequest, signal?: AbortSignal): Promise<SetStepView>;
   runStep(index: number, signal?: AbortSignal): Promise<RunView>;
@@ -295,4 +296,12 @@ export interface TcadApi {
     signal?: AbortSignal,
   ): Promise<PreviewManifestView>;
   getMaterialStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer>;
+}
+
+export interface MaterialSliceView {
+  axis: 'x' | 'y' | 'z';
+  index: number;
+  indexMax: number;
+  shape: readonly [number, number];
+  data: Uint16Array;
 }

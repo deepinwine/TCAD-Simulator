@@ -9,6 +9,20 @@ import {
 } from './client';
 import {ApiContractError} from './schemas';
 
+it('material slice uses the frozen GET contract, abort signal and validates echoed coordinates', async () => {
+  const fetcher = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ok: true, result: {axis: 'Y', index: 2, index_max: 4, shape: [1, 1], dtype: 'u16', data_b64: 'AQA='}}), {headers: {'Content-Type': 'application/json'}}));
+  vi.stubGlobal('fetch', fetcher);
+  const api = createTcadApi();
+  expect(api.getMaterialSlice).toBeTypeOf('function');
+  const signal = new AbortController().signal;
+  const slice = await api.getMaterialSlice!({axis: 'y', index: 2}, signal);
+  expect([...slice.data]).toEqual([1]);
+  expect(fetcher.mock.calls[0][0]).toBe('/api/slice?axis=Y&index=2&kind=material');
+  expect(fetcher.mock.calls[0][1]?.signal).toBe(signal);
+  await expect(api.getMaterialSlice!({axis: 'x', index: 2})).rejects.toThrow();
+  await expect(api.getMaterialSlice!({axis: 'y', index: -1})).rejects.toThrow();
+});
+
 const wireStep = {
   name: 'Initialize Wafer',
   instance_name: 'Substrate',

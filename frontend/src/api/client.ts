@@ -12,6 +12,7 @@ import {
   parseStepEnvelope,
   parseStepListEnvelope,
   parsePreviewManifestEnvelope,
+  parseMaterialSliceEnvelope,
   parseRunEnvelope,
   parseSetStepEnvelope,
   parseTimelineEnvelope,
@@ -350,6 +351,16 @@ function previewStlPath(request: PreviewStlRequest): string {
 
 export function createTcadApi(): TcadApi {
   return {
+    async getMaterialSlice(request, signal) {
+      if (!['x', 'y', 'z'].includes(request.axis)) throw new ApiContractError('request.axis', 'x, y, z');
+      const index = requireRequestInteger(request.index, 'request.index', 0);
+      const query = new URLSearchParams({axis: request.axis.toUpperCase(), index: String(index), kind: 'material'});
+      return apiGetJson(`/api/slice?${query}`, payload => {
+        const slice = parseMaterialSliceEnvelope(payload);
+        if (slice.axis !== request.axis || slice.index !== index) throw new ApiContractError('result', 'requested slice coordinates');
+        return slice;
+      }, signal);
+    },
     init(signal?: AbortSignal): Promise<InitView> {
       return apiGetJson('/api/init', parseInitEnvelope, signal);
     },
