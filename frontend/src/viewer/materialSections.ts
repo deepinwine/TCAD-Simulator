@@ -94,7 +94,9 @@ export function createMaterialSections(
         cacheKey = key;
       }
       const placements = (['x', 'y', 'z'] as const)
-        .filter(axis => input.clip[axis].enabled)
+        // Normalized endpoints coincide with the existing mesh boundary even
+        // when STL Float32 coordinates differ slightly from the voxel domain.
+        .filter(axis => input.clip[axis].enabled && input.clip[axis].position > 0 && input.clip[axis].position < 1)
         .map(axis => sectionPlacement(input.model!, input.bounds, axis, input.clip[axis].position))
         .filter(p => p.inside);
       try {

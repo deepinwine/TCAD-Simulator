@@ -219,6 +219,53 @@ it('does not paint clamped material outside the full voxel domain at slider boun
   manager.dispose();
 });
 
+it.each(['x','y','z'] as const)('avoids duplicate caps at Float32 noncubic bbox endpoints for %s while preserving interior cuts', async axis => {
+  const model = {gridShape:[3,5,7] as const,voxelSizeNm:5};
+  const a = {x:0,y:1,z:2}[axis];
+  const [u,v] = axis === 'x' ? [1,2] : axis === 'y' ? [0,2] : [0,1];
+  const shape = [model.gridShape[v],model.gridShape[u]] as const;
+  const fetcher = vi.fn(async (request:{axis:'x'|'y'|'z';index:number}) => ({
+    ...request,indexMax:model.gridShape[a]-1,shape,data:new Uint16Array(shape[0]*shape[1]).fill(1),
+  }));
+  const verifyRevision = vi.fn(async () => true);
+  const group = new Group();
+  const manager = sections.createMaterialSections(group,fetcher,verifyRevision);
+  const bounds = new Box3(
+    new Vector3(...model.gridShape.map(() => Math.fround(-.0025)) as [number,number,number]),
+    new Vector3(...model.gridShape.map(n => Math.fround((n-.5)*.005)) as [number,number,number]),
+  );
+  const input = {...sectionInput(),model,bounds};
+  const updateAt = (position:number) => manager.update({...input,clip:{...clipStateAllOff(),[axis]:{enabled:true,position}}});
+  for (const position of [0,1]) {
+    await updateAt(position);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(verifyRevision).not.toHaveBeenCalled();
+    expect(group.children).toHaveLength(0);
+    expect(manager.pickCandidates()).toHaveLength(0);
+  }
+  await updateAt(.5);
+  expect(fetcher.mock.calls[0][0]).toEqual({axis,index:Math.floor(model.gridShape[a]/2)});
+  expect(group.children).toHaveLength(1);
+  expect(manager.pickCandidates()).toHaveLength(1);
+  const geometry = (group.children[0] as import('three').Mesh).geometry;
+  const disposed = vi.fn();
+  geometry.addEventListener('dispose',disposed);
+  for (const position of [1,0]) {
+    await updateAt(position);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(verifyRevision).toHaveBeenCalledTimes(1);
+    expect(group.children).toHaveLength(0);
+    expect(manager.pickCandidates()).toHaveLength(0);
+  }
+  expect(disposed).toHaveBeenCalledTimes(1);
+  // A positive interior fraction remains legal; do not widen the endpoint exclusion with epsilon.
+  await updateAt(1e-10);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(group.children).toHaveLength(1);
+  expect(manager.pickCandidates()).toHaveLength(1);
+  manager.dispose();
+});
+
 // Golden generated with ProcessModel.get_cross_section and the worker's Z .T.
 // grid[0,0,0]=1; grid[1,2,3]=256; grid[0,1,2]=2; grid[1,0,1]=1.
 // Actual padded marching_cubes(.1µm) for [1,2,3] gives bbox
