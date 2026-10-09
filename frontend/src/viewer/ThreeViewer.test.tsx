@@ -56,6 +56,21 @@ afterEach(() => {
 });
 
 describe('ThreeViewer', () => {
+  it('binds authoritative model context without remounting and exposes section failures for retry', async () => {
+    const setSectionContext = vi.fn();
+    const {runtime} = fakeViewerRuntime({setSectionContext});
+    const factory = () => runtime;
+    const model = {gridShape: [2,3,4] as const, voxelSizeNm: 100};
+    const view = render(<ThreeViewer api={apiStub} model={model} refreshToken={1} runtimeFactory={factory} />);
+    await waitFor(() => expect(setSectionContext).toHaveBeenCalled());
+    const callback = setSectionContext.mock.calls.at(-1)![1];
+    callback(new Error('section failed'));
+    expect(await screen.findByRole('alert')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', {name: '重试加载几何'}));
+    view.rerender(<ThreeViewer api={apiStub} model={{...model, voxelSizeNm: 200}} refreshToken={2} runtimeFactory={factory} />);
+    await waitFor(() => expect(setSectionContext.mock.calls.at(-1)![0].voxelSizeNm).toBe(200));
+    expect(runtime.mount).toHaveBeenCalledTimes(1);
+  });
   it('部分加载失败仅显示本地化摘要，重试成功后更新材料列表并清除错误', async () => {
     const loadMeshes = vi.fn()
       .mockResolvedValueOnce({warnings: ['SiO2: Authorization: Bearer secret-token'], materials: [{matId: 1, name: 'Si', visible: true, opacity: 1}]})

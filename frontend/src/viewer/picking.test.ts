@@ -1,4 +1,4 @@
-import {BufferGeometry, Float32BufferAttribute, Mesh, MeshStandardMaterial, PerspectiveCamera, Vector3} from 'three';
+import {BufferGeometry, Float32BufferAttribute, Mesh, MeshStandardMaterial, PerspectiveCamera, Vector3, Plane} from 'three';
 import {describe, expect, it} from 'vitest';
 import {measureDistance, pickAtNormalizedCoords} from './picking';
 
@@ -20,6 +20,20 @@ function frontCamera(): PerspectiveCamera {
 }
 
 describe('pickAtNormalizedCoords', () => {
+  it('ignores clipped intersections and transparent slice pixels before returning a real visible surface', () => {
+    const clipped = triangleMesh();
+    (clipped.material as MeshStandardMaterial).clippingPlanes = [new Plane(new Vector3(0,0,-1), -1)];
+    const transparent = triangleMesh();
+    const back = triangleMesh(); back.position.z = -2; back.updateMatrixWorld();
+    const hit = pickAtNormalizedCoords([{mesh:clipped,matId:1,name:'clipped'}, {mesh:transparent,matId:2,name:'hole',resolveHit:()=>null}, {mesh:back,matId:3,name:'back'}], frontCamera(),0,0);
+    expect(hit?.matId).toBe(3);
+    expect(hit?.point.z).toBeCloseTo(-2);
+  });
+  it('resolves material IDs from slice intersections rather than a rear shell', () => {
+    const mesh = triangleMesh();
+    const hit = pickAtNormalizedCoords([{mesh,matId:0,name:'slice',resolveHit:()=>({matId:256,name:'material256'})}],frontCamera(),0,0);
+    expect(hit).toMatchObject({matId:256,name:'material256'});
+  });
   it('视线穿过三角形时命中并返回世界坐标', () => {
     const mesh = triangleMesh();
     const hit = pickAtNormalizedCoords(

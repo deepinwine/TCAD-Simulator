@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import type {PointerEvent as ReactPointerEvent} from 'react';
 import {TcadApiError} from '../api/client';
-import type {TcadApi} from '../api/types';
+import type {TcadApi, ModelSummaryView} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
 import {useI18n} from '../i18n/I18nContext';
 import type {TranslationKey} from '../i18n/catalogs';
@@ -15,6 +15,7 @@ export type ProjectionMode = 'perspective' | 'orthographic';
 export type {StandardView, ViewerRuntime} from './viewerRuntime';
 
 interface ThreeViewerProps {
+  model?: ModelSummaryView | null;
   api: TcadApi;
   refreshToken: number;
   runtimeFactory?: (api: TcadApi) => ViewerRuntime;
@@ -44,13 +45,14 @@ function asViewerApiError(error: unknown): TcadApiError {
   );
 }
 
-export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProps) {
+export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: ThreeViewerProps) {
   const {t} = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<ViewerRuntime | null>(null);
   const [backend, setBackend] = useState<string | null>(null);
   const [initError, setInitError] = useState<TcadApiError | null>(null);
   const [loadError, setLoadError] = useState<TcadApiError | null>(null);
+  const [sectionError, setSectionError] = useState<TcadApiError | null>(null);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [orthoActive, setOrthoActive] = useState(false);
@@ -83,6 +85,15 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
       runtime.dispose();
     };
   }, [api, runtimeFactory]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    let cancelled = false;
+    runtime?.setSectionContext?.(model, error => {
+      if (!cancelled) setSectionError(error === null ? null : asViewerApiError(error));
+    });
+    return () => {cancelled = true;};
+  }, [model, retryAttempt, api, runtimeFactory]);
 
   useEffect(() => {
     containerRef.current?.querySelector('canvas')?.setAttribute('aria-label', t('viewer.canvas'));
@@ -305,6 +316,9 @@ export function ThreeViewer({api, refreshToken, runtimeFactory}: ThreeViewerProp
             actionLabel={t('viewer.retry')}
             onAction={retry}
           />
+        )}
+        {initError === null && sectionError !== null && (
+          <ErrorNotice title={t('viewer.sectionError')} error={sectionError} actionLabel={t('viewer.retry')} onAction={retry} />
         )}
         {initError === null && loadError === null && loadWarnings.length > 0 && (
           <ErrorNotice

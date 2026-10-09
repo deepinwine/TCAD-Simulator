@@ -4,6 +4,7 @@ import type {
   PreviewManifestView,
   PreviewMeshView,
   PreviewStlRequest,
+  MaterialVisualView,
 } from '../api/types';
 
 export interface MaterialConfig {
@@ -21,6 +22,7 @@ export interface LoadedMesh {
 }
 
 export interface MeshLoadResult {
+  visuals: MaterialVisualView[];
   revision: number;
   meshes: LoadedMesh[];
   warnings: string[];
@@ -39,7 +41,7 @@ export interface MeshLoaderDependencies {
 }
 
 export interface MeshLoader {
-  load(token: number, signal?: AbortSignal): Promise<MeshLoadResult>;
+  load(token: number, signal?: AbortSignal, forceManifest?: boolean): Promise<MeshLoadResult>;
   dispose(): void;
 }
 
@@ -47,7 +49,7 @@ const STL_MODE = 'solid' as const;
 const DEFAULT_CONCURRENCY = 4;
 
 function staleResult(): MeshLoadResult {
-  return {revision: -1, meshes: [], warnings: [], stale: true, cached: false};
+  return {revision: -1, meshes: [], visuals: [], warnings: [], stale: true, cached: false};
 }
 
 function toMaterialConfig(visual: PreviewMeshView['visual']): MaterialConfig {
@@ -79,6 +81,7 @@ async function mapWithConcurrency<TIn, TOut>(
 }
 
 interface CacheEntry {
+  visuals: MaterialVisualView[];
   revision: number;
   meshes: LoadedMesh[];
   complete: boolean;
@@ -100,9 +103,9 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
     activeControllers = new Set();
   };
 
-  const load = async (token: number, signal?: AbortSignal): Promise<MeshLoadResult> => {
+  const load = async (token: number, signal?: AbortSignal, forceManifest = false): Promise<MeshLoadResult> => {
     if (signal?.aborted) return staleResult();
-    if (token === lastToken && cache?.complete) {
+    if (!forceManifest && token === lastToken && cache?.complete) {
       return {...staleResult(), stale: false, cached: true, ...cache};
     }
 
@@ -128,7 +131,7 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
 
     if (cache?.complete && cache.revision === manifest.revision) {
       lastToken = token;
-      return {revision: cache.revision, meshes: cache.meshes, warnings: [], stale: false, cached: true};
+      return {revision: cache.revision, meshes: cache.meshes, visuals: manifest.meshes.map(entry => entry.visual), warnings: [], stale: false, cached: true};
     }
 
     const requested = manifest.meshes.filter(entry => entry.visual?.visible !== false);
@@ -170,9 +173,10 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
 
     if (currentGeneration !== generation || signal?.aborted) return staleResult();
     const loaded = meshes.filter((entry): entry is LoadedMesh => entry !== null);
-    cache = {revision: manifest.revision, meshes: loaded, complete: loaded.length === requested.length};
+    const visuals = manifest.meshes.map(entry => entry.visual);
+    cache = {revision: manifest.revision, meshes: loaded, visuals, complete: loaded.length === requested.length};
     lastToken = token;
-    return {revision: manifest.revision, meshes: loaded, warnings, stale: false, cached: false};
+    return {revision: manifest.revision, meshes: loaded, visuals, warnings, stale: false, cached: false};
   };
 
   const dispose = () => {

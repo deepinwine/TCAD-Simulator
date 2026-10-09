@@ -139,7 +139,7 @@ function StudioShell({api, viewerRuntimeFactory}: {api: TcadApi; viewerRuntimeFa
             <StepStructureBar />
           </ProcessFlowPane>
         </>} parameters={<ParameterPanel step={selectedStep} collapsed={parametersCollapsed} onEditMask={() => void openMask()} />}
-        viewer={<ThreeViewer api={api} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />} />
+        viewer={<ThreeViewer api={api} model={state.model} refreshToken={state.previewGeneration} runtimeFactory={viewerRuntimeFactory} />} />
       <TimelineBar />
     </main>
     {workbench !== null && <MaskWorkbench api={api} initialAsset={workbench.asset} stepIndex={workbench.stepIndex} onApply={actions.applyMaskAsset} onError={actions.reportMaskError} onClose={() => setWorkbench(null)} />}</>

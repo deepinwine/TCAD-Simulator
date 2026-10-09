@@ -46,6 +46,14 @@ interface FakeOptions {
   sharedGeometry?: BufferGeometry;
 }
 
+it('retains authoritative visuals for hidden materials without downloading their STL', async () => {
+  const hidden = mesh(2); hidden.visual.visible = false;
+  const deps = fakeDependencies({manifestProvider: () => manifest(3,[mesh(1),hidden])});
+  const result = await createMeshLoader(deps).load(1);
+  expect(result.visuals).toEqual([mesh(1).visual, hidden.visual]);
+  expect(deps.stlRequests().map(request => request.materialId)).toEqual([1]);
+});
+
 function fakeDependencies(options: FakeOptions = {}) {
   let manifestCalls = 0;
   let stlCalls = 0;
@@ -90,6 +98,13 @@ function fakeDependencies(options: FakeOptions = {}) {
 }
 
 describe('createMeshLoader', () => {
+  it('forced retry probes manifest even for the same token after a section revision mismatch', async () => {
+    const deps = fakeDependencies({manifestProvider: call => manifest(call,[mesh(1)])});
+    const loader = createMeshLoader(deps);
+    expect((await loader.load(1)).revision).toBe(1);
+    expect((await loader.load(1,undefined,true)).revision).toBe(2);
+    expect(deps.manifestCalls()).toBe(2);
+  });
   it('manifest 网络错误向调用者抛出，随后允许相同 token 重试', async () => {
     const deps = fakeDependencies();
     const failure = new Error('manifest 离线');

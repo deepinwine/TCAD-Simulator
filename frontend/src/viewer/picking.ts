@@ -1,9 +1,10 @@
-import {Raycaster, Vector2, Vector3, type Camera, type Mesh} from 'three';
+import {Raycaster, Vector2, Vector3, type Camera, type Mesh, type Intersection, type Material} from 'three';
 
 export interface PickCandidate {
   mesh: Mesh;
   matId: number;
   name: string;
+  resolveHit?: (intersection: Intersection) => {matId: number; name: string} | null;
 }
 
 export interface PickHit {
@@ -28,11 +29,16 @@ export function pickAtNormalizedCoords(
   raycaster.setFromCamera(new Vector2(ndcX, ndcY), camera);
   const meshes = candidates.map(candidate => candidate.mesh);
   const hits = raycaster.intersectObjects(meshes, false);
-  const first = hits[0];
-  if (first === undefined) return null;
-  const candidate = candidates.find(item => item.mesh === first.object);
-  if (candidate === undefined) return null;
-  return {matId: candidate.matId, name: candidate.name, point: first.point.clone()};
+  for (const hit of hits) {
+    const candidate = candidates.find(item => item.mesh === hit.object);
+    if (!candidate || !candidate.mesh.visible) continue;
+    const material = candidate.mesh.material as Material;
+    if (material.opacity <= 0 || material.clippingPlanes?.some(plane => plane.distanceToPoint(hit.point) < -1e-8)) continue;
+    const resolved = candidate.resolveHit ? candidate.resolveHit(hit) : candidate;
+    if (resolved === null) continue;
+    return {matId:resolved.matId,name:resolved.name,point:hit.point.clone()};
+  }
+  return null;
 }
 
 /** 测量两点间的欧氏距离（世界坐标，单位 µm）。 */

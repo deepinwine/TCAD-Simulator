@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 import {STLLoader} from 'three/examples/jsm/loaders/STLLoader.js';
-import type {TcadApi} from '../api/types';
+import type {TcadApi, ModelSummaryView} from '../api/types';
+import {createMaterialSections, type SectionColor} from './materialSections';
 import {clipStateAllOff, deriveClipPlanes, type ClipState} from './clipping';
 import {calculateOrthographicFit, calculatePerspectiveFit} from './fitCamera';
 import {createMeshLoader, type LoadedMesh} from './meshLoader';
@@ -25,6 +26,7 @@ export interface MaterialDisplay {
 export type MeasureMarkerPoints = ReadonlyArray<readonly [number, number, number]>;
 
 export interface ViewerRuntime {
+  setSectionContext?(model: ModelSummaryView | null, onError: (error: unknown | null) => void): void;
   readonly backend: string;
   mount(container: HTMLElement): void;
   setStandardView(view: StandardView): void;
@@ -51,8 +53,8 @@ const VIEW_DIRECTIONS: Record<StandardView, THREE.Vector3> = {
 /**
  * 真实 Three.js Viewer runtime。
  *
- * 相机、视图与渲染全部浏览器本地完成，不触发任何 API 请求；只有
- * loadMeshes（refreshToken 变化时）经冻结契约拉取 manifest 与 STL。
+ * 相机、视图与材质显示属于本地状态。模型加载拉取 manifest/STL；
+ * 裁剪封口只渲染冻结 slice API 返回的真实材料，并核对 mesh revision。
  */
 export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let renderer: THREE.WebGLRenderer | null = null;
@@ -73,6 +75,40 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   const meshesByMatId = new Map<number, THREE.Mesh>();
   let selectedMesh: THREE.Mesh | null = null;
   let markerGroup: THREE.Group | null = null;
+  const sectionGroup = new THREE.Group();
+  let sectionNeedsReload = false;
+  const sections = createMaterialSections(sectionGroup, (request, signal) => {
+    if (!api.getMaterialSlice) return Promise.reject(new Error('Material slice API unavailable'));
+    return api.getMaterialSlice(request, signal);
+  }, async (revision,signal) => {
+    const current = (await api.getPreviewManifest({mode:'solid',faceLimit:40000},signal)).revision;
+    if (!signal.aborted && current !== revision) sectionNeedsReload = true;
+    return current === revision;
+  }, () => renderer?.capabilities.maxTextureSize ?? 4096);
+  let modelSummary: ModelSummaryView | null = null;
+  let sectionError: (error: unknown | null) => void = () => {};
+  let sectionGeneration = 0;
+  let meshRevision = -1;
+  let meshesLoading = false;
+  let sectionMaterials = new Map<number, SectionColor>();
+
+  const updateSections = () => {
+    const generation = ++sectionGeneration;
+    const materials = new Map(sectionMaterials);
+    for (const [id, mesh] of meshesByMatId) {
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      materials.set(id, {color: [material.color.r,material.color.g,material.color.b], opacity: material.opacity,visible:mesh.visible,name:mesh.name});
+    }
+    const bounds = group && group.children.length ? new THREE.Box3().setFromObject(group) : new THREE.Box3();
+    void sections.update({model: meshesLoading ? null : modelSummary, revision:meshRevision,bounds,clip:clipState,materials}).then(ids => {
+      if (generation !== sectionGeneration || disposed) return;
+      sectionError(ids.length ? new Error(`Unknown slice materials: ${ids.join(', ')}`) : null);
+      scheduleRender();
+    }).catch(error => {
+      if (generation !== sectionGeneration || disposed) return;
+      sectionError(error); scheduleRender();
+    });
+  };
 
   const stlLoader = new STLLoader();
   const meshLoader = createMeshLoader({
@@ -197,6 +233,9 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   };
 
   const runtime: ViewerRuntime = {
+    setSectionContext(model, onError) {
+      modelSummary = model; sectionError = onError; updateSections();
+    },
     get backend() {
       return backendLabel;
     },
@@ -231,7 +270,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       key.position.set(6, -8, 10);
       scene.add(hemisphere, key);
       group = new THREE.Group();
-      scene.add(group);
+      scene.add(group, sectionGroup);
 
       controls = new OrbitControls(camera, renderer.domElement);
       controls.addEventListener('change', scheduleRender);
@@ -291,6 +330,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
     setClipping(state: ClipState) {
       clipState = state;
       applyClippingToMaterials();
+      updateSections();
       scheduleRender();
     },
     setMaterialDisplay(matId: number, display: MaterialDisplay) {
@@ -304,12 +344,13 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         material.transparent = opacity < 1;
         material.needsUpdate = true;
       }
+      updateSections();
       scheduleRender();
     },
     pickAt(ndcX: number, ndcY: number): PickHit | null {
       const view = activeCamera();
       if (view === null) return null;
-      const candidates: PickCandidate[] = [];
+      const candidates: PickCandidate[] = [...sections.pickCandidates()];
       for (const [matId, mesh] of meshesByMatId) {
         if (!mesh.visible) continue;
         candidates.push({mesh, matId, name: mesh.name});
@@ -367,10 +408,15 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       applyPose(direction.normalize());
     },
     async loadMeshes(token: number) {
-      const result = await meshLoader.load(token);
+      meshesLoading = true; updateSections();
+      const result = await meshLoader.load(token,undefined,sectionNeedsReload);
       if (result.stale || disposed || group === null) {
         return {warnings: result.warnings, materials: [] as MaterialSummary[], stale: true};
       }
+      const preserveDisplay = meshRevision === result.revision;
+      const previousDisplay = new Map([...meshesByMatId].map(([id,mesh]) => [id,{visible:mesh.visible,opacity:(mesh.material as THREE.Material).opacity}]));
+      meshesLoading = false; meshRevision = result.revision; sectionNeedsReload = false;
+      sectionMaterials = new Map(result.visuals.map(visual => [visual.materialId, {color:visual.color,opacity:visual.opacity,visible:visual.visible,name:visual.displayName}]));
       const previous = group.children.slice();
       group.clear();
       meshesByMatId.clear();
@@ -393,6 +439,8 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
           side: THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(entry.geometry, material);
+        const display = preserveDisplay ? previousDisplay.get(entry.mesh.materialId) : undefined;
+        if (display) {mesh.visible = display.visible; material.opacity = display.opacity; material.transparent = display.opacity < 1;}
         mesh.name = entry.mesh.name;
         group.add(mesh);
         meshesByMatId.set(entry.mesh.materialId, mesh);
@@ -400,19 +448,21 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
       const materials: MaterialSummary[] = (result.meshes as LoadedMesh[]).map(entry => ({
         matId: entry.mesh.materialId,
         name: entry.mesh.name,
-        visible: true,
-        opacity: entry.material.opacity,
+        visible: meshesByMatId.get(entry.mesh.materialId)!.visible,
+        opacity: (meshesByMatId.get(entry.mesh.materialId)!.material as THREE.Material).opacity,
       }));
       if (!firstLoadDone && result.meshes.length > 0) {
         firstLoadDone = true;
         runtime.setStandardView('iso');
       }
       applyClippingToMaterials();
+      updateSections();
       scheduleRender();
       return {warnings: result.warnings, materials};
     },
     dispose() {
       disposed = true;
+      sectionGeneration++; sections.dispose();
       if (renderHandle !== 0) {
         cancelAnimationFrame(renderHandle);
         renderHandle = 0;
