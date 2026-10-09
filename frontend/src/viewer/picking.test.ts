@@ -1,4 +1,4 @@
-import {BufferGeometry, Float32BufferAttribute, Mesh, MeshStandardMaterial, PerspectiveCamera, Vector3, Plane} from 'three';
+import {BufferGeometry, Float32BufferAttribute, Mesh, MeshStandardMaterial, PerspectiveCamera, Vector3, Plane, Group} from 'three';
 import {describe, expect, it} from 'vitest';
 import {measureDistance, pickAtNormalizedCoords} from './picking';
 
@@ -20,6 +20,13 @@ function frontCamera(): PerspectiveCamera {
 }
 
 describe('pickAtNormalizedCoords', () => {
+  it('does not pick STL inside an invisible empty-volume group', () => {
+    const mesh = triangleMesh();
+    const group = new Group(); group.add(mesh); group.visible = false;
+    expect(pickAtNormalizedCoords([{mesh,matId:1,name:'STL'}],frontCamera(),0,0)).toBeNull();
+    group.visible = true;
+    expect(pickAtNormalizedCoords([{mesh,matId:1,name:'STL'}],frontCamera(),0,0)?.matId).toBe(1);
+  });
   it('ignores clipped intersections and transparent slice pixels before returning a real visible surface', () => {
     const clipped = triangleMesh();
     (clipped.material as MeshStandardMaterial).clippingPlanes = [new Plane(new Vector3(0,0,-1), -1)];

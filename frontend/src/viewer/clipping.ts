@@ -1,4 +1,4 @@
-import {Box3, Plane, Vector3} from 'three';
+import {Box3, Plane, Vector3, type Group, type Mesh, type Material} from 'three';
 
 export type ClipAxis = 'x' | 'y' | 'z';
 
@@ -43,15 +43,36 @@ function axisPlane(axis: ClipAxis, worldPosition: number): Plane {
  * 由裁剪状态与包围盒推导 three.js 裁剪平面。
  *
  * 空包围盒无从映射世界坐标，返回空数组（相当于不裁剪）。
- * 平面顺序固定为启用的 X、Y、Z。
+ * 空体积返回空数组并由 applyClipState 隐藏组；完全保留的轴不生成平面。
+ * 内部平面顺序固定为启用的 X、Y、Z。
  */
 export function deriveClipPlanes(state: ClipState, bounds: Box3): Plane[] {
-  if (bounds.isEmpty()) return [];
+  if (bounds.isEmpty() || isClipVolumeEmpty(state)) return [];
   const planes: Plane[] = [];
   for (const axis of ['x', 'y', 'z'] as const) {
     const axisState = state[axis];
-    if (!axisState.enabled) continue;
+    if (!axisState.enabled || axisState.position >= 1) continue;
     planes.push(axisPlane(axis, worldClipPosition(bounds, axis, axisState.position)));
+  }
+  return planes;
+}
+
+/** 任一启用轴位于 min 时，负侧没有保留体积；不以共面 plane 模拟空集。 */
+export function isClipVolumeEmpty(state: ClipState): boolean {
+  return (['x','y','z'] as const).some(axis => state[axis].enabled
+    && (!Number.isFinite(state[axis].position) || state[axis].position <= 0));
+}
+
+/** 整组控制空体积，同时保留各材料的用户可见性。 */
+export function applyClipState(group: Group, state: ClipState, bounds: Box3): Plane[] {
+  group.visible = !isClipVolumeEmpty(state);
+  const planes = deriveClipPlanes(state,bounds);
+  for (const child of group.children) {
+    const material = (child as Mesh).material as Material | null;
+    if (!material) continue;
+    const previous = material.clippingPlanes?.length ?? 0;
+    material.clippingPlanes = planes.length ? planes : null;
+    if (previous !== planes.length) material.needsUpdate = true;
   }
   return planes;
 }

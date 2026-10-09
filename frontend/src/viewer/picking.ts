@@ -31,7 +31,12 @@ export function pickAtNormalizedCoords(
   const hits = raycaster.intersectObjects(meshes, false);
   for (const hit of hits) {
     const candidate = candidates.find(item => item.mesh === hit.object);
-    if (!candidate || !candidate.mesh.visible) continue;
+    if (!candidate) continue;
+    let visible = true;
+    for (let object: import('three').Object3D | null = candidate.mesh; object; object = object.parent) {
+      if (!object.visible) {visible = false; break;}
+    }
+    if (!visible) continue;
     const material = candidate.mesh.material as Material;
     if (material.opacity <= 0 || material.clippingPlanes?.some(plane => plane.distanceToPoint(hit.point) < -1e-8)) continue;
     const resolved = candidate.resolveHit ? candidate.resolveHit(hit) : candidate;

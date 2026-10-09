@@ -3,7 +3,7 @@ import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 import {STLLoader} from 'three/examples/jsm/loaders/STLLoader.js';
 import type {TcadApi, ModelSummaryView} from '../api/types';
 import {createMaterialSections, type SectionColor} from './materialSections';
-import {clipStateAllOff, deriveClipPlanes, type ClipState} from './clipping';
+import {clipStateAllOff, applyClipState, type ClipState} from './clipping';
 import {calculateOrthographicFit, calculatePerspectiveFit} from './fitCamera';
 import {createMeshLoader, type LoadedMesh} from './meshLoader';
 import {pickAtNormalizedCoords, type PickCandidate, type PickHit} from './picking';
@@ -220,16 +220,8 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
 
   const applyClippingToMaterials = () => {
     if (renderer === null || group === null) return;
-    const planes = deriveClipPlanes(clipState, contentBounds());
+    const planes = applyClipState(group,clipState,contentBounds());
     renderer.localClippingEnabled = planes.length > 0;
-    for (const child of group.children) {
-      const mesh = child as THREE.Mesh;
-      const material = mesh.material as THREE.Material | null;
-      if (material === null) continue;
-      const previous = material.clippingPlanes?.length ?? 0;
-      material.clippingPlanes = planes.length > 0 ? planes : null;
-      if (previous !== planes.length) material.needsUpdate = true;
-    }
   };
 
   const runtime: ViewerRuntime = {

@@ -1,6 +1,6 @@
 import {Box3, Group, Mesh, MeshBasicMaterial, PlaneGeometry, DataTexture, RGBAFormat, UnsignedByteType, NearestFilter, DoubleSide, LinearSRGBColorSpace} from 'three';
 import type {ModelSummaryView, RgbColor, MaterialSliceView} from '../api/types';
-import {worldClipPosition, deriveClipPlanes, type ClipAxis, type ClipState} from './clipping';
+import {worldClipPosition, deriveClipPlanes, isClipVolumeEmpty, type ClipAxis, type ClipState} from './clipping';
 import type {PickCandidate} from './picking';
 
 export interface SectionColor {
@@ -87,7 +87,7 @@ export function createMaterialSections(
       clear();
       controller = new AbortController();
       const signal = controller.signal;
-      if (disposed || !input.model || input.bounds.isEmpty()) return [] as number[];
+      if (disposed || !input.model || input.bounds.isEmpty() || isClipVolumeEmpty(input.clip)) return [] as number[];
       const key = `${input.revision}:${input.model.gridShape.join(',')}:${input.model.voxelSizeNm}`;
       if (key !== cacheKey) {
         cache.clear();

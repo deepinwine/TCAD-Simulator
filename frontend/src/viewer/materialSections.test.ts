@@ -134,6 +134,22 @@ it.each(['x','y','z'] as const)('raycasts exact world texel centers with the STL
 const sectionInput = () => ({model:{gridShape:[2,2,2] as const,voxelSizeNm:100},revision:1,bounds:new Box3(new Vector3(),new Vector3(.1,.1,.1)),clip:{...clipStateAllOff(),z:{enabled:true,position:.5}},materials:new Map([[1,{color:[1,0,0] as const,visible:true,opacity:1}]])});
 const sliceResponse = (axis:'x'|'y'|'z'='z') => ({axis,index:0,indexMax:1,shape:[2,2] as const,data:new Uint16Array([1,0,0,1])});
 
+it.each(['x','y','z'] as const)('clears every cap when enabled %s retains zero volume', async axis => {
+  const fetcher = vi.fn(async request => ({...sliceResponse(request.axis),index:request.index}));
+  const verifyRevision = vi.fn(async () => true);
+  const group = new Group();
+  const manager = sections.createMaterialSections(group,fetcher,verifyRevision);
+  const input = {...sectionInput(),clip:{x:{enabled:true,position:.5},y:{enabled:true,position:.5},z:{enabled:true,position:.5}}};
+  await manager.update(input);
+  expect(group.children).toHaveLength(3);
+  await manager.update({...input,clip:{...input.clip,[axis]:{enabled:true,position:0}}});
+  expect(fetcher).toHaveBeenCalledTimes(3);
+  expect(verifyRevision).toHaveBeenCalledTimes(1);
+  expect(group.children).toHaveLength(0);
+  expect(manager.pickCandidates()).toHaveLength(0);
+  manager.dispose();
+});
+
 it('recolors cached material IDs without refetching and invalidates cache when mesh revision changes', async () => {
   const fetcher = vi.fn(async () => sliceResponse());
   const group = new Group();
