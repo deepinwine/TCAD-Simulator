@@ -232,6 +232,8 @@ def prepare_import(blob, material_db, *, grid_shape, voxel_size_nm, threads=1, r
             elif step.params.get("mask_mode") in ("Custom", "Designer", "Image") and step.custom_mask is None:
                 raise ValueError("Custom Mask Exposure requires a mask file or embedded mask")
         rebuilt.append(step)
+    from structure_cad.display_provenance import normalize_step_identities
+    normalize_step_identities(rebuilt)
     candidate = tcad.ProcessModel(material_db, grid_shape=tuple(effective["grid_shape"]),
                                   voxel_size_nm=effective["voxel_size_nm"], max_workers=count)
     try:

@@ -147,6 +147,8 @@ optional 数值的默认值与未设置参数保留 JSON `null`。旧响应缺�
 步骤来源加法字段：真实 Recipe step blob 的 `step_id` 是持久化 UUID；旧文件缺失或非法
 identity 时生成新值，同配方重复 identity 保留首个并为后续步骤生成新值。改参数、改类型、
 移动及历史恢复保留 identity，复制步骤生成新 identity；`factory_templates` 不携带 identity。
+规范化发生在候选发布与保存前，序列化读取不修复身份；已有 owner 的历史快照若 identity
+损坏或碰撞则在恢复前拒绝，避免改变 owner 的步骤绑定。
 正常 Structure 构建同时记录显示用 uint32 owner 数组（0 为未知）和 owner→step_id 映射，
 显式新增/替换区域归当前步骤，未变区域保留，删除区域清零。Pattern/Doping 不产生材料实体。
 材料 grid 仍是 canonical；旧 snapshot 来源未知，不回放补算。来源沿用 snapshot 压缩、

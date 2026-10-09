@@ -26824,12 +26824,10 @@ class SimulatorController:
         if not new_steps:
             self.view.append_log(f"{note}: no valid steps after deserialize.")
             return
-        if bool(append) and self.steps:
-            self.steps.extend(new_steps)
-        else:
-            self.steps = new_steps
+        candidate_steps = list(self.steps) + new_steps if bool(append) and self.steps else new_steps
         from structure_cad.display_provenance import normalize_step_identities
-        normalize_step_identities(self.steps)
+        normalize_step_identities(candidate_steps)
+        self.steps = candidate_steps
         self.view.refresh_step_list(self.steps)
         self.view.set_selected_step(0)
         self.view.append_log(f"{note}: applied {len(new_steps)} steps ({'append' if append else 'replace'}).")
@@ -37522,8 +37520,6 @@ def _webui_worker_main(
     step_runtime_errors: Dict[int, Dict[str, Any]] = {}
 
     def _serialize_recipe_for_client() -> List[Dict[str, Any]]:
-        from structure_cad.display_provenance import normalize_step_identities
-        normalize_step_identities(steps)
         nonlocal step_runtime_statuses
         step_runtime_statuses = _normalize_step_statuses(step_runtime_statuses, len(steps))
         result: List[Dict[str, Any]] = []
@@ -53895,6 +53891,8 @@ def _webui_worker_main(
                 new_steps2.append(st)
             if not new_steps2:
                 raise RuntimeError("No valid steps after applying patches.")
+            from structure_cad.display_provenance import normalize_step_identities
+            normalize_step_identities(new_steps2)
             steps[:] = new_steps2
             _invalidate_step_runtime_statuses(0)
             # Align meta length.
@@ -58230,6 +58228,8 @@ def _webui_worker_main(
             return False
         if not isinstance(blob, dict):
             return False
+        from structure_cad.display_provenance import normalize_step_identities, validate_source_bound_identities
+        validate_source_bound_identities(blob.get("steps_full") or blob.get("steps"), blob.get("model_state"))
         try:
             stored_id = blob.get("recipe_id")
             if isinstance(stored_id, str) and stored_id.strip():
@@ -58239,8 +58239,6 @@ def _webui_worker_main(
                 current_recipe_name = stored_name.strip()[:80]
 
             state = blob.get("model_state")
-            if isinstance(state, dict):
-                model.restore_state(state)
             stored_steps = blob.get("steps_full") or blob.get("steps")
             if isinstance(stored_steps, list) and stored_steps:
                 # History snapshots can contain legacy parameters; migrate in-memory before rebuilding.
@@ -58257,7 +58255,11 @@ def _webui_worker_main(
                     rebuilt_step = _webui_deserialize_step(step_blob, material_db)
                     if rebuilt_step is not None:
                         rebuilt.append(rebuilt_step)
+                normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
+                if isinstance(state, dict):
+                    model.restore_state(state)
                 if rebuilt:
+                    blob["steps_full"] = [_webui_serialize_step(step) for step in rebuilt]
                     steps = rebuilt
                     try:
                         for st in steps:
@@ -58272,6 +58274,8 @@ def _webui_worker_main(
                     except Exception:
                         pass
 
+            elif isinstance(state, dict):
+                model.restore_state(state)
             if not current_recipe_id:
                 current_recipe_id = secrets.token_hex(8)
                 blob["recipe_id"] = current_recipe_id
@@ -58303,6 +58307,7 @@ def _webui_worker_main(
                     autosave_path.unlink(missing_ok=True)  # type: ignore[arg-type]
                 except Exception:
                     pass
+            _webui_pickle_dump(paths["autosave"], blob)
             _write_history_index()
             _write_session_state()
             model_revision += 1
@@ -58365,13 +58370,13 @@ def _webui_worker_main(
 
         if not isinstance(blob, dict):
             return False
+        from structure_cad.display_provenance import normalize_step_identities, validate_source_bound_identities
+        validate_source_bound_identities(blob.get("steps_full") or blob.get("steps"), blob.get("model_state"))
         blob["recipe_id"] = str(entry.get("id", "")).strip()
         if not isinstance(blob.get("recipe_name"), str) or not str(blob.get("recipe_name")).strip():
             blob["recipe_name"] = entry.get("name", "Untitled")
         try:
             state = blob.get("model_state")
-            if isinstance(state, dict):
-                model.restore_state(state)
             stored_steps = blob.get("steps_full") or blob.get("steps")
             if isinstance(stored_steps, list) and stored_steps:
                 # History snapshots can contain legacy parameters; migrate in-memory before rebuilding.
@@ -58396,7 +58401,14 @@ def _webui_worker_main(
                     rebuilt_step = _webui_deserialize_step(step_blob, material_db)
                     if rebuilt_step is not None:
                         rebuilt.append(rebuilt_step)
+                normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
+                if isinstance(state, dict):
+                    model.restore_state(state)
                 if rebuilt:
+                    normalized_blobs = [_webui_serialize_step(step) for step in rebuilt]
+                    if blob.get("steps_full") != normalized_blobs:
+                        blob["steps_full"] = normalized_blobs
+                        _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
                     steps = rebuilt
                     try:
                         for st in steps:
@@ -58410,6 +58422,8 @@ def _webui_worker_main(
                                         pass
                     except Exception:
                         pass
+            elif isinstance(state, dict):
+                model.restore_state(state)
             current_recipe_id = str(entry.get("id", "")).strip()
             current_recipe_name = str(blob.get("recipe_name") or entry.get("name") or "Untitled").strip()[:80] or "Untitled"
             try:
@@ -58765,13 +58779,15 @@ def _webui_worker_main(
             "recipe_signature": _history_recipe_signature(),
         }
 
-    def _history_build_recipe(entry: Any) -> Optional[List[ProcessStep]]:
+    def _history_build_recipe(entry: Any, *, source_state: Optional[Dict[str, Any]] = None) -> Optional[List[ProcessStep]]:
         """Validate and rebuild a recipe before mutating the current history state."""
         if not isinstance(entry, dict) or "recipe" not in entry:
             return None
         raw_recipe = entry.get("recipe")
         if not isinstance(raw_recipe, list):
             raise ValueError("History recipe is missing or corrupt.")
+        from structure_cad.display_provenance import normalize_step_identities, validate_source_bound_identities
+        validate_source_bound_identities(raw_recipe, source_state)
         rebuilt: List[ProcessStep] = []
         for index, raw_step in enumerate(raw_recipe):
             if not isinstance(raw_step, dict):
@@ -58780,8 +58796,7 @@ def _webui_worker_main(
             if step is None:
                 raise ValueError(f"History recipe step {index} could not be restored.")
             rebuilt.append(step)
-        from structure_cad.display_provenance import normalize_step_identities
-        normalize_step_identities(rebuilt)
+        normalize_step_identities(rebuilt, preserve_ids=isinstance(source_state, dict) and source_state.get("display_owners") is not None)
         return rebuilt
 
     def _history_trim(stack: List[Any]) -> None:
@@ -58851,7 +58866,7 @@ def _webui_worker_main(
                 "log": model.history[-250:],
             }
         try:
-            target_recipe = _history_build_recipe(target_entry)
+            target_recipe = _history_build_recipe(target_entry, source_state=target_snapshot)
         except Exception as exc:
             return {result_key: False, "error": str(exc), "log": model.history[-250:]}
         try:
@@ -58859,7 +58874,7 @@ def _webui_worker_main(
         except Exception as exc:
             return {result_key: False, "error": f"Unable to snapshot current state: {exc}", "log": model.history[-250:]}
         try:
-            current_recipe = _history_build_recipe(current_entry)
+            current_recipe = _history_build_recipe(current_entry, source_state={"display_owners": model.display_provenance.owners})
         except Exception as exc:
             _history_entry_drop(current_entry)
             return {result_key: False, "error": f"Unable to snapshot current recipe: {exc}", "log": model.history[-250:]}
@@ -65033,6 +65048,8 @@ def _webui_worker_main(
                             except Exception as exc:
                                 warnings2.append(f"Variant inject: failed: {exc}")
 
+                        from structure_cad.display_provenance import normalize_step_identities
+                        normalize_step_identities(new_steps)
                         steps[:] = new_steps
                         _invalidate_step_runtime_statuses(0)
                         # Install step_meta for run-time logging.
@@ -67382,6 +67399,8 @@ def _webui_worker_main(
                                 new_steps2.append(st)
                             if not new_steps2:
                                 break
+                            from structure_cad.display_provenance import normalize_step_identities
+                            normalize_step_identities(new_steps2)
                             steps[:] = new_steps2
                             _invalidate_step_runtime_statuses(0)
                             a["step_meta"] = meta_new if isinstance(meta_new, list) else [None] * len(new_steps2)
@@ -67952,6 +67971,8 @@ def _webui_worker_main(
                                 warnings2.extend([str(w) for w in w_v if str(w).strip()])
                         except Exception as exc:
                             warnings2.append(f"Variant inject: failed: {exc}")
+                    from structure_cad.display_provenance import normalize_step_identities
+                    normalize_step_identities(new_steps2)
                     steps[:] = new_steps2
                     _invalidate_step_runtime_statuses(0)
                     meta2 = pending.get("step_meta")
@@ -68240,6 +68261,8 @@ def _webui_worker_main(
                     except Exception as exc:
                         warnings2.append(f"Variant inject: failed: {exc}")
 
+                from structure_cad.display_provenance import normalize_step_identities
+                normalize_step_identities(new_steps2)
                 steps[:] = new_steps2
                 _invalidate_step_runtime_statuses(0)
                 meta2 = pending.get("step_meta")
@@ -70740,6 +70763,7 @@ def _webui_worker_main(
                     params_s = dict(step.params)
                     blob_s = {
                         "name": step.name,
+                        "step_id": step.step_id,
                         "group": str(getattr(step, "group", "") or ""),
                         "loop": str(getattr(step, "loop", "") or ""),
                         "enabled": bool(step.enabled),
@@ -70854,6 +70878,8 @@ def _webui_worker_main(
                         st = _webui_deserialize_step(sb, material_db)
                         if st is not None:
                             rebuilt.append(st)
+                from structure_cad.display_provenance import normalize_step_identities
+                normalize_step_identities(rebuilt)
                 steps = rebuilt if rebuilt else _webui_default_recipe(material_db)
                 _reset_step_runtime_statuses()
                 # Ensure Mask Exposure mask_file paths are session-local/available for immediate preview/run.

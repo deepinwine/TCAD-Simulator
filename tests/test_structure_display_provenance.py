@@ -162,6 +162,14 @@ class DisplayProvenanceTests(unittest.TestCase):
         blob.pop('step_id')
         self.assertTrue(tcad._webui_deserialize_step(blob, self.db).step_id)
 
+    def test_source_bound_identity_collision_is_rejected_without_repair(self):
+        from structure_cad.display_provenance import normalize_step_identities
+        a = tcad.StructureDepositStep(self.db)
+        b = tcad._webui_deserialize_step(tcad._webui_serialize_step(a), self.db)
+        with self.assertRaisesRegex(ValueError, 'source-bound'):
+            normalize_step_identities([a, b], preserve_ids=True)
+        self.assertEqual(a.step_id, b.step_id)
+
 
 class DisplayStepIdentityRuntimeTests(unittest.TestCase):
     from tests.test_structure_editor_http import StructureEditorHTTPTests as _Harness
@@ -193,3 +201,128 @@ class DisplayStepIdentityRuntimeTests(unittest.TestCase):
         ids = [s['step_id'] for s in steps]
         self.request('POST', '/api/recipe/import', {'recipe': {'name': '来源身份', 'steps_full': steps}})
         self.assertEqual(ids, [s['step_id'] for s in self.request('GET', '/api/init')['result']['recipe']])
+
+    def test_colliding_import_saved_before_first_response_reloads_stable_ids(self):
+        step = tcad.StructureDepositStep(tcad.MaterialDatabase())
+        blob = tcad._webui_serialize_step(step)
+        imported = self.request('POST', '/api/recipe/import', {'recipe': {'name': '重复身份落盘', 'steps_full': [blob, blob]}})['result']
+        identities = [s['step_id'] for s in imported['recipe']]
+        recipe_id = imported['current_recipe']['id']
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(entry for entry in imported['recipes'] if entry['id'] == recipe_id)
+        stored = tcad._webui_pickle_load(session.storage_dir / 'history' / entry['file'])
+        self.assertEqual(identities, [s['step_id'] for s in stored['steps_full']])
+        self.request('POST', '/api/recipe/new', {'name': '切换配方'})
+        loaded = self.request('POST', '/api/recipe/load', {'id': recipe_id})['result']
+        self.assertEqual(identities, [s['step_id'] for s in loaded['recipe']])
+
+    def test_library_colliding_import_persists_normalized_ids_before_response(self):
+        self.request('GET', '/api/init')
+        session = next(iter(self.manager.sessions.values()))
+        profile = session.rpc('profile_set', {'department': '来源测试', 'name': '测试', 'employee_id': '001'})
+        self.assertTrue(profile['ok'], profile)
+        step = tcad.StructureDepositStep(tcad.MaterialDatabase())
+        blob = tcad._webui_serialize_step(step)
+        item = tcad._library_store_blob(Path(self.directory.name), session_id=session.session_id,
+                                       dept='来源测试', kind='recipes', title='重复来源', cat1='测试', cat2='',
+                                       blob={'name': '重复来源', 'steps_full': [blob, blob]})
+        imported = self.request('POST', '/api/library/recipes/import', {'id': item['id']})['result']
+        identities = [s['step_id'] for s in imported['recipe']]
+        self.assertEqual(len(set(identities)), 2)
+        init = self.request('GET', '/api/init')['result']
+        recipe_id = init['current_recipe']['id']
+        entry = next(entry for entry in init['recipes'] if entry['id'] == recipe_id)
+        stored = tcad._webui_pickle_load(session.storage_dir / 'history' / entry['file'])
+        self.assertEqual(identities, [s['step_id'] for s in stored['steps_full']])
+        self.request('POST', '/api/recipe/new', {'name': '再次切换'})
+        loaded = self.request('POST', '/api/recipe/load', {'id': recipe_id})['result']
+        self.assertEqual(identities, [s['step_id'] for s in loaded['recipe']])
+
+    def test_source_bound_corrupt_saved_ids_fail_before_model_or_recipe_restore(self):
+        self.request('POST', '/api/recipe/import', {'recipe': {'name': '有来源', 'steps_full': [
+            {'name': 'Structure Wafer', 'params': {'thickness_nm': 20}},
+            {'name': 'Structure Deposit', 'params': {'thickness_nm': 10}},
+        ]}})
+        self.request('POST', '/api/run/all', {})
+        saved = self.request('POST', '/api/recipe/save', {'name': '有来源'})['result']
+        recipe_id = saved['id']
+        self.request('POST', '/api/recipe/new', {'name': '当前配方'})
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(entry for entry in saved['recipes'] if entry['id'] == recipe_id)
+        main_path = session.storage_dir / 'history' / entry['file']
+        snapshot = tcad._webui_pickle_load(main_path)
+        self.assertIsNotNone(snapshot['model_state']['display_owners'])
+        snapshot['steps_full'][1]['step_id'] = snapshot['steps_full'][0]['step_id']
+        tcad._webui_pickle_dump(main_path, snapshot)
+        # Load chooses the latest autosave; inject the same corrupt fixture there.
+        for path in (session.storage_dir / 'history').glob('*autosave*'):
+            blob = tcad._webui_pickle_load(path)
+            if blob.get('recipe_id') == recipe_id:
+                tcad._webui_pickle_dump(path, snapshot)
+        before = self.request('GET', '/api/init')['result']
+        timeline = self.request('POST', '/api/timeline/get', {})['result']
+        rejected = self.request('POST', '/api/recipe/load', {'id': recipe_id}, ok=False)
+        self.assertIn('source-bound', rejected['error'])
+        after = self.request('GET', '/api/init')['result']
+        self.assertEqual(before['recipe'], after['recipe'])
+        self.assertEqual(before['model'], after['model'])
+        self.assertEqual(before['current_recipe'], after['current_recipe'])
+        self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+
+    def test_old_unknown_source_load_repairs_and_persists_colliding_ids(self):
+        blob = tcad._webui_serialize_step(tcad.StructureDepositStep(tcad.MaterialDatabase()))
+        imported = self.request('POST', '/api/recipe/import', {'recipe': {'name': '旧未知来源', 'steps_full': [blob, blob]}})['result']
+        recipe_id = imported['current_recipe']['id']
+        self.request('POST', '/api/recipe/new', {'name': '当前'})
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(entry for entry in imported['recipes'] if entry['id'] == recipe_id)
+        main_path = session.storage_dir / 'history' / entry['file']
+        old = tcad._webui_pickle_load(main_path)
+        old['steps_full'][1]['step_id'] = old['steps_full'][0]['step_id']
+        old['model_state'].pop('display_owners', None)
+        old['model_state'].pop('display_step_ids', None)
+        tcad._webui_pickle_dump(main_path, old)
+        targets = [main_path]
+        for path in (session.storage_dir / 'history').glob('*autosave*'):
+            if tcad._webui_pickle_load(path).get('recipe_id') == recipe_id:
+                tcad._webui_pickle_dump(path, old)
+                targets.append(path)
+        loaded = self.request('POST', '/api/recipe/load', {'id': recipe_id})['result']
+        identities = [s['step_id'] for s in loaded['recipe']]
+        self.assertEqual(identities[0], blob['step_id'])
+        self.assertEqual(len(set(identities)), 2)
+        # The selected file is rewritten on this explicit load, not on /api/init.
+        self.assertTrue(any([s['step_id'] for s in tcad._webui_pickle_load(path)['steps_full']] == identities for path in targets))
+        self.request('GET', '/api/init')
+        self.request('POST', '/api/recipe/new', {'name': '切换'})
+        reloaded = self.request('POST', '/api/recipe/load', {'id': recipe_id})['result']
+        self.assertEqual(identities, [s['step_id'] for s in reloaded['recipe']])
+
+    def test_library_upload_import_preserves_valid_step_identity(self):
+        steps = self.request('POST', '/api/recipe/add', {'name': 'Structure Deposit'})['result']
+        identities = [step['step_id'] for step in steps]
+        session = next(iter(self.manager.sessions.values()))
+        self.assertTrue(session.rpc('profile_set', {'department': '来源测试', 'name': '测试', 'employee_id': '001'})['ok'])
+        uploaded = self.request('POST', '/api/library/recipes/upload', {'title': '合法来源', 'department': '来源测试'})['result']
+        loaded = self.request('POST', '/api/library/recipes/import', {'id': uploaded['item']['id']})['result']
+        self.assertEqual(identities, [step['step_id'] for step in loaded['recipe']])
+
+    def test_legacy_last_active_autosave_repairs_are_persisted_for_next_restore(self):
+        blob = tcad._webui_serialize_step(tcad.StructureDepositStep(tcad.MaterialDatabase()))
+        imported = self.request('POST', '/api/recipe/import', {'recipe': {'name': '旧自动保存', 'steps_full': [blob, blob]}})['result']
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(entry for entry in imported['recipes'] if entry['id'] == imported['current_recipe']['id'])
+        old = tcad._webui_pickle_load(session.storage_dir / 'history' / entry['file'])
+        old['steps_full'][1]['step_id'] = old['steps_full'][0]['step_id']
+        old['model_state'].pop('display_owners', None)
+        old['model_state'].pop('display_step_ids', None)
+        pointer = session.storage_dir / 'autosave.pkl.gz'
+        tcad._webui_pickle_dump(pointer, old)
+        first = self.request('POST', '/api/load_autosave', {})['result']
+        self.assertTrue(first['loaded'])
+        identities = [step['step_id'] for step in self.request('GET', '/api/init')['result']['recipe']]
+        self.assertEqual(len(set(identities)), 2)
+        self.assertEqual(identities, [step['step_id'] for step in tcad._webui_pickle_load(pointer)['steps_full']])
+        second = self.request('POST', '/api/load_autosave', {})['result']
+        self.assertTrue(second['loaded'])
+        self.assertEqual(identities, [step['step_id'] for step in self.request('GET', '/api/init')['result']['recipe']])

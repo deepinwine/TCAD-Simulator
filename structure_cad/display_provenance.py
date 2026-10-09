@@ -15,14 +15,31 @@ def normalize_step_id(value=None):
         return str(uuid.uuid4())
 
 
-def normalize_step_identities(steps):
+def normalize_step_identities(steps, *, preserve_ids=False):
     """Keep the first valid identity; regenerate invalid or colliding later IDs."""
     seen = set()
+    prepared = []
     for step in steps:
         identity = normalize_step_id(getattr(step, 'step_id', None))
         if identity in seen:
             identity = normalize_step_id()
+        if preserve_ids and identity != getattr(step, 'step_id', None):
+            raise ValueError('Invalid source-bound step identity collision')
+        prepared.append((step, identity))
+        seen.add(identity)
+    for step, identity in prepared:
         step.step_id = identity
+
+
+def validate_source_bound_identities(blobs, state):
+    """Reject identity repairs before a source-bearing snapshot mutates a session."""
+    if not isinstance(state, dict) or state.get('display_owners') is None:
+        return
+    seen = set()
+    for blob in blobs or []:
+        identity = blob.get('step_id') if isinstance(blob, dict) else None
+        if normalize_step_id(identity) != identity or identity in seen:
+            raise ValueError('Invalid source-bound step identity collision')
         seen.add(identity)
 
 
