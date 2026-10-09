@@ -3,6 +3,12 @@ import * as schemas from './schemas';
 
 const payload = (patch = {}) => ({ok: true, result: {axis: 'X', index: 1, index_max: 3, shape: [2, 2], dtype: 'u16', data_b64: 'AAABAP//AAE=', ...patch}});
 describe('material slice contract', () => {
+  it.each(['X', 'Y', 'Z'])('normalizes valid string axis %s', axis => {
+    expect(schemas.parseMaterialSliceEnvelope(payload({axis})).axis).toBe(axis.toLowerCase());
+  });
+  it.each([['X'], ['Y'], ['Z'], [], {}, null, 0, true, undefined].map(axis => ({axis})))('rejects non-string axis %j', ({axis}) => {
+    expect(() => schemas.parseMaterialSliceEnvelope(payload({axis}))).toThrow(/result.axis/);
+  });
   it('decodes row-major little-endian uint16 without losing high material IDs', () => {
     expect(schemas).toHaveProperty('parseMaterialSliceEnvelope');
     const slice = schemas.parseMaterialSliceEnvelope(payload());

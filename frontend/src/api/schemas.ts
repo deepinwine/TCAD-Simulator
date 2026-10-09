@@ -29,7 +29,8 @@ import type {
 
 export function parseMaterialSliceEnvelope(payload: unknown): MaterialSliceView {
   const source = requireOkResult(payload);
-  if (!['X', 'Y', 'Z'].includes(String(source.axis))) throw new ApiContractError('result.axis', 'X, Y, Z');
+  const axis = requireString(source.axis, 'result.axis');
+  if (!['X', 'Y', 'Z'].includes(axis)) throw new ApiContractError('result.axis', 'X, Y, Z');
   if (source.dtype !== 'u16') throw new ApiContractError('result.dtype', 'u16');
   const indexMax = requireInteger(source.index_max, 'result.index_max', 0);
   const index = requireInteger(source.index, 'result.index', 0);
@@ -50,7 +51,7 @@ export function parseMaterialSliceEnvelope(payload: unknown): MaterialSliceView 
   if (bytes.length !== count * 2) throw new ApiContractError('result.data_b64', 'shape-sized uint16 data');
   const data = new Uint16Array(count);
   for (let i = 0; i < count; i++) data[i] = bytes.charCodeAt(i * 2) | (bytes.charCodeAt(i * 2 + 1) << 8);
-  return {axis: String(source.axis).toLowerCase() as MaterialSliceView['axis'], index, indexMax, shape: [rows, cols], data};
+  return {axis: axis.toLowerCase() as MaterialSliceView['axis'], index, indexMax, shape: [rows, cols], data};
 }
 import {canonicalUnits, toCanonical, type Dimension, type DisplayUnit} from '../units/units';
 
