@@ -43,8 +43,18 @@ export function parseMaterialSliceEnvelope(payload: unknown): MaterialSliceView 
   const count = rows * cols;
   if (!Number.isSafeInteger(count) || count > 16_777_216 || rows > 4096 || cols > 4096) throw new ApiContractError('result.shape', 'at most 4096 per dimension and 16777216 pixels');
   const encoded = requireString(source.data_b64, 'result.data_b64');
-  if (encoded.length !== Math.ceil(count * 2 / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+  const padding = (3 - (count * 2) % 3) % 3;
+  if (encoded.length !== Math.ceil(count * 2 / 3) * 4) {
     throw new ApiContractError('result.data_b64', 'exact-length base64 uint16 data');
+  }
+  // Scan once: repeated regex groups can exhaust V8's stack on valid large slices.
+  const contentLength = encoded.length - padding;
+  for (let i = 0; i < encoded.length; i++) {
+    const code = encoded.charCodeAt(i);
+    const valid = i >= contentLength ? code === 61
+      : (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+        || (code >= 48 && code <= 57) || code === 43 || code === 47;
+    if (!valid) throw new ApiContractError('result.data_b64', 'exact-length base64 uint16 data');
   }
   const bytes = atob(encoded);
   if (btoa(bytes) !== encoded) throw new ApiContractError('result.data_b64', 'canonical base64');

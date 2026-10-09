@@ -1,8 +1,25 @@
 import {describe, expect, it} from 'vitest';
+import {Buffer} from 'node:buffer';
 import * as schemas from './schemas';
 
 const payload = (patch = {}) => ({ok: true, result: {axis: 'X', index: 1, index_max: 3, shape: [2, 2], dtype: 'u16', data_b64: 'AAABAP//AAE=', ...patch}});
 describe('material slice contract', () => {
+  it.each([0, 65535])('decodes a budget-sized rectangular slice with material ID %i', materialId => {
+    const bytes = Buffer.alloc(1024 * 2048 * 2, materialId === 0 ? 0 : 255);
+    const slice = schemas.parseMaterialSliceEnvelope(payload({shape: [1024, 2048], data_b64: bytes.toString('base64')}));
+    expect(slice.shape).toEqual([1024, 2048]);
+    expect(slice.data.length).toBe(1024 * 2048);
+    expect(slice.data.every(value => value === materialId)).toBe(true);
+  });
+  it.each(['illegal character', 'interior padding', 'missing padding', 'noncanonical tail', 'truncated'])('rejects a large slice with %s as a contract error', corruption => {
+    const encoded = Buffer.alloc(1024 * 2048 * 2).toString('base64');
+    const data_b64 = corruption === 'illegal character' ? encoded.slice(0, -3) + '!=='
+      : corruption === 'interior padding' ? encoded.slice(0, -8) + '=' + encoded.slice(-7)
+      : corruption === 'missing padding' ? encoded.slice(0, -2) + 'AA'
+      : corruption === 'noncanonical tail' ? encoded.slice(0, -3) + 'B=='
+      : encoded.slice(0, -4);
+    expect(() => schemas.parseMaterialSliceEnvelope(payload({shape: [1024, 2048], data_b64}))).toThrow(schemas.ApiContractError);
+  });
   it.each(['X', 'Y', 'Z'])('normalizes valid string axis %s', axis => {
     expect(schemas.parseMaterialSliceEnvelope(payload({axis})).axis).toBe(axis.toLowerCase());
   });
