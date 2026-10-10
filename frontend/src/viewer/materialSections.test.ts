@@ -4,6 +4,18 @@ import {Box3, Group, Vector3, Vector2, PerspectiveCamera} from 'three';
 import {clipStateAllOff} from './clipping';
 import {pickAtNormalizedCoords} from './picking';
 
+it('eye changes while a paired slice is pending reuse the request and apply latest visibility',async()=>{
+  let finish!: (value:import('../api/types').DisplaySliceView)=>void;
+  const pending=new Promise<import('../api/types').DisplaySliceView>(resolve=>{finish=resolve;});
+  const fetcher=vi.fn(()=>pending);const manager=sections.createMaterialSections(new Group(),fetcher);
+  const input={model:{gridShape:[1,1,2] as const,voxelSizeNm:100},revision:4,bounds:new Box3(new Vector3(-.05,-.05,-.05),new Vector3(.05,.05,.15)),clip:{...clipStateAllOff(),z:{enabled:true,position:.5}},materials:new Map([[2,{color:[1,0,0] as const,visible:true,opacity:1}]]),sourceMode:true,ownerStepIds:{'1':'a'},hiddenStepIds:new Set<string>()};
+  const initial=manager.update(input);
+  const local=manager.update({...input,hiddenStepIds:new Set(['a']),localOnly:true});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  finish({revision:4,axis:'z',index:0,indexMax:1,shape:[1,1],data:new Uint16Array([2]),owners:new Uint32Array([1])});await Promise.all([initial,local]);
+  expect(manager.pickCandidates()[0].resolveHit!({uv:new Vector2(.5,.5)} as import('three').Intersection)).toBeNull();manager.dispose();
+});
+
 it('source filtering recolors cached paired slices locally and excludes hidden source hits', async () => {
   const group = new Group();
   const fetcher = vi.fn(async request => ({axis:request.axis,index:request.index,indexMax:1,shape:[1,3] as const,data:new Uint16Array([2,2,2]),owners:new Uint32Array([1,2,0]),revision:4}));

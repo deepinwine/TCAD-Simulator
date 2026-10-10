@@ -103,11 +103,11 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
   let meshesLoading = false;
   let sectionMaterials = new Map<number, SectionColor>();
 
-  const updateSections = () => {
-    const generation = ++sectionGeneration;
+  const updateSections = (localOnly = false) => {
+    const generation = localOnly ? sectionGeneration : ++sectionGeneration;
     const materials = new Map(sectionMaterials);
     const bounds = group && group.children.length ? new THREE.Box3().setFromObject(group) : new THREE.Box3();
-    void sections.update({model: meshesLoading ? null : modelSummary, revision:meshRevision,bounds,clip:clipState,materials,sourceMode:!!displayManifest?.available,ownerStepIds:displayManifest?.ownerStepIds,hiddenStepIds}).then(ids => {
+    void sections.update({model: meshesLoading ? null : modelSummary, revision:meshRevision,bounds,clip:clipState,materials,sourceMode:!!displayManifest?.available,ownerStepIds:displayManifest?.ownerStepIds,hiddenStepIds,localOnly}).then(ids => {
       if (generation !== sectionGeneration || disposed) return;
       sectionError(ids.length ? new Error(`Unknown slice materials: ${ids.join(', ')}`) : null);
       scheduleRender();
@@ -243,7 +243,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         mesh.visible = (sectionMaterials.get(mesh.userData.matId)?.visible ?? true) && sourceVisible(mesh.userData.ownerId,mesh.userData.stepId,hiddenStepIds);
       }
       if (selectedMesh && !selectedMesh.visible) {(selectedMesh.material as THREE.MeshStandardMaterial).emissive.setHex(0); selectedMesh = null;}
-      updateSections(); scheduleRender();
+      updateSections(true); scheduleRender();
     },
     setSectionContext(model, onError) {
       modelSummary = model; sectionError = onError; updateSections();
@@ -360,7 +360,7 @@ export function createThreeViewerRuntime(api: TcadApi): ViewerRuntime {
         material.needsUpdate = true;
       }
       }
-      updateSections();
+      updateSections(true);
       scheduleRender();
     },
     pickAt(ndcX: number, ndcY: number): PickHit | null {

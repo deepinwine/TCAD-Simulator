@@ -53,6 +53,7 @@ export function sectionPixels(data: Uint16Array, materials: ReadonlyMap<number, 
 }
 
 export interface SectionInput {
+  localOnly?: boolean;
   ownerStepIds?: Readonly<Record<string,string>>;
   hiddenStepIds?: ReadonlySet<string>;
   sourceMode?: boolean;
@@ -74,6 +75,8 @@ export function createMaterialSections(
   let disposed = false;
   let candidates: PickCandidate[] = [];
   let cacheKey = '';
+  let pendingGeneration: number | null = null;
+  let latestStyle: SectionInput | null = null;
   const cache = new Map<ClipAxis, MaterialSliceView & {owners?: Uint32Array; revision?: number}>();
   const clear = () => {
     candidates = [];
@@ -87,7 +90,15 @@ export function createMaterialSections(
   };
   return {
     async update(input: SectionInput) {
+      // Eye/material changes share an in-flight slice instead of restarting IO.
+      // The request's generation still owns publication; only its colors change.
+      if (input.localOnly && pendingGeneration !== null && latestStyle?.revision === input.revision) {
+        latestStyle = input;
+        clear();
+        return [] as number[];
+      }
       const current = ++generation;
+      latestStyle = input;
       controller?.abort();
       clear();
       controller = new AbortController();
@@ -105,6 +116,7 @@ export function createMaterialSections(
         .map(axis => sectionPlacement(input.model!, input.bounds, axis, input.clip[axis].position))
         .filter(p => p.inside);
       try {
+        pendingGeneration = current;
         if (placements.some(p => p.shape.some(n => n > Math.min(4096, textureLimit()))
           || p.shape[0] * p.shape[1] > 16_777_216)) {
           throw new Error('Slice exceeds renderer texture budget');
@@ -122,6 +134,7 @@ export function createMaterialSections(
         }
         if (disposed || current !== generation || signal.aborted) return [];
         const unknown = new Set<number>();
+        const style = latestStyle?.revision === input.revision ? latestStyle : input;
         slices.forEach((slice, i) => {
           const p = placements[i];
           if (slice.axis !== p.axis || slice.index !== p.index || slice.indexMax !== p.indexMax
@@ -134,7 +147,7 @@ export function createMaterialSections(
         });
         slices.forEach((slice, i) => {
           const p = placements[i];
-          const pixels = sectionPixels(slice.data, input.materials, slice.owners, input.ownerStepIds, input.hiddenStepIds);
+          const pixels = sectionPixels(slice.data, style.materials, slice.owners, style.ownerStepIds, style.hiddenStepIds);
           pixels.unknownIds.forEach(id => unknown.add(id));
           const texture = new DataTexture(pixels.rgba, p.shape[1], p.shape[0], RGBAFormat, UnsignedByteType);
           texture.minFilter = texture.magFilter = NearestFilter;
@@ -160,7 +173,7 @@ export function createMaterialSections(
             const pixel = row * p.shape[1] + col;
             if (pixels.rgba[pixel * 4 + 3] < 1) return null;
             const matId = slice.data[pixel];
-            return {matId, name: input.materials.get(matId)?.name ?? String(matId), ...(slice.owners ? {ownerId:slice.owners[pixel],stepId:input.ownerStepIds?.[String(slice.owners[pixel])] ?? null} : {})};
+            return {matId, name: style.materials.get(matId)?.name ?? String(matId), ...(slice.owners ? {ownerId:slice.owners[pixel],stepId:style.ownerStepIds?.[String(slice.owners[pixel])] ?? null} : {})};
           }});
         });
         group.updateMatrixWorld(true);
@@ -171,6 +184,8 @@ export function createMaterialSections(
         cache.clear();
         clear();
         throw error;
+      } finally {
+        if (pendingGeneration === current) pendingGeneration = null;
       }
     },
     pickCandidates() {return candidates;},
