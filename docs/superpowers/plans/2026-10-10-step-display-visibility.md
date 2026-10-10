@@ -12,11 +12,15 @@
 文件：`structure_cad/display_provenance.py`、`structure_cad/operations.py`、
 `recipe_planner/schema.py`、`tcad_simulator.py`、`tests/test_structure_display_provenance.py`。
 
-- [ ] 审查 `6ca6896..4bd2f3f`：显式新增区域、同材步骤、减材清理、旧来源未知、
+- [x] 审查 `6ca6896..788c531`：显式新增区域、同材步骤、减材清理、旧来源未知、
   snapshot/spill/rollback、保存加载稳定 UUID、展示序列化不修改 identity。
-- [ ] 运行 `TCAD_SKIP_QT=1 MPLBACKEND=Agg /opt/anaconda3/bin/python3 -m unittest
+- [x] 运行 `TCAD_SKIP_QT=1 MPLBACKEND=Agg /opt/anaconda3/bin/python3 -m unittest
   tests.test_structure_display_provenance tests.test_structure_cad`，预期全部通过。
-- [ ] 规格与质量审查无 BLOCK 后进入任务 2；不能用前端 material ID 隐藏代替来源。
+- [x] 规格与质量审查无 BLOCK 后进入任务 2；不能用前端 material ID 隐藏代替来源。
+
+任务 1 验证记录：质量审查独立运行 53 项来源与结构测试通过（14.981 秒）；
+实现回归运行 252 项测试通过（99.221 秒）。损坏来源加载的模型与会话发布顺序、
+实际恢复步骤绑定和解压前预算检查已修复并复审通过。尚未合并或更新正式服务。
 
 ## 任务 2：只读步骤显示数据
 
