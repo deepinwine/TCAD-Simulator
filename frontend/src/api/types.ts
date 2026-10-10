@@ -24,6 +24,7 @@ export interface ParameterSpecView {
 }
 
 export interface StepView {
+  stepId?: string;
   index: number;
   name: string;
   instanceName: string;
@@ -249,6 +250,9 @@ export interface MaskAssetApplyView {
 }
 
 export interface TcadApi {
+  getDisplayManifest?(signal?: AbortSignal): Promise<DisplayManifestView>;
+  getDisplayMesh?(request: DisplayMeshRequest, signal?: AbortSignal): Promise<ArrayBuffer>;
+  getDisplaySlice?(request: DisplaySliceRequest, signal?: AbortSignal): Promise<DisplaySliceView>;
   getMaterialSlice?(request: {axis: 'x' | 'y' | 'z'; index: number}, signal?: AbortSignal): Promise<MaterialSliceView>;
   init(signal?: AbortSignal): Promise<InitView>;
   setStep(request: SetStepRequest, signal?: AbortSignal): Promise<SetStepView>;
@@ -305,3 +309,19 @@ export interface MaterialSliceView {
   shape: readonly [number, number];
   data: Uint16Array;
 }
+
+export interface DisplayMeshRequest {revision: number; ownerId: number; materialId: number}
+export interface DisplaySliceRequest {revision: number; axis: 'x' | 'y' | 'z'; index: number}
+export interface DisplayGroupView {
+  ownerId: number; materialId: number; stepId: string | null;
+  voxelCount: number; triangleCount: number; bytes: number; boundingBox: BoundingBoxView;
+}
+export interface DisplayStepEntityView {
+  stepId: string; ownerId: number | null; voxelCount: number; hideable: boolean; unavailableReason: string | null;
+}
+export interface DisplayManifestView {
+  revision: number; available: boolean; bounds: BoundingBoxView;
+  ownerStepIds: Record<string, string>; groups: DisplayGroupView[];
+  stepEntities: DisplayStepEntityView[]; unavailableReasons: string[];
+}
+export interface DisplaySliceView extends MaterialSliceView {revision: number; owners: Uint32Array}

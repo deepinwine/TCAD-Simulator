@@ -1,6 +1,19 @@
 export type Locale = 'zh-CN' | 'en';
 
 export const zhCN = {
+  'display.hide': '隐藏步骤实体：{name}',
+  'display.show': '显示步骤实体：{name}',
+  'display.local': '仅改变当前视图，不改变工艺配方',
+  'display.reason.loading': '步骤来源网格准备中',
+  'display.reason.unavailable': '步骤来源显示不可用，保留正式结构视图',
+  'display.reason.unknown': '实体来源未知，无法按步骤隐藏',
+  'display.reason.empty': '此步骤没有剩余材料实体',
+  'display.reason.operation': '此工艺不提供独立可隐藏的材料实体',
+  'display.error': '步骤来源显示不可用',
+  'display.fallback': '已保留正式结构视图。可重试加载步骤来源。',
+  'display.budget': '步骤来源网格超过显示预算，无法按步骤隐藏。',
+  'display.unknown': '实体来源未知，保留完整结构；无法按步骤隐藏。',
+  'display.failed': '步骤来源数据加载失败，眼睛已禁用。',
   'project.initialization': '项目初始化',
   'project.openGuidance': '请使用顶部「项目设置」编辑晶圆初始化和网格。',
   'validation.positive': '请输入大于 0 的值。',
@@ -358,6 +371,19 @@ export const zhCN = {
 export type TranslationKey = keyof typeof zhCN;
 
 export const en: Record<TranslationKey, string> = {
+  'display.hide': 'Hide step entities: {name}',
+  'display.show': 'Show step entities: {name}',
+  'display.local': 'Changes only this view, preserving the process recipe',
+  'display.reason.loading': 'Preparing step source meshes',
+  'display.reason.unavailable': 'Step source display unavailable; formal structure retained',
+  'display.reason.unknown': 'Entity source unknown; cannot hide by step',
+  'display.reason.empty': 'No remaining material entities for this step',
+  'display.reason.operation': 'This process has no independently hideable material entity',
+  'display.error': 'Step source display unavailable',
+  'display.fallback': 'The formal structure view is retained. Retry to reload step sources.',
+  'display.budget': 'Step source meshes exceed the display budget; hiding by step is unavailable.',
+  'display.unknown': 'Entity sources are unknown. The complete structure is retained; hiding by step is unavailable.',
+  'display.failed': 'Step source data failed to load. Eye controls are disabled.',
   'project.initialization': 'Project initialization',
   'project.openGuidance': 'Use Project settings in the toolbar to edit the wafer initializer and grid.',
   'validation.positive': 'Enter a value greater than 0.',

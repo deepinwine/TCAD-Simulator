@@ -10,6 +10,20 @@ import type {
 } from '../api/types';
 import {appReducer, hasUnsavedDrafts, initialAppState} from './appReducer';
 
+it('local source visibility uses stable IDs without changing selection, enabled, or refresh generation', () => {
+  const recipe = [step(1, {name: 'Structure Deposit', stepId:'s1'})];
+  const state = {...initialAppState, recipe, selectedStepIndex:1, displayReady:true, displayManifest:{revision:1,available:true,bounds:{min:[0,0,0],max:[1,1,1]},ownerStepIds:{'1':'s1'},groups:[{ownerId:1,materialId:1,stepId:'s1',voxelCount:1,triangleCount:12,bytes:8,boundingBox:{min:[0,0,0],max:[1,1,1]}}],stepEntities:[{stepId:'s1',ownerId:1,voxelCount:1,hideable:true,unavailableReason:null}],unavailableReasons:[]}};
+  const next = appReducer(state as never, {type:'display/toggled', stepId:'s1'});
+  expect(next.hiddenStepIds).toEqual(['s1']);
+  expect(next.recipe).toBe(recipe); expect(next.selectedStepIndex).toBe(1); expect(next.previewGeneration).toBe(0);
+  expect(appReducer(next,{type:'recipe/stepsReplaced',recipe:[{...recipe[0],index:5}]}).hiddenStepIds).toEqual(['s1']);
+  expect(appReducer(next,{type:'recipe/stepsReplaced',recipe:[]}).hiddenStepIds).toEqual([]);
+  const loaded = appReducer(next, {type:'recipe/replaced', recipe});
+  expect(loaded.hiddenStepIds).toEqual([]);
+  expect(appReducer(next,{type:'display/loaded',manifest:{...next.displayManifest!,available:false},ready:false}).hiddenStepIds).toEqual([]);
+  expect(appReducer(next,{type:'step/typeReplaced',payload:{step:{...recipe[0],name:'Structure Etch'},statuses:['done'],warnings:[]}}).hiddenStepIds).toEqual([]);
+});
+
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
     index,

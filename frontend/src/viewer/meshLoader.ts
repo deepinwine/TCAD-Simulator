@@ -1,5 +1,6 @@
 import type {BufferGeometry} from 'three';
 import type {
+  DisplayManifestView, DisplayMeshRequest,
   PreviewManifestRequest,
   PreviewManifestView,
   PreviewMeshView,
@@ -16,12 +17,16 @@ export interface MaterialConfig {
 }
 
 export interface LoadedMesh {
+  ownerId?: number;
+  stepId?: string | null;
   mesh: PreviewMeshView;
   geometry: BufferGeometry;
   material: MaterialConfig;
 }
 
 export interface MeshLoadResult {
+  display?: DisplayManifestView;
+  displayError?: string;
   visuals: MaterialVisualView[];
   revision: number;
   meshes: LoadedMesh[];
@@ -31,6 +36,9 @@ export interface MeshLoadResult {
 }
 
 export interface MeshLoaderDependencies {
+  fetchDisplayManifest?(signal: AbortSignal): Promise<DisplayManifestView>;
+  fetchDisplayMesh?(request: DisplayMeshRequest, signal: AbortSignal): Promise<ArrayBuffer>;
+  parseDisplayMesh?(bytes: ArrayBuffer): BufferGeometry;
   fetchManifest(
     request: PreviewManifestRequest,
     signal: AbortSignal,
@@ -81,6 +89,8 @@ async function mapWithConcurrency<TIn, TOut>(
 }
 
 interface CacheEntry {
+  display?: DisplayManifestView;
+  displayError?: string;
   visuals: MaterialVisualView[];
   revision: number;
   meshes: LoadedMesh[];
@@ -101,6 +111,15 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
   const abortActive = () => {
     for (const controller of activeControllers) controller.abort();
     activeControllers = new Set();
+  };
+  const retireCache = (previous: CacheEntry | null, next: LoadedMesh[]) => {
+    const retained = new Set(next.map(entry => entry.geometry));
+    const retired = new Set(previous?.meshes.map(entry => entry.geometry));
+    for (const geometry of retired) {
+      if (retained.has(geometry)) continue;
+      geometry.dispose();
+      ownedGeometries.delete(geometry);
+    }
   };
 
   const load = async (token: number, signal?: AbortSignal, forceManifest = false): Promise<MeshLoadResult> => {
@@ -129,15 +148,57 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
     }
     if (currentGeneration !== generation || signal?.aborted) return staleResult();
 
-    if (cache?.complete && cache.revision === manifest.revision) {
+    if (cache?.complete && cache.revision === manifest.revision && !(forceManifest && cache.displayError)) {
       lastToken = token;
-      return {revision: cache.revision, meshes: cache.meshes, visuals: manifest.meshes.map(entry => entry.visual), warnings: [], stale: false, cached: true};
+      return {...cache, visuals: manifest.meshes.map(entry => entry.visual), warnings: [], stale: false, cached: true};
+    }
+
+    let display: DisplayManifestView | undefined;
+    let displayError: string | undefined;
+    if (deps.fetchDisplayManifest && deps.fetchDisplayMesh && deps.parseDisplayMesh) {
+      const controller = new AbortController(); activeControllers.add(controller);
+      const abort = () => controller.abort(); signal?.addEventListener('abort', abort);
+      const created: BufferGeometry[] = [];
+      let published = false;
+      try {
+        display = await deps.fetchDisplayManifest(controller.signal);
+        if (currentGeneration !== generation || controller.signal.aborted) return staleResult();
+        if (display.revision !== manifest.revision) throw new Error('Display model revision changed; reload geometry');
+        if (!display.available) throw new Error(display.unavailableReasons.join(', ') || 'Display unavailable');
+        const visuals = new Map(manifest.meshes.map(entry => [entry.materialId,entry]));
+        const loaded = await mapWithConcurrency(display.groups, deps.concurrency ?? DEFAULT_CONCURRENCY, async entry => {
+          const formal = visuals.get(entry.materialId);
+          if (!formal) throw new Error(`Unknown display material: ${entry.materialId}`);
+          const bytes = await deps.fetchDisplayMesh!({revision:display!.revision,ownerId:entry.ownerId,materialId:entry.materialId},controller.signal);
+          if (currentGeneration !== generation || controller.signal.aborted) throw new Error('Display load aborted');
+          const geometry = deps.parseDisplayMesh!(bytes); created.push(geometry);
+          return {ownerId:entry.ownerId,stepId:entry.stepId,mesh:{...formal,triangleCount:entry.triangleCount,boundingBox:entry.boundingBox},geometry,material:toMaterialConfig(formal.visual)};
+        });
+        if (currentGeneration !== generation || controller.signal.aborted) return staleResult();
+        created.forEach(geometry => ownedGeometries.add(geometry));
+        published = true;
+        const previous = cache;
+        cache = {revision:manifest.revision,meshes:loaded,visuals:manifest.meshes.map(entry => entry.visual),complete:true,display}; lastToken = token;
+        retireCache(previous, loaded);
+        return {...cache,warnings:[],stale:false,cached:false};
+      } catch (error) {
+        controller.abort();
+        if (currentGeneration !== generation || signal?.aborted) return staleResult();
+        displayError = error instanceof Error ? error.message : String(error);
+        if (display) display = {...display,available:false,groups:[],unavailableReasons:[displayError]};
+        else display = {revision:manifest.revision,available:false,bounds:{min:[0,0,0],max:[0,0,0]},ownerStepIds:{},groups:[],stepEntities:[],unavailableReasons:[displayError]};
+      } finally {
+        if (!published) new Set(created).forEach(geometry => geometry.dispose());
+        signal?.removeEventListener('abort', abort);
+        activeControllers.delete(controller);
+      }
     }
 
     const requested = manifest.meshes.filter(entry => entry.visual?.visible !== false);
     const reusable = new Map(cache?.revision === manifest.revision
       ? cache.meshes.map(entry => [entry.mesh.materialId, entry]) : []);
     const warnings: string[] = [];
+    const createdFormal = new Set<BufferGeometry>();
     const meshes = await mapWithConcurrency(
       requested,
       deps.concurrency ?? DEFAULT_CONCURRENCY,
@@ -158,6 +219,7 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
           const bytes = await deps.fetchStl(request, controller.signal);
           if (currentGeneration !== generation || controller.signal.aborted) return null;
           const geometry = deps.parseStl(bytes);
+          createdFormal.add(geometry);
           ownedGeometries.add(geometry);
           return {mesh: entry, geometry, material: toMaterialConfig(entry.visual)};
         } catch (error) {
@@ -171,12 +233,19 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
       },
     );
 
-    if (currentGeneration !== generation || signal?.aborted) return staleResult();
+    if (currentGeneration !== generation || signal?.aborted) {
+      for (const geometry of createdFormal) {
+        geometry.dispose(); ownedGeometries.delete(geometry);
+      }
+      return staleResult();
+    }
     const loaded = meshes.filter((entry): entry is LoadedMesh => entry !== null);
     const visuals = manifest.meshes.map(entry => entry.visual);
-    cache = {revision: manifest.revision, meshes: loaded, visuals, complete: loaded.length === requested.length};
+    const previous = cache;
+    cache = {revision: manifest.revision, meshes: loaded, visuals, complete: loaded.length === requested.length, display, displayError};
+    retireCache(previous, loaded);
     lastToken = token;
-    return {revision: manifest.revision, meshes: loaded, visuals, warnings, stale: false, cached: false};
+    return {...cache, warnings, stale: false, cached: false};
   };
 
   const dispose = () => {

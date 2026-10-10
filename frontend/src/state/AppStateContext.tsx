@@ -26,6 +26,8 @@ import {
 } from './appReducer';
 
 export interface AppStateActions {
+  toggleStepVisibility(stepId: string): void;
+  setDisplayReady(manifest: import('../api/types').DisplayManifestView | null, ready: boolean, failed?: boolean): void;
   setTypeCandidate(index: number, pending: boolean): void;
   updateDraftDisplay(index: number, key: string, rawValue: string | boolean, displayUnit: string): void;
   bootstrap(): Promise<void>;
@@ -838,6 +840,8 @@ export function AppStateProvider({api, children}: AppStateProviderProps) {
   }, [bootstrap]);
 
   const actions = useMemo<AppStateActions>(() => ({
+    toggleStepVisibility: stepId => dispatch({type: 'display/toggled', stepId}),
+    setDisplayReady: (manifest, ready, failed) => dispatch({type: 'display/loaded', manifest, ready, failed}),
     applyMaskAsset: payload => dispatch({type: 'mask/assetApplied', payload}),
     reportMaskError: error => dispatch({type: 'mutation/blocked', error: normalizeError(error)}),
     updateDraftDisplay,

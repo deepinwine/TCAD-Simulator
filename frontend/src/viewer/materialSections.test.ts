@@ -4,6 +4,24 @@ import {Box3, Group, Vector3, Vector2, PerspectiveCamera} from 'three';
 import {clipStateAllOff} from './clipping';
 import {pickAtNormalizedCoords} from './picking';
 
+it('source filtering recolors cached paired slices locally and excludes hidden source hits', async () => {
+  const group = new Group();
+  const fetcher = vi.fn(async request => ({axis:request.axis,index:request.index,indexMax:1,shape:[1,3] as const,data:new Uint16Array([2,2,2]),owners:new Uint32Array([1,2,0]),revision:4}));
+  const verify = vi.fn(async () => true);
+  const manager = sections.createMaterialSections(group,fetcher,verify);
+  const input = {model:{gridShape:[3,1,2] as const,voxelSizeNm:100},revision:4,bounds:new Box3(new Vector3(-.05,-.05,-.05),new Vector3(.25,.05,.15)),clip:{...clipStateAllOff(),z:{enabled:true,position:.5}},materials:new Map([[2,{color:[1,0,0] as const,opacity:.5,visible:true}]]),ownerStepIds:{'1':'a','2':'b'},hiddenStepIds:new Set<string>()};
+  await manager.update(input);
+  await manager.update({...input,hiddenStepIds:new Set(['a'])});
+  expect(fetcher).toHaveBeenCalledTimes(1);expect(verify).toHaveBeenCalledTimes(1);
+  const candidate=manager.pickCandidates()[0];
+  expect(candidate.resolveHit!({uv:new Vector2(.1,.5)} as import('three').Intersection)).toBeNull();
+  expect(candidate.resolveHit!({uv:new Vector2(.5,.5)} as import('three').Intersection)).toMatchObject({matId:2,ownerId:2,stepId:'b'});
+  expect(candidate.resolveHit!({uv:new Vector2(.9,.5)} as import('three').Intersection)).toMatchObject({matId:2,ownerId:0});
+  const texture=(group.children[0] as import('three').Mesh<import('three').PlaneGeometry,import('three').MeshBasicMaterial>).material.map!;
+  expect([...((texture.image as {data:Uint8Array}).data)]).toEqual([0,0,0,0,255,0,0,128,255,0,0,128]);
+  manager.dispose();
+});
+
 it('maps world planes to the true noncubic full grid domain, including boundary cells', () => {
   expect(sections).toHaveProperty('sectionPlacement');
   const model = {gridShape: [2, 3, 4] as const, voxelSizeNm: 100};

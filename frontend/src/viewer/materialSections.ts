@@ -2,6 +2,7 @@ import {Box3, Group, Mesh, MeshBasicMaterial, PlaneGeometry, DataTexture, RGBAFo
 import type {ModelSummaryView, RgbColor, MaterialSliceView} from '../api/types';
 import {worldClipPosition, deriveClipPlanes, isClipVolumeEmpty, type ClipAxis, type ClipState} from './clipping';
 import type {PickCandidate} from './picking';
+import {sourceVisible} from './stepVisibility';
 
 export interface SectionColor {
   color: RgbColor;
@@ -35,11 +36,12 @@ export function sectionPlacement(model: ModelSummaryView, bounds: Box3, axis: Cl
   };
 }
 
-export function sectionPixels(data: Uint16Array, materials: ReadonlyMap<number, SectionColor>) {
+export function sectionPixels(data: Uint16Array, materials: ReadonlyMap<number, SectionColor>, owners?: Uint32Array, ownerStepIds: Readonly<Record<string,string>> = {}, hidden: ReadonlySet<string> = new Set()) {
   const rgba = new Uint8Array(data.length * 4);
   const unknown = new Set<number>();
   data.forEach((id, i) => {
     if (id === 0) return;
+    if (owners && !sourceVisible(owners[i],ownerStepIds[String(owners[i])],hidden)) return;
     const material = materials.get(id);
     if (material?.visible === false) return;
     if (!material) unknown.add(id);
@@ -51,6 +53,9 @@ export function sectionPixels(data: Uint16Array, materials: ReadonlyMap<number, 
 }
 
 export interface SectionInput {
+  ownerStepIds?: Readonly<Record<string,string>>;
+  hiddenStepIds?: ReadonlySet<string>;
+  sourceMode?: boolean;
   model: ModelSummaryView | null;
   revision: number;
   bounds: Box3;
@@ -60,7 +65,7 @@ export interface SectionInput {
 
 export function createMaterialSections(
   group: Group,
-  fetchSlice: (request: {axis: ClipAxis; index: number}, signal: AbortSignal) => Promise<MaterialSliceView>,
+  fetchSlice: (request: {axis: ClipAxis; index: number; revision?: number}, signal: AbortSignal) => Promise<MaterialSliceView & {owners?: Uint32Array; revision?: number}>,
   verifyRevision?: (revision: number, signal: AbortSignal) => Promise<boolean>,
   textureLimit: () => number = () => 4096,
 ) {
@@ -69,7 +74,7 @@ export function createMaterialSections(
   let disposed = false;
   let candidates: PickCandidate[] = [];
   let cacheKey = '';
-  const cache = new Map<ClipAxis, MaterialSliceView>();
+  const cache = new Map<ClipAxis, MaterialSliceView & {owners?: Uint32Array; revision?: number}>();
   const clear = () => {
     candidates = [];
     for (const child of group.children.slice()) {
@@ -88,7 +93,7 @@ export function createMaterialSections(
       controller = new AbortController();
       const signal = controller.signal;
       if (disposed || !input.model || input.bounds.isEmpty() || isClipVolumeEmpty(input.clip)) return [] as number[];
-      const key = `${input.revision}:${input.model.gridShape.join(',')}:${input.model.voxelSizeNm}`;
+      const key = `${input.sourceMode ?? false}:${input.revision}:${input.model.gridShape.join(',')}:${input.model.voxelSizeNm}`;
       if (key !== cacheKey) {
         cache.clear();
         cacheKey = key;
@@ -109,7 +114,7 @@ export function createMaterialSections(
           const existing = cache.get(p.axis);
           if (existing?.index === p.index) return existing;
           fetched = true;
-          return fetchSlice({axis: p.axis, index: p.index}, signal);
+          return fetchSlice({axis: p.axis, index: p.index, ...(input.sourceMode ? {revision:input.revision} : {})}, signal);
         }));
         if (disposed || current !== generation || signal.aborted) return [];
         if (fetched && verifyRevision && !await verifyRevision(input.revision, signal)) {
@@ -124,11 +129,12 @@ export function createMaterialSections(
             || slice.data.length !== p.shape[0] * p.shape[1]) {
             throw new Error('Slice does not match model domain');
           }
+          if (input.sourceMode && (!slice.owners || slice.owners.length !== slice.data.length || slice.revision !== input.revision)) throw new Error('Paired source slice does not match model revision');
           cache.set(p.axis, slice);
         });
         slices.forEach((slice, i) => {
           const p = placements[i];
-          const pixels = sectionPixels(slice.data, input.materials);
+          const pixels = sectionPixels(slice.data, input.materials, slice.owners, input.ownerStepIds, input.hiddenStepIds);
           pixels.unknownIds.forEach(id => unknown.add(id));
           const texture = new DataTexture(pixels.rgba, p.shape[1], p.shape[0], RGBAFormat, UnsignedByteType);
           texture.minFilter = texture.magFilter = NearestFilter;
@@ -154,7 +160,7 @@ export function createMaterialSections(
             const pixel = row * p.shape[1] + col;
             if (pixels.rgba[pixel * 4 + 3] < 1) return null;
             const matId = slice.data[pixel];
-            return {matId, name: input.materials.get(matId)?.name ?? String(matId)};
+            return {matId, name: input.materials.get(matId)?.name ?? String(matId), ...(slice.owners ? {ownerId:slice.owners[pixel],stepId:input.ownerStepIds?.[String(slice.owners[pixel])] ?? null} : {})};
           }});
         });
         group.updateMatrixWorld(true);

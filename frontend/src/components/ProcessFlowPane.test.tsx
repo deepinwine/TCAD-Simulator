@@ -18,6 +18,18 @@ function step(index: number, status: RuntimeStatus, params: Record<string, unkno
 }
 
 describe('ProcessFlowPane', () => {
+  it('eye is a sibling control and never changes step selection or enabled', () => {
+    const onSelect = vi.fn(); const onToggleVisibility = vi.fn();
+    const s = {...step(1, 'done'), name: 'Structure Deposit', stepId: 'source-1'};
+    render(<ProcessFlowPane recipe={[s]} selectedStepIndex={null} onSelect={onSelect} hiddenStepIds={[]} onToggleVisibility={onToggleVisibility} displayReady displayManifest={{revision: 1, available: true, bounds: {min: [0,0,0], max: [1,1,1]}, ownerStepIds: {'1':'source-1'}, groups: [{ownerId: 1, materialId: 1, stepId: 'source-1', voxelCount: 1, triangleCount: 12, bytes: 8, boundingBox: {min:[0,0,0], max:[1,1,1]}}], stepEntities: [{stepId:'source-1', ownerId:1, voxelCount:1, hideable:true, unavailableReason:null}], unavailableReasons: []}} />);
+    const eye = screen.getByRole('button', {name: /隐藏.*Instance 1/});
+    expect(eye.closest('[role="option"]')).toBeNull();
+    expect(eye).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(eye);
+    expect(onToggleVisibility).toHaveBeenCalledWith('source-1');
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(s.enabled).toBe(true);
+  });
   it.each([['Initialize Wafer', 'Deposit'], ['Structure Wafer', 'Legacy']])('旧或混合配方 %s 初始化不占列表/count', (initial, process) => {
     render(<ProcessFlowPane recipe={[{...step(0, 'ready'), name: initial}, {...step(1, 'ready'), name: process}]} selectedStepIndex={0} onSelect={vi.fn()} />);
     expect(screen.getAllByRole('option')).toHaveLength(1);

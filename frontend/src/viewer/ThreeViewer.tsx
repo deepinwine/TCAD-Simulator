@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import type {PointerEvent as ReactPointerEvent} from 'react';
 import {TcadApiError} from '../api/client';
-import type {TcadApi, ModelSummaryView} from '../api/types';
+import type {TcadApi, ModelSummaryView, DisplayManifestView} from '../api/types';
 import {ErrorNotice} from '../components/ErrorNotice';
 import {useI18n} from '../i18n/I18nContext';
 import type {TranslationKey} from '../i18n/catalogs';
@@ -15,6 +15,8 @@ export type ProjectionMode = 'perspective' | 'orthographic';
 export type {StandardView, ViewerRuntime} from './viewerRuntime';
 
 interface ThreeViewerProps {
+  hiddenStepIds?: readonly string[];
+  onDisplayReady?(manifest: DisplayManifestView | null, ready: boolean, failed?: boolean): void;
   model?: ModelSummaryView | null;
   api: TcadApi;
   refreshToken: number;
@@ -36,6 +38,7 @@ const CLIP_AXES: ReadonlyArray<{axis: ClipAxis; label: string}> = [
   {axis: 'y', label: 'Y'},
   {axis: 'z', label: 'Z'},
 ];
+const EMPTY_HIDDEN: readonly string[] = [];
 
 function asViewerApiError(error: unknown): TcadApiError {
   if (error instanceof TcadApiError) return error;
@@ -45,7 +48,7 @@ function asViewerApiError(error: unknown): TcadApiError {
   );
 }
 
-export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: ThreeViewerProps) {
+export function ThreeViewer({api, model = null, refreshToken, runtimeFactory, hiddenStepIds = EMPTY_HIDDEN, onDisplayReady}: ThreeViewerProps) {
   const {t} = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<ViewerRuntime | null>(null);
@@ -54,6 +57,9 @@ export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: T
   const [loadError, setLoadError] = useState<TcadApiError | null>(null);
   const [sectionError, setSectionError] = useState<TcadApiError | null>(null);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
+  const [displayError,setDisplayError] = useState<string | null>(null);
+  const displayCallbackRef=useRef(onDisplayReady); displayCallbackRef.current=onDisplayReady;
+  const hiddenRef=useRef(hiddenStepIds); hiddenRef.current=hiddenStepIds;
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [orthoActive, setOrthoActive] = useState(false);
   const [clip, setClip] = useState<ClipState>(clipStateAllOff);
@@ -100,14 +106,24 @@ export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: T
   }, [backend, t]);
 
   useEffect(() => {
+    runtimeRef.current?.setHiddenStepIds?.(hiddenStepIds);
+    setSelection(null);
+    setMeasurePoints([]);setDistance(null);runtimeRef.current?.setMeasureMarkers(null);
+  }, [hiddenStepIds,api,runtimeFactory]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     if (runtime === null) return;
     let cancelled = false;
     setLoadError(null);
-    runtime.loadMeshes(refreshToken).then(result => {
+    displayCallbackRef.current?.(null,false);
+    runtime.loadMeshes(refreshToken, retryAttempt > 0).then(result => {
       if (cancelled) return;
       if (result.stale) return;
       setLoadWarnings(result.warnings);
+      setDisplayError(result.displayError ?? null);
+      displayCallbackRef.current?.(result.display ?? null,!!result.display?.available);
+      runtime.setHiddenStepIds?.(hiddenRef.current);
       setMaterials(result.materials);
       setDisplay(Object.fromEntries(result.materials.map(material => [
         material.matId,
@@ -116,6 +132,7 @@ export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: T
     }).catch(error => {
       if (cancelled) return;
       setLoadError(asViewerApiError(error));
+      displayCallbackRef.current?.(null,false,true);
     });
     return () => {
       cancelled = true;
@@ -320,6 +337,7 @@ export function ThreeViewer({api, model = null, refreshToken, runtimeFactory}: T
         {initError === null && sectionError !== null && (
           <ErrorNotice title={t('viewer.sectionError')} error={sectionError} actionLabel={t('viewer.retry')} onAction={retry} />
         )}
+        {initError === null && displayError !== null && <ErrorNotice title={t('display.error')} message={t(displayError.includes('display_budget_exceeded') ? 'display.budget' : displayError.includes('unknown_provenance') ? 'display.unknown' : 'display.failed')} suggestion={t('display.fallback')} trustedSuggestion actionLabel={t('viewer.retry')} onAction={retry} />}
         {initError === null && loadError === null && loadWarnings.length > 0 && (
           <ErrorNotice
             title={t('viewer.partialError')}

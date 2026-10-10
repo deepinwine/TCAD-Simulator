@@ -1,5 +1,7 @@
 import {TcadApiError} from '../api/client';
 import {visibleSteps} from '../components/processCatalog';
+import {stepVisibilityReason, validHiddenSteps} from '../viewer/stepVisibility';
+import type {DisplayManifestView} from '../api/types';
 import type {
   InitView,
   DemoRecipeView,
@@ -37,6 +39,9 @@ export interface ParameterError {
 }
 
 export interface AppState {
+  hiddenStepIds: string[];
+  displayManifest: DisplayManifestView | null;
+  displayReady: boolean;
   pendingTypeEdits: number[];
   phase: AppPhase;
   recipe: StepView[];
@@ -64,6 +69,8 @@ export interface AppState {
 }
 
 export type AppAction =
+  | {type: 'display/toggled'; stepId: string}
+  | {type: 'display/loaded'; manifest: DisplayManifestView | null; ready: boolean; failed?: boolean}
   | {type: 'candidate/pending'; indices: number[]}
   | {type: 'step/typeReplaced'; payload: SetStepView}
   | {type: 'parameter/pendingSaves'; count: number}
@@ -117,6 +124,7 @@ export type AppAction =
   | {type: 'mutation/finished'};
 
 export const initialAppState: AppState = {
+  hiddenStepIds: [], displayManifest: null, displayReady: false,
   pendingTypeEdits: [],
   phase: 'booting',
   recipe: [],
@@ -228,12 +236,20 @@ function canonicalizeTimeline(timeline: TimelineView): TimelineView {
 export function appReducer(state: AppState, action: AppAction): AppState {
   if (action.type === 'candidate/pending') return {...state, pendingTypeEdits: action.indices};
   switch (action.type) {
+    case 'display/loaded': return {...state, displayManifest: action.manifest, displayReady: action.ready,
+      hiddenStepIds: action.failed || action.manifest?.available === false ? [] : action.ready ? validHiddenSteps(state.hiddenStepIds, state.recipe, action.manifest, true) : state.hiddenStepIds};
+    case 'display/toggled': {
+      const step = state.recipe.find(item => item.stepId === action.stepId);
+      if (!step || stepVisibilityReason(step, state.displayManifest, state.displayReady) !== null) return state;
+      return {...state, hiddenStepIds: state.hiddenStepIds.includes(action.stepId) ? state.hiddenStepIds.filter(id => id !== action.stepId) : [...state.hiddenStepIds, action.stepId]};
+    }
     case 'parameter/pendingSaves': return {...state, pendingSaves: action.count};
     case 'bootstrap/started':
       return {...state, phase: 'booting', globalError: null};
     case 'bootstrap/succeeded':
       return {
         ...state,
+        hiddenStepIds: [], displayManifest: null, displayReady: false,
         phase: 'ready',
         recipe: action.payload.recipe,
         selectedStepIndex: visibleSteps(action.payload.recipe)[0]?.index ?? null,
@@ -437,6 +453,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'recipe/replaced':
       return {
         ...state,
+        hiddenStepIds: [], displayManifest: null, displayReady: false,
         recipe: action.recipe,
         selectedStepIndex: visibleSteps(action.recipe)[0]?.index ?? null,
         model: action.model ?? state.model,
@@ -457,6 +474,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       );
       return {
         ...state,
+        hiddenStepIds: validHiddenSteps(state.hiddenStepIds, action.recipe, state.displayManifest, state.displayReady),
         recipe: action.recipe,
         selectedStepIndex: selectedExists
           ? state.selectedStepIndex
@@ -482,6 +500,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'step/typeReplaced':
       return {
         ...state,
+        hiddenStepIds: validHiddenSteps(state.hiddenStepIds, applyStatuses(state.recipe, action.payload.step, action.payload.statuses), state.displayManifest, state.displayReady),
         recipe: applyStatuses(state.recipe, action.payload.step, action.payload.statuses),
         timeline: state.timeline === null ? null : {...state.timeline, items: state.timeline.items.map(item => item.index >= action.payload.step.index ? {...item, snapshotValid: false, runtimeStatus: action.payload.statuses[item.index] ?? item.runtimeStatus} : item)},
         globalError: null,

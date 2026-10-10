@@ -1,5 +1,6 @@
 import {useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode} from 'react';
-import type {MaterialView, StepView} from '../api/types';
+import type {MaterialView, StepView, DisplayManifestView} from '../api/types';
+import {stepVisibilityReason} from '../viewer/stepVisibility';
 import {presentStep} from './stepPresentation';
 import {useI18n} from '../i18n/I18nContext';
 import {zhCN} from '../i18n/catalogs';
@@ -7,6 +8,10 @@ import {StatusBadge} from './StatusBadge';
 import {visibleSteps} from './processCatalog';
 
 interface ProcessFlowPaneProps {
+  hiddenStepIds?: readonly string[];
+  displayManifest?: DisplayManifestView | null;
+  displayReady?: boolean;
+  onToggleVisibility?(stepId: string): void;
   recipe: StepView[];
   selectedStepIndex: number | null;
   onSelect(index: number): void;
@@ -52,7 +57,7 @@ export function summarizeParams(
   return compactText(`${summary}${suffix}`, 92);
 }
 
-export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, children, materials = []}: ProcessFlowPaneProps) {
+export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, children, materials = [], hiddenStepIds = [], displayManifest, displayReady = false, onToggleVisibility}: ProcessFlowPaneProps) {
   const recipe = useMemo(() => visibleSteps(allSteps), [allSteps]);
   const {t, locale} = useI18n();
   const optionRefs = useRef(new Map<number, HTMLButtonElement>());
@@ -122,6 +127,7 @@ export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, 
       ) : (
         <div className="process-list" role="listbox" aria-label={t('process.region')}>
           {recipe.map((step, position) => (
+            <div key={step.stepId ?? step.index} className="process-step-row" role="presentation">
             <button
               key={step.index}
               ref={element => {
@@ -150,6 +156,16 @@ export function ProcessFlowPane({recipe: allSteps, selectedStepIndex, onSelect, 
                 <StatusBadge status={step.runtimeStatus} />
               </span>
             </button>
+            {onToggleVisibility && <button
+              type="button" className="step-eye"
+              aria-pressed={!!step.stepId && hiddenStepIds.includes(step.stepId)}
+              aria-label={t(step.stepId && hiddenStepIds.includes(step.stepId) ? 'display.show' : 'display.hide', {name: presentStep(step, materials, locale).title})}
+              title={stepVisibilityReason(step, displayManifest, displayReady) === null ? t('display.local') : t(`display.reason.${stepVisibilityReason(step, displayManifest, displayReady)!}`)}
+              aria-description={stepVisibilityReason(step, displayManifest, displayReady) === null ? t('display.local') : t(`display.reason.${stepVisibilityReason(step, displayManifest, displayReady)!}`)}
+              disabled={stepVisibilityReason(step, displayManifest, displayReady) !== null}
+              onClick={() => step.stepId && onToggleVisibility(step.stepId)}
+            ><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" strokeWidth="1.7"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.7"/>{step.stepId && hiddenStepIds.includes(step.stepId) && <path d="M3 3 21 21" stroke="currentColor" strokeWidth="2"/>}</svg></button>}
+            </div>
           ))}
         </div>
       )}

@@ -152,6 +152,18 @@ async function waitUntilReady() {
   await waitFor(() => expect(captured?.state.phase).toBe('ready'));
 }
 
+it('source visibility actions remain local and reject unknown step identities',async()=>{
+  const recipe=[step(0,{name:'Structure Deposit',stepId:'source'})];
+  const api=apiStub({init:vi.fn(async()=>({...initView,recipe}))});mount(api);await waitUntilReady();
+  const bounds={min:[0,0,0] as const,max:[1,1,1] as const};
+  const manifest={revision:1,available:true,bounds,ownerStepIds:{'1':'source'},groups:[{ownerId:1,materialId:1,stepId:'source',voxelCount:1,triangleCount:12,bytes:100,boundingBox:bounds}],stepEntities:[{stepId:'source',ownerId:1,voxelCount:1,hideable:true,unavailableReason:null}],unavailableReasons:[]};
+  act(()=>captured!.actions.setDisplayReady(manifest,true));
+  const before=Object.values(api).filter(value=>typeof value==='function').map(fn=>vi.mocked(fn).mock.calls.length);
+  act(()=>{captured!.actions.toggleStepVisibility('source');captured!.actions.toggleStepVisibility('missing');});
+  expect(captured!.state.hiddenStepIds).toEqual(['source']);expect(captured!.state.recipe).toBe(recipe);expect(captured!.state.selectedStepIndex).toBe(0);
+  expect(Object.values(api).filter(value=>typeof value==='function').map(fn=>vi.mocked(fn).mock.calls.length)).toEqual(before);
+});
+
 describe('失败恢复', () => {
   it('排队中的旧字段保存失败会阻止候选替换并保留原步骤和错误草稿', async () => {
     const first = deferred<SetStepView>();
@@ -790,7 +802,7 @@ describe('AppStateProvider mutation gate 与顺序', () => {
       operation = captured!.actions.runAll();
     });
     await waitFor(() => expect(screen.getByText(/running:all:17:none/)).toBeInTheDocument());
-    expect(events.slice(0, 3)).toEqual(['api:run', 'api:timeline', 'ui:revision:17']);
+    await waitFor(() => expect(events.slice(0, 3)).toEqual(['api:run', 'api:timeline', 'ui:revision:17']));
     expect(captured?.state.recipe[0].runtimeStatus).toBe('ready');
 
     await act(async () => timelinePending.resolve(timeline));

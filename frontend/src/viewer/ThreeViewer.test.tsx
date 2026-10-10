@@ -56,6 +56,20 @@ afterEach(() => {
 });
 
 describe('ThreeViewer', () => {
+  it('budget failure disables source display with an explicit recoverable reason',async()=>{
+    const onDisplayReady=vi.fn();const {runtime}=fakeViewerRuntime({loadMeshes:vi.fn(async()=>({warnings:[],materials:[],displayError:'display_budget_exceeded',display:{revision:1,available:false,bounds:{min:[0,0,0] as const,max:[1,1,1] as const},ownerStepIds:{},groups:[],stepEntities:[],unavailableReasons:['display_budget_exceeded']}}))});
+    render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={()=>runtime} onDisplayReady={onDisplayReady}/>);
+    expect(await screen.findByRole('alert')).toHaveTextContent('超过显示预算');
+    expect(screen.getByRole('button',{name:'重试加载几何'})).toBeEnabled();expect(onDisplayReady).toHaveBeenLastCalledWith(expect.objectContaining({available:false}),false);
+  });
+  it('source visibility changes preserve runtime and never reload meshes or fit camera', async () => {
+    const setHiddenStepIds=vi.fn(); const {runtime}=fakeViewerRuntime({setHiddenStepIds}); const factory=vi.fn(() => runtime);
+    const view=render(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={factory} hiddenStepIds={[]} />);
+    await waitFor(() => expect(runtime.loadMeshes).toHaveBeenCalledTimes(1));
+    view.rerender(<ThreeViewer api={apiStub} refreshToken={1} runtimeFactory={factory} hiddenStepIds={['a']} />);
+    expect(setHiddenStepIds).toHaveBeenLastCalledWith(['a']);
+    expect(runtime.loadMeshes).toHaveBeenCalledTimes(1);expect(factory).toHaveBeenCalledTimes(1);expect(runtime.fit).not.toHaveBeenCalled();expect(runtime.dispose).not.toHaveBeenCalled();
+  });
   it('binds authoritative model context without remounting and exposes section failures for retry', async () => {
     const setSectionContext = vi.fn();
     const {runtime} = fakeViewerRuntime({setSectionContext});

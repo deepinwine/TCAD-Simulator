@@ -1,4 +1,6 @@
 import {
+  parseDisplayManifestEnvelope,
+  parseDisplaySliceEnvelope,
   ApiContractError,
   parseHistoryEnvelope,
   parseInitEnvelope,
@@ -592,6 +594,18 @@ export function createTcadApi(): TcadApi {
     },
     getMaterialStl(request: PreviewStlRequest, signal?: AbortSignal): Promise<ArrayBuffer> {
       return apiBinary(previewStlPath(request), signal);
+    },
+    getDisplayManifest(signal?: AbortSignal) {
+      return apiGetJson('/api/structure/display/manifest', parseDisplayManifestEnvelope, signal);
+    },
+    getDisplayMesh(request, signal) {
+      const query = new URLSearchParams({revision:String(requireRequestInteger(request.revision,'request.revision',0)),owner_id:String(requireRequestInteger(request.ownerId,'request.ownerId',0)),mat_id:String(requireRequestInteger(request.materialId,'request.materialId',1))});
+      return apiBinary(`/api/structure/display/mesh?${query}`,signal);
+    },
+    getDisplaySlice(request, signal) {
+      if (!['x','y','z'].includes(request.axis)) throw new ApiContractError('request.axis','x, y, z');
+      const query = new URLSearchParams({revision:String(requireRequestInteger(request.revision,'request.revision',0)),axis:request.axis.toUpperCase(),index:String(requireRequestInteger(request.index,'request.index',0))});
+      return apiGetJson(`/api/structure/display/slice?${query}`,parseDisplaySliceEnvelope,signal);
     },
   };
 }

@@ -4,6 +4,22 @@ import {TcadApiError} from './api/client';
 import type {InitView, RuntimeStatus, StepView, TcadApi} from './api/types';
 import {App} from './App';
 
+it('clicking the step eye only updates local runtime visibility and preserves API call counts',async()=>{
+  const identity='346fd6b5-0811-4933-b2c6-f7d7c684843d';
+  const recipe=[step(0,{name:'Structure Wafer',stepId:'init'}),step(1,{name:'Structure Deposit',stepId:identity,instanceName:'Oxide'})];
+  const api=apiStub({init:vi.fn(async()=>initView(recipe)),getDisplayManifest:vi.fn(),getDisplayMesh:vi.fn(),getDisplaySlice:vi.fn()});
+  const bounds={min:[0,0,0] as const,max:[1,1,1] as const};
+  const display={revision:1,available:true,bounds,ownerStepIds:{'1':identity},groups:[{ownerId:1,materialId:2,stepId:identity,voxelCount:1,triangleCount:12,bytes:100,boundingBox:bounds}],stepEntities:[{stepId:identity,ownerId:1,voxelCount:1,hideable:true,unavailableReason:null}],unavailableReasons:[]};
+  const setHiddenStepIds=vi.fn();const runtime={...stubViewerRuntime(),setHiddenStepIds,loadMeshes:vi.fn(async()=>({warnings:[],materials:[],display}))};const factory=vi.fn(()=>runtime);
+  render(<App api={api} viewerRuntimeFactory={factory}/>);
+  const eye=await screen.findByRole('button',{name:'隐藏步骤实体：Oxide'});await waitFor(()=>expect(eye).toBeEnabled());
+  const calls=Object.values(api).filter(value=>typeof value==='function').map(fn=>vi.mocked(fn).mock.calls.length);
+  fireEvent.click(eye);expect(await screen.findByRole('button',{name:'显示步骤实体：Oxide'})).toHaveAttribute('aria-pressed','true');expect(setHiddenStepIds).toHaveBeenLastCalledWith([identity]);
+  expect(screen.getByRole('option',{name:/Oxide/})).toHaveAttribute('aria-selected','true');expect(screen.getByRole('option',{name:/Oxide/})).toHaveAttribute('data-process-enabled','true');
+  expect(Object.values(api).filter(value=>typeof value==='function').map(fn=>vi.mocked(fn).mock.calls.length)).toEqual(calls);
+  expect(runtime.loadMeshes).toHaveBeenCalledTimes(1);expect(factory).toHaveBeenCalledTimes(1);
+});
+
 function step(index: number, overrides: Partial<StepView> = {}): StepView {
   return {
     index,

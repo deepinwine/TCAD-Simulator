@@ -350,6 +350,11 @@ button:focus-visible,
   overflow: auto;
   overscroll-behavior: contain;
 }
+.process-step-row {display: flex; align-items: stretch; min-width: 0;}
+.process-step-row .process-step {flex: 1; min-width: 0;}
+.step-eye {flex: 0 0 32px; display: grid; place-items: center; padding: 0; margin-left: 3px; color: #92b8d9; background: #152131; border: 1px solid #283a4c; border-radius: 5px; cursor: pointer;}
+.step-eye:disabled {opacity: .4; cursor: default;}
+.step-eye[aria-pressed="true"] {color: #e5ad67;}
 
 .process-step {
   display: grid;

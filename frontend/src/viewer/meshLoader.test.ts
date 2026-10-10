@@ -98,6 +98,63 @@ function fakeDependencies(options: FakeOptions = {}) {
 }
 
 describe('createMeshLoader', () => {
+  it('loads all owner/material groups atomically and caches their revision', async () => {
+    const deps = fakeDependencies({manifestProvider: () => manifest(3, [mesh(1)])});
+    const groups = [1, 2, 0].map(ownerId => ({ownerId, materialId: 1, stepId: ownerId ? `step-${ownerId}` : null, voxelCount: 1, triangleCount: 12, bytes: 8, boundingBox: mesh(1).boundingBox}));
+    const display = {revision: 3, available: true, ownerStepIds: {'1': 'step-1', '2': 'step-2'}, groups, stepEntities: [], unavailableReasons: [], bounds: mesh(1).boundingBox};
+    const fetchDisplayManifest = vi.fn(async () => display);
+    const fetchDisplayMesh = vi.fn(async () => new ArrayBuffer(8));
+    const loader = createMeshLoader({...deps, fetchDisplayManifest, fetchDisplayMesh, parseDisplayMesh: deps.parseStl});
+    const first = await loader.load(1);
+    expect(first.meshes.map(item => item.ownerId)).toEqual([1, 2, 0]);
+    expect(first.display?.available).toBe(true);
+    expect(deps.fetchStl).not.toHaveBeenCalled();
+    await loader.load(2);
+    expect(fetchDisplayManifest).toHaveBeenCalledTimes(1);
+    expect(fetchDisplayMesh).toHaveBeenCalledTimes(3);
+    loader.dispose();
+  });
+  it('display mesh failure falls back to formal meshes with all eyes unavailable', async () => {
+    const deps = fakeDependencies({manifestProvider: () => manifest(3, [mesh(1)])});
+    const loader = createMeshLoader({...deps,
+      fetchDisplayManifest: async () => ({revision: 3, available: true, ownerStepIds: {}, groups: [{ownerId: 1, materialId: 1, stepId: 's', voxelCount: 1, triangleCount: 12, bytes: 8, boundingBox: mesh(1).boundingBox}], stepEntities: [], unavailableReasons: [], bounds: mesh(1).boundingBox}),
+      fetchDisplayMesh: async () => {throw new Error('offline');}, parseDisplayMesh: deps.parseStl});
+    const result = await loader.load(1);
+    expect(result.meshes).toHaveLength(1);
+    expect(result.display?.available).toBe(false);
+    expect(result.displayError).toContain('offline');
+    expect(deps.fetchStl).toHaveBeenCalledTimes(1);
+  });
+  it('explicit retry recovers failed display without re-downloading formal meshes', async () => {
+    const deps=fakeDependencies({manifestProvider:()=>manifest(3,[mesh(1)])});
+    const fetchDisplayMesh=vi.fn(async()=>new ArrayBuffer(8));fetchDisplayMesh.mockRejectedValueOnce(new Error('temporary'));
+    const fetchDisplayManifest=vi.fn(async()=>({revision:3,available:true,ownerStepIds:{'1':'s'},groups:[{ownerId:1,materialId:1,stepId:'s',voxelCount:1,triangleCount:12,bytes:8,boundingBox:mesh(1).boundingBox}],stepEntities:[],unavailableReasons:[],bounds:mesh(1).boundingBox}));
+    const loader=createMeshLoader({...deps,fetchDisplayManifest,fetchDisplayMesh,parseDisplayMesh:deps.parseStl});
+    const first=await loader.load(1);expect(first.display?.available).toBe(false);
+    const geometry=first.meshes[0].geometry;const disposed=vi.spyOn(geometry,'dispose');
+    const retry=await loader.load(1,undefined,true);expect(retry.display?.available).toBe(true);expect(retry.displayError).toBeUndefined();expect(disposed).toHaveBeenCalledTimes(1);
+    expect(deps.fetchStl).toHaveBeenCalledTimes(1);loader.dispose();expect(disposed).toHaveBeenCalledTimes(1);
+  });
+  it('empty display revisions are complete and cached',async()=>{
+    const deps=fakeDependencies({manifestProvider:()=>manifest(3,[])});
+    const fetchDisplayManifest=vi.fn(async()=>({revision:3,available:true,ownerStepIds:{},groups:[],stepEntities:[],unavailableReasons:[],bounds:mesh(1).boundingBox}));
+    const loader=createMeshLoader({...deps,fetchDisplayManifest,fetchDisplayMesh:vi.fn(),parseDisplayMesh:deps.parseStl});
+    expect((await loader.load(1)).meshes).toEqual([]);expect((await loader.load(2)).cached).toBe(true);expect(fetchDisplayManifest).toHaveBeenCalledTimes(1);loader.dispose();
+  });
+  it('quick refresh aborts old display groups and suppresses stale errors',async()=>{
+    const deps=fakeDependencies({manifestProvider:call=>manifest(call,[mesh(1)])});
+    const pending=deferred<ArrayBuffer>();let call=0;const signals:AbortSignal[]=[];
+    const loader=createMeshLoader({...deps,fetchDisplayManifest:async()=>({revision:++call,available:true,ownerStepIds:{'1':'s'},groups:[{ownerId:1,materialId:1,stepId:'s',voxelCount:1,triangleCount:12,bytes:8,boundingBox:mesh(1).boundingBox}],stepEntities:[],unavailableReasons:[],bounds:mesh(1).boundingBox}),fetchDisplayMesh:async(_request,signal)=>{signals.push(signal);return signals.length===1?pending.promise:new ArrayBuffer(8);},parseDisplayMesh:deps.parseStl});
+    const old=loader.load(1);await vi.waitFor(()=>expect(signals).toHaveLength(1));const fresh=await loader.load(2);pending.reject(new Error('late old error'));
+    expect((await old).stale).toBe(true);expect(fresh.display?.available).toBe(true);expect(signals[0].aborted).toBe(true);loader.dispose();
+  });
+  it('revision replacement disposes shared old geometries once',async()=>{
+    const shared=new BufferGeometry();const disposed=vi.spyOn(shared,'dispose');
+    const deps=fakeDependencies({manifestProvider:call=>manifest(call,[mesh(1),mesh(2)])});
+    deps.parseStl.mockReturnValueOnce(shared).mockReturnValueOnce(shared);
+    const loader=createMeshLoader(deps);await loader.load(1);await loader.load(2);
+    expect(disposed).toHaveBeenCalledTimes(1);loader.dispose();expect(disposed).toHaveBeenCalledTimes(1);
+  });
   it('forced retry probes manifest even for the same token after a section revision mismatch', async () => {
     const deps = fakeDependencies({manifestProvider: call => manifest(call,[mesh(1)])});
     const loader = createMeshLoader(deps);

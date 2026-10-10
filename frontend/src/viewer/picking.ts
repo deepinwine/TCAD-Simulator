@@ -1,13 +1,17 @@
 import {Raycaster, Vector2, Vector3, type Camera, type Mesh, type Intersection, type Material} from 'three';
 
 export interface PickCandidate {
+  ownerId?: number;
+  stepId?: string | null;
   mesh: Mesh;
   matId: number;
   name: string;
-  resolveHit?: (intersection: Intersection) => {matId: number; name: string} | null;
+  resolveHit?: (intersection: Intersection) => {matId: number; name: string; ownerId?: number; stepId?: string | null} | null;
 }
 
 export interface PickHit {
+  ownerId?: number;
+  stepId?: string | null;
   matId: number;
   name: string;
   point: Vector3;
@@ -41,7 +45,7 @@ export function pickAtNormalizedCoords(
     if (material.opacity <= 0 || material.clippingPlanes?.some(plane => plane.distanceToPoint(hit.point) < -1e-8)) continue;
     const resolved = candidate.resolveHit ? candidate.resolveHit(hit) : candidate;
     if (resolved === null) continue;
-    return {matId:resolved.matId,name:resolved.name,point:hit.point.clone()};
+    return {matId:resolved.matId,name:resolved.name,point:hit.point.clone(),...(resolved.ownerId !== undefined ? {ownerId:resolved.ownerId,stepId:resolved.stepId} : {})};
   }
   return null;
 }

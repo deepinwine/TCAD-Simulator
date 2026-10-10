@@ -318,6 +318,7 @@ function parseStep(value: unknown, path: string, index: number): StepView {
   const source = requireRecord(value, path);
   return {
     index,
+    ...(source.step_id === undefined ? {} : {stepId: requireStepIdentity(source.step_id, `${path}.step_id`)}),
     name: requireString(source.name, `${path}.name`),
     instanceName: requireString(source.instance_name, `${path}.instance_name`),
     group: optionalString(source.group, `${path}.group`) ?? '',
@@ -329,6 +330,14 @@ function parseStep(value: unknown, path: string, index: number): StepView {
     ),
     runtimeStatus: parseRuntimeStatus(source.runtime_status),
   };
+}
+
+function requireStepIdentity(value: unknown, path: string): string {
+  const identity = requireString(value, path);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identity)) {
+    throw new ApiContractError(path, 'persisted UUID step identity');
+  }
+  return identity;
 }
 
 function parseRecipe(value: unknown, path: string): StepView[] {
@@ -733,4 +742,47 @@ export function parsePreviewManifestEnvelope(payload: unknown): PreviewManifestV
   const mode = optionalString(result.mode, 'result.mode');
   if (mode !== undefined) parsed.mode = mode;
   return parsed;
+}
+
+export function parseDisplayManifestEnvelope(payload: unknown): import('./types').DisplayManifestView {
+  const result = requireOkResult(payload);
+  const owners = requireRecord(result.owner_step_ids, 'result.owner_step_ids');
+  const ownerStepIds = Object.fromEntries(Object.entries(owners).map(([owner, id]) => {
+    if (!/^[1-9]\d*$/.test(owner) || Number(owner) > 0xffffffff) throw new ApiContractError('result.owner_step_ids', 'positive uint32 keys');
+    return [owner, requireString(id, `result.owner_step_ids.${owner}`)];
+  }));
+  const groups = requireArray(result.groups, 'result.groups');
+  if (groups.length > 256) throw new ApiContractError('result.groups', 'at most 256 groups');
+  const seen = new Set<string>();
+  const parsed = groups.map((value, index) => {
+    const path = `result.groups[${index}]`; const source = requireRecord(value, path);
+    const ownerId = requireInteger(source.owner_id, `${path}.owner_id`, 0);
+    const materialId = requireInteger(source.mat_id, `${path}.mat_id`, 1);
+    const stepId = source.step_id === null ? null : requireString(source.step_id, `${path}.step_id`);
+    if (ownerId > 0xffffffff || materialId > 65535 || (ownerId === 0 ? stepId !== null : ownerStepIds[String(ownerId)] !== stepId)) throw new ApiContractError(path, 'consistent owner identity');
+    const key = `${ownerId}:${materialId}`; if (seen.has(key)) throw new ApiContractError(path, 'unique owner/material group'); seen.add(key);
+    return {ownerId, materialId, stepId, voxelCount:requireInteger(source.voxel_count,`${path}.voxel_count`,1), triangleCount:requireInteger(source.tri_count,`${path}.tri_count`,0), bytes:requireInteger(source.bytes,`${path}.bytes`,0), boundingBox:parseBoundingBox(source.bbox,`${path}.bbox`)};
+  });
+  const domain = requireRecord(result.domain, 'result.domain');
+  return {revision:requireInteger(result.revision,'result.revision',0), available:requireBoolean(result.available,'result.available'), bounds:parseBoundingBox(domain.bounds_um,'result.domain.bounds_um'), ownerStepIds, groups:parsed,
+    stepEntities:requireArray(result.step_entities,'result.step_entities').map((value,index) => {
+      const path=`result.step_entities[${index}]`; const source=requireRecord(value,path);
+      return {stepId:requireString(source.step_id,`${path}.step_id`), ownerId:source.owner_id === null ? null : requireInteger(source.owner_id,`${path}.owner_id`,1),voxelCount:requireInteger(source.voxel_count,`${path}.voxel_count`,0),hideable:requireBoolean(source.hideable,`${path}.hideable`),unavailableReason:source.unavailable_reason === null ? null : requireString(source.unavailable_reason,`${path}.unavailable_reason`)};
+    }), unavailableReasons:parseStringArray(result.unavailable_reasons,'result.unavailable_reasons')};
+}
+
+export function parseDisplaySliceEnvelope(payload: unknown): import('./types').DisplaySliceView {
+  const result=requireOkResult(payload); const material=requireRecord(result.material,'result.material');
+  const slice=parseMaterialSliceEnvelope({ok:true,result:{...result,...material}});
+  const owner=requireRecord(result.owner,'result.owner');
+  if(owner.dtype !== 'u32') throw new ApiContractError('result.owner.dtype','u32');
+  const count=slice.data.length;
+  if(count * 6 > 32 * 1024 * 1024) throw new ApiContractError('result.shape','at most 32 MiB paired slice');
+  const encoded=requireString(owner.data_b64,'result.owner.data_b64');
+  if(encoded.length !== Math.ceil(count*4/3)*4) throw new ApiContractError('result.owner.data_b64','shape-sized base64 uint32');
+  let raw: string; try {raw=atob(encoded);} catch {throw new ApiContractError('result.owner.data_b64','base64');}
+  if(raw.length !== count*4 || btoa(raw) !== encoded) throw new ApiContractError('result.owner.data_b64','canonical shape-sized base64 uint32');
+  const owners=new Uint32Array(count);
+  for(let i=0;i<count;i++) owners[i]=(raw.charCodeAt(i*4) | raw.charCodeAt(i*4+1)<<8 | raw.charCodeAt(i*4+2)<<16 | raw.charCodeAt(i*4+3)<<24) >>> 0;
+  return {...slice,owners,revision:requireInteger(result.revision,'result.revision',0)};
 }
