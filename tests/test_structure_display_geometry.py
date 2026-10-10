@@ -132,6 +132,27 @@ class StructureDisplayGeometryTests(unittest.TestCase):
         np.testing.assert_array_equal(verts.min(0), [-.5, -.5, -.5])
         np.testing.assert_array_equal(verts.max(0), [3.5, 2.5, 1.5])
 
+    def test_group_budget_rejects_before_python_group_materialization(self):
+        self.fixture()
+        original_unique = np.unique
+
+        class NumericOnlyGroups(np.ndarray):
+            def __iter__(self):
+                raise AssertionError('Over-budget groups must not be materialized')
+
+        def numeric_groups(*args, **kwargs):
+            unique, counts = original_unique(*args, **kwargs)
+            return unique.view(NumericOnlyGroups), counts
+
+        cache = self.cache(max_groups=1)
+        with patch.object(np, 'unique', side_effect=numeric_groups), \
+             patch.object(tcad, 'marching_cubes', side_effect=AssertionError('Unexpected extraction')):
+            manifest = cache.manifest(self.model, 2, self.steps)
+        self.assertFalse(manifest['available'])
+        self.assertEqual(manifest['groups'], [])
+        self.assertIn('display_budget_exceeded', manifest['unavailable_reasons'])
+        self.assertNotIn('materialized', manifest['error'])
+
     def test_patterned_etch_hole_is_not_reintroduced_in_mesh_or_slice(self):
         from geometry_scene.bridge import _voxelize_mesh
         self.model = tcad.ProcessModel(self.db, grid_shape=(13, 13, 12), voxel_size_nm=5, max_workers=1)

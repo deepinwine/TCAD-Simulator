@@ -70,10 +70,12 @@ class DisplayGeometry:
                 keys |= owners.astype(np.uint64) << np.uint64(16)
             keys[grid == 0] = 0
             unique, counts = np.unique(keys, return_counts=True)
+            # Reject on numeric counts before any Python tuple/list expansion.
+            present_count = int(np.count_nonzero(unique))
+            if present_count > self.max_groups or grid.size * (present_count + 1) > self.max_scan_voxels:
+                raise DisplayDataError('Structure display group/scan budget exceeded', 'display_budget_exceeded', 413)
             present = [(int(k >> np.uint64(16)), int(k & np.uint64(65535)), int(n))
                        for k, n in zip(unique, counts) if k != 0]
-            if len(present) > self.max_groups or grid.size * (len(present) + 1) > self.max_scan_voxels:
-                raise DisplayDataError('Structure display group/scan budget exceeded', 'display_budget_exceeded', 413)
             for owner, mat, count in present:
                 manifest['entity_counts'][str(owner)] = manifest['entity_counts'].get(str(owner), 0) + count
             if any(owner == 0 for owner, _, _ in present):
