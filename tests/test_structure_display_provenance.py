@@ -1,3 +1,5 @@
+import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,6 +139,42 @@ class DisplayProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'display owner snapshot'):
             self.model.restore_state(snapshot)
 
+    def test_damaged_provenance_restore_preserves_entire_current_model(self):
+        self.step('Structure Wafer', thickness_nm=10)
+        target = self.model.snapshot_state()
+        target['display_owners'] = self.model.display_provenance.owners.copy()
+        self.step('Structure Wafer', thickness_nm=20)
+        before = self.model.snapshot_state()
+        corruptions = {
+            'dtype': lambda s: s.update(display_owners=s['display_owners'].astype(np.int32)),
+            'shape': lambda s: s.update(display_owners=s['display_owners'][:, :, :-1]),
+            'missing_map': lambda s: s.update(display_step_ids={}),
+            'invalid_identity': lambda s: s.update(display_step_ids={1: 'broken'}),
+            'invalid_payload': lambda s: s.update(display_owners={'codec': 'zlib', 'shape': self.model.grid.shape, 'dtype': 'uint32', 'data': b'broken'}),
+        }
+        for name, corrupt in corruptions.items():
+            with self.subTest(name=name):
+                damaged = copy.deepcopy(target)
+                corrupt(damaged)
+                with self.assertRaises(ValueError):
+                    self.model.restore_state(damaged, emit_log=True)
+                after = self.model.snapshot_state()
+                self.assertEqual(before.keys(), after.keys())
+                for key, value in before.items():
+                    if isinstance(value, np.ndarray):
+                        np.testing.assert_array_equal(value, after[key], err_msg=key)
+                    else:
+                        self.assertEqual(value, after[key], key)
+
+    def test_direct_provenance_restore_rejection_preserves_current_source(self):
+        self.step('Structure Wafer', thickness_nm=10)
+        source = self.model.display_provenance
+        owners, identities = source.owners, dict(source.step_ids)
+        with self.assertRaises(ValueError):
+            source.restore(owners.copy(), {}, self.model.grid)
+        self.assertIs(owners, source.owners)
+        self.assertEqual(identities, source.step_ids)
+
     def test_identity_roundtrip_old_blobs_and_collisions(self):
         from structure_cad.display_provenance import normalize_step_identities
         original = tcad.StructureDepositStep(self.db)
@@ -176,6 +214,43 @@ class DisplayStepIdentityRuntimeTests(unittest.TestCase):
     setUp = _Harness.setUp
     _request = _Harness._request
     request = _Harness.request
+
+    def test_damaged_saved_provenance_rejection_preserves_session(self):
+        self.request('POST', '/api/recipe/import', {'recipe': {'name': '来源目标', 'steps_full': [
+            {'name': 'Structure Wafer', 'params': {'thickness_nm': 20}},
+        ]}})
+        self.request('POST', '/api/run/all', {})
+        saved = self.request('POST', '/api/recipe/save', {'name': '来源目标'})['result']
+        self.request('POST', '/api/recipe/new', {'name': '保持当前'})
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(e for e in saved['recipes'] if e['id'] == saved['id'])
+        main = session.storage_dir / 'history' / entry['file']
+        target = tcad._webui_pickle_load(main)
+        targets = [main] + [p for p in (session.storage_dir / 'history').glob('*autosave*')
+                            if tcad._webui_pickle_load(p).get('recipe_id') == saved['id']]
+        for damage in ('missing_map', 'foreign_identity'):
+            with self.subTest(damage=damage):
+                broken = copy.deepcopy(target)
+                broken['model_state']['display_step_ids'] = ({} if damage == 'missing_map' else
+                    {owner: tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+                     for owner in target['model_state']['display_step_ids']})
+                for path in targets:
+                    tcad._webui_pickle_dump(path, broken)
+                before = self.request('GET', '/api/init')['result']
+                timeline = self.request('POST', '/api/timeline/get', {})['result']
+                pointer = json.loads((session.storage_dir / 'session_state.json').read_text())
+                rejected = self.request('POST', '/api/recipe/load', {'id': saved['id']}, ok=False)
+                self.assertFalse(rejected['ok'])
+                after = self.request('GET', '/api/init')['result']
+                for key in ('recipe', 'model', 'current_recipe', 'ui_state'):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+                after_pointer = json.loads((session.storage_dir / 'session_state.json').read_text())
+                # Existing recipe-switch behavior autosaves the recipe being left;
+                # its activity timestamp may advance, but the session must stay bound.
+                pointer.pop('last_active_ts', None)
+                after_pointer.pop('last_active_ts', None)
+                self.assertEqual(pointer, after_pointer)
 
     def test_identity_persists_through_duplicate_move_parameter_and_type_edits(self):
         steps = self.request('POST', '/api/recipe/add', {'name': 'Structure Deposit', 'params': {'thickness_nm': 10}})['result']

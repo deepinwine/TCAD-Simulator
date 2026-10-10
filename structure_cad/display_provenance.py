@@ -41,6 +41,9 @@ def validate_source_bound_identities(blobs, state):
         if normalize_step_id(identity) != identity or identity in seen:
             raise ValueError('Invalid source-bound step identity collision')
         seen.add(identity)
+    step_ids = state.get('display_step_ids', {})
+    if not isinstance(step_ids, dict) or any(identity not in seen for identity in step_ids.values()):
+        raise ValueError('Invalid source-bound display step identity mapping')
 
 
 class DisplayProvenance:
@@ -88,8 +91,8 @@ class DisplayProvenance:
             self.owners[additions & (grid != 0)] = owner
 
     def restore(self, owners, step_ids, grid):
-        self.invalidate()
         if owners is None:
+            self.invalidate()
             return
         if not isinstance(owners, np.ndarray) or owners.shape != grid.shape or owners.dtype != np.uint32:
             raise ValueError('Invalid Structure display owner snapshot')

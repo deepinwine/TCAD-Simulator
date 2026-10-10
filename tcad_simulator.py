@@ -9108,6 +9108,27 @@ class ProcessModel:
                 return None
             return None
 
+        # Validate detached geometry and source data before publishing any model state
+        # (including history/progress logs). A rejected snapshot leaves the model intact.
+        grid_mode = state.get("grid_compression", "dense")
+        if grid_mode == "dense" and "grid" in state:
+            restored_grid = state["grid"].copy()
+        else:
+            restored_grid = decompress_voxel_grid({
+                "mode": grid_mode,
+                "shape": tuple(int(v) for v in state.get("grid_shape", self.grid_shape)),
+                "payload": state.get("grid_payload"),
+            })
+        display_owners = _unpack_field(state.get("display_owners"))
+        if state.get("display_owners") is not None and display_owners is None:
+            raise ValueError("Invalid Structure display owner snapshot")
+        from structure_cad.display_provenance import DisplayProvenance
+        restored_source = DisplayProvenance(
+            max_bytes=self.display_provenance.max_bytes,
+            max_steps=self.display_provenance.max_steps,
+        )
+        restored_source.restore(display_owners, state.get("display_step_ids", {}), restored_grid)
+
         # Restore history early so any progress logs emitted during restore are preserved.
         try:
             self.history = list(state.get("history", self.history))
@@ -9133,19 +9154,9 @@ class ProcessModel:
             suffix = f" ({comp_bytes / (1024.0 * 1024.0):.2f} MB)" if comp_bytes is not None else ""
             self._log(f"{log_prefix}Restore 1/3: grid {shape0} mode={grid_mode}{suffix}")
         t0_grid = time.perf_counter()
-        if grid_mode == "dense" and "grid" in state:
-            self.grid = state["grid"].copy()
-        else:
-            blob = {
-                "mode": grid_mode,
-                "shape": tuple(int(v) for v in state.get("grid_shape", self.grid_shape)),
-                "payload": state.get("grid_payload"),
-            }
-            self.grid = decompress_voxel_grid(blob)
-        display_owners = _unpack_field(state.get("display_owners"))
-        if state.get("display_owners") is not None and display_owners is None:
-            raise ValueError("Invalid Structure display owner snapshot")
-        self.display_provenance.restore(display_owners, state.get("display_step_ids", {}), self.grid)
+        self.grid = restored_grid
+        self.display_provenance.owners = restored_source.owners
+        self.display_provenance.step_ids = restored_source.step_ids
         if emit_log:
             self._log(f"{log_prefix}Restore 1/3: grid done ({time.perf_counter() - t0_grid:.2f}s)")
 
