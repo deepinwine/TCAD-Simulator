@@ -27,22 +27,29 @@
 创建 `structure_cad/display_geometry.py`、`tests/test_structure_display_geometry.py`、
 `tests/test_structure_display_http.py`；修改 worker/HTTP 路由及 API 契约文档。
 
-- [ ] 先写小型真实 fixture：两次同材沉积，后续刻蚀；分组键为 `(owner_id, mat_id)`，
+- [x] 先写小型真实 fixture：两次同材沉积，后续刻蚀；分组键为 `(owner_id, mat_id)`，
   每个非空分组单独封闭；unknown owner 也有网格但不能绑定到猜测步骤。
   对每个分组验证返回坐标、体积及 shared boundary，删除区域不在任何输出中。
   核心断言：`np.testing.assert_array_equal(model.grid, before_grid)`。
-- [ ] 跑新测试，确认因缺少显示数据行为而失败，再复用既有网格提取与二进制编码，
+- [x] 跑新测试，确认因缺少显示数据行为而失败，再复用既有网格提取与二进制编码，
   不在前端造几何、不修改 canonical GeometryScene 的材料聚合契约。
-- [ ] 新增 GET `/api/structure/display/manifest`：revision、domain、owner→step_id、
+- [x] 新增 GET `/api/structure/display/manifest`：revision、domain、owner→step_id、
   当前实体计数、分组网格摘要与不可用原因；GET `/api/structure/display/mesh`：
   按 revision、owner_id、mat_id 读取二进制显示网格；GET `/api/structure/display/slice`：
   同轴同索引的材料 u16 与 owner u32，按既有三轴方向排列。
-- [ ] revision 不匹配明确拒绝；未知分组、错误 method、跨会话数据、空模型有测试。
+- [x] revision 不匹配明确拒绝；未知分组、错误 method、跨会话数据、空模型有测试。
   预算至少限制网格数、总三角形及二进制缓存字节；不截断伪装成功。
   按 model revision 缓存，重复读取不重新提取；旧正式端点保持原行为。
-- [ ] HTTP 比较前后 recipe、grid、snapshot、timeline、revision 和保存文件一致；
+- [x] HTTP 比较前后 recipe、grid、snapshot、timeline、revision 和保存文件一致；
   实测未调用 execute。新端点同提交入 ARCHITECTURE_TARGET 表和命名 HTTP 测试套件。
-- [ ] 跑专项、AGENTS 基线、compile、grid128 基准；小提交后两阶段审查。
+- [x] 跑专项、AGENTS 基线、compile、grid128 基准；小提交后两阶段审查。
+
+任务 2 验证记录：实现提交 `ce94f1f`，预算预检修复 `26b9b1`；两阶段审查均
+APPROVE。质量审查独立运行 27 项显示与 M2 契约测试通过（15.405 秒），主代理
+独立运行 19 项专项、完整生命周期与文档一致性测试通过（4.563 秒）。实现侧运行
+187 项 AGENTS 基线、82 项结构与桥接回归、编译及 128³ 五个流程基准通过；
+预算修复后重新跑 19 项专项与契约检查，未重复全量基准。前端按钮尚未接入，
+正式服务未重启，尚未合并或推送；发布在任务 4 验收后进行。
 
 ## 任务 3：眼睛按钮与渲染过滤
 
