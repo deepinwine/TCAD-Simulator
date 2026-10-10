@@ -5384,6 +5384,53 @@ def _interpolate_vertex(p1: np.ndarray, p2: np.ndarray, v1: float, v2: float, is
     return p1 + t * (p2 - p1)
 
 
+def _strict_voxel_boundary_mesh(field, iso_value, spacing, triangle_limit=None):
+    """Exact cell faces, centered at i*spacing; no interpolation or smoothing.
+
+    Count boundary faces before allocating geometry. The optional path is only
+    for display entities; the usual contour extractor remains unchanged.
+    """
+    occupied = np.asarray(field) > iso_value
+    if occupied.ndim != 3:
+        raise ValueError('Strict voxel field must be three-dimensional')
+    padded = np.pad(occupied, 1, constant_values=False)
+    boundaries = []
+    count = 0
+    for axis in range(3):
+        for sign in (-1, 1):
+            neighbor = [slice(1, -1)] * 3
+            neighbor[axis] = slice(0, -2) if sign < 0 else slice(2, None)
+            boundary = occupied & ~padded[tuple(neighbor)]
+            count += int(np.count_nonzero(boundary))
+            if triangle_limit is not None and count * 2 > triangle_limit:
+                raise ValueError('Structure display triangle budget exceeded')
+            boundaries.append((axis, sign, boundary))
+    vertices = np.empty((count * 4, 3), dtype=np.float64)
+    faces = np.empty((count * 2, 3), dtype=np.int32)
+    offset = 0
+    for axis, sign, boundary in boundaries:
+        centers = np.argwhere(boundary).astype(np.float64)
+        size = len(centers)
+        if not size:
+            continue
+        u, v = (axis + 1) % 3, (axis + 2) % 3
+        corners = np.full((4, 3), -.5)
+        corners[:, axis] = sign * .5
+        corners[1, u] = corners[2, u] = .5
+        corners[2, v] = corners[3, v] = .5
+        vertices[offset * 4:(offset + size) * 4] = (
+            (centers[:, None, :] + corners[None, :, :]) * np.asarray(spacing)
+        ).reshape(-1, 3)
+        local = np.array([[0, 1, 2], [0, 2, 3]])
+        if sign < 0:
+            local = local[:, [0, 2, 1]]
+        faces[offset * 2:(offset + size) * 2] = (
+            np.arange(offset, offset + size)[:, None, None] * 4 + local[None, :, :]
+        ).reshape(-1, 3)
+        offset += size
+    return vertices, faces
+
+
 def marching_cubes(
     field: np.ndarray,
     iso_value: float,
@@ -5391,7 +5438,11 @@ def marching_cubes(
     step_size: int = 1,
     spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     prefer_skimage: bool = True,
+    strict_voxels: bool = False,
+    triangle_limit: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    if strict_voxels:
+        return _strict_voxel_boundary_mesh(field, iso_value, spacing, triangle_limit)
     step = max(1, int(step_size))
     # Important: When `step_size > 1`, `skimage.measure.marching_cubes` (and the fallback
     # implementation below) can return non-watertight meshes if the scalar field shape is not
@@ -18942,6 +18993,13 @@ class ProcessModel:
 
         flags = 1 | 2 | 4
         header = struct.pack("<8sIIII", b"TCADGEOM", 1, int(flags), int(vcount), int(icount))
+        # Display caches can reuse the exact codec without writing saved files.
+        if hasattr(path, 'write'):
+            path.write(header)
+            path.write(uniq_pos.astype(np.float32, copy=False).ravel().tobytes(order="C"))
+            path.write(uniq_n.astype(np.float32, copy=False).ravel().tobytes(order="C"))
+            path.write(indices.tobytes(order="C"))
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             f.write(header)
@@ -37654,6 +37712,8 @@ def _webui_worker_main(
     max_undo = 20
 
     model_revision = 0
+    from structure_cad.display_geometry import DisplayGeometry, DisplayDataError
+    structure_display_cache = DisplayGeometry()
     preview_ready: Dict[str, int] = {}
     video_active = False
     video_plan: List[int] = []
@@ -62741,6 +62801,7 @@ def _webui_worker_main(
                 "init", "get_recipe", "history_list", "timeline_get", "log_tail", "exports_list",
                 "mask_asset_list", "mask_asset_get", "preview_manifest", "preview_elements",
                 "render_gbuffer", "slice", "mask_preview_step", "profile_status",
+                "structure_display_manifest", "structure_display_mesh", "structure_display_slice",
                 "library_recipe_list", "library_step_list", "library_recipe_get", "library_step_get",
                 "agent_status", "agent_lit_list", "agent_ake_stats", "agent_ake_search", "llm_quota_status",
             }
@@ -73155,6 +73216,26 @@ def _webui_worker_main(
                 conn.send({"ok": True, "result": exported, "rid": rid})
                 continue
 
+            if cmd in {"structure_display_manifest", "structure_display_mesh", "structure_display_slice"}:
+                try:
+                    if cmd == "structure_display_manifest":
+                        result = structure_display_cache.manifest(model, model_revision, steps)
+                        conn.send({"ok": True, "result": result, "rid": rid})
+                    elif cmd == "structure_display_mesh":
+                        data = structure_display_cache.mesh(
+                            model, model_revision, int(payload['owner_id']), int(payload['mat_id']),
+                            revision=int(payload['revision']))
+                        conn.send({"ok": True, "data": data, "rid": rid})
+                    else:
+                        result = structure_display_cache.slice(
+                            model, model_revision, payload['axis'], int(payload['index']),
+                            revision=int(payload['revision']))
+                        conn.send({"ok": True, "result": result, "rid": rid})
+                except DisplayDataError as exc:
+                    conn.send({"ok": False, "code": exc.code, "error": str(exc),
+                               "http_status": exc.status, "rid": rid})
+                continue
+
             if cmd == "preview_manifest":
                 face_limit = int(payload.get("face_limit", 40000))
                 mode = str(payload.get("mode", "solid")).strip().lower()
@@ -74841,6 +74922,39 @@ class _WebUIRequestHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/history":
             resp = sess.rpc("history_list", {})
             self._send_json(resp, status=200, set_cookie=set_cookie)
+            return
+
+        if (path == "/api/structure/display/manifest" or
+                path == "/api/structure/display/mesh" or
+                path == "/api/structure/display/slice"):
+            kind = path.rsplit('/', 1)[-1]
+            payload = {}
+            if kind != 'manifest':
+                try:
+                    payload['revision'] = int(query['revision'][0])
+                    if payload['revision'] < 0:
+                        raise ValueError()
+                    if kind == 'mesh':
+                        payload['owner_id'] = int(query['owner_id'][0])
+                        payload['mat_id'] = int(query['mat_id'][0])
+                        if not (0 <= payload['owner_id'] <= np.iinfo(np.uint32).max and
+                                0 < payload['mat_id'] <= np.iinfo(np.uint16).max):
+                            raise ValueError()
+                    else:
+                        payload['axis'] = str(query['axis'][0]).upper()
+                        payload['index'] = int(query['index'][0])
+                except (KeyError, ValueError, TypeError, IndexError):
+                    self._send_json({"ok": False, "code": "invalid_display_request",
+                                     "error": "Invalid Structure display query"}, status=400, set_cookie=set_cookie)
+                    return
+            resp = sess.rpc('structure_display_' + kind, payload, timeout_s=120.0)
+            if not resp.get('ok'):
+                self._send_json(resp, status=int(resp.get('http_status', 400)), set_cookie=set_cookie)
+            elif kind == 'mesh':
+                self._send_bytes(resp['data'], 'application/octet-stream', status=200,
+                                 extra_headers={"Cache-Control": "no-store"}, set_cookie=set_cookie)
+            else:
+                self._send_json(resp, status=200, set_cookie=set_cookie)
             return
 
         if path == "/api/slice":

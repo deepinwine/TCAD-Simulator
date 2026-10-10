@@ -1688,6 +1688,33 @@ class M2ApiContractTests(unittest.TestCase):
                 check_json(raw, "/api/slice")
                 self._assert_material_slice(json.loads(raw)["result"], "Z", 0, (12, 12), 15)
 
+                # Additive display reads use the same session and binary codec.
+                status, headers, raw = self._request(base, cookie, "GET", "/api/structure/display/manifest")
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/structure/display/manifest")
+                display = json.loads(raw)["result"]
+                self.assertTrue(display["available"], display)
+                self.assertTrue(display["groups"])
+                group = display["groups"][0]
+                status, headers, raw = self._request(base, cookie, "GET",
+                    "/api/structure/display/mesh?revision={}&owner_id={}&mat_id={}".format(
+                        display["revision"], group["owner_id"], group["mat_id"]))
+                self.assertEqual(status, 200, raw[:200])
+                check_binary(headers, raw, "/api/structure/display/mesh")
+                self.assertEqual(raw[:8], b"TCADGEOM")
+                from tests.test_structure_display_geometry import decode_mesh
+                triangles = decode_mesh(raw)
+                self.assertEqual(len(triangles), group["tri_count"])
+                self.assertTrue(tcad.np.isfinite(triangles).all())
+                status, headers, raw = self._request(base, cookie, "GET",
+                    "/api/structure/display/slice?revision={}&axis=Z&index=0".format(display["revision"]))
+                self.assertEqual(status, 200, raw[:200])
+                check_json(raw, "/api/structure/display/slice")
+                section = json.loads(raw)["result"]
+                self.assertEqual(section["shape"], [12, 12])
+                self.assertEqual(section["material"]["dtype"], "u16")
+                self.assertEqual(section["owner"]["dtype"], "u32")
+
                 status, headers, raw = self._request(
                     base, cookie, "POST", "/api/render/gbuffer", {"axis": "Z", "kind": "material", "index": 0}
                 )

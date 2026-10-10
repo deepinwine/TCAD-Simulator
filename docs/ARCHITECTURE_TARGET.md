@@ -119,6 +119,9 @@ the frozen-core tests when changing those fields.
 | `/api/preview/stl` | GET | query `mat_id`、`rev`、`mode` | **binary** STL（`application/sla`） |
 | `/api/preview/elements` | GET | query `max_points`、`channels`、`quality` | **binary**（动态 content-type） |
 | `/api/slice` | GET | query `axis=X/Y/Z`、`index`、`kind=material` | JSON；`result` 为 `axis`、`index`、`index_max`、`shape=[rows,columns]`、`dtype="u16"`、`data_b64`（按行排列的材料 ID）；X 的列/行为 Y/Z，Y 为 X/Z，Z 为 X/Y；端点保持原有索引钳制语义 |
+| `/api/structure/display/manifest` | GET | — | JSON；`result` 为 `revision`、`available`、`domain`（含 `bounds_um`）、`owner_step_ids`、`entity_counts`、`step_entities`、`groups[]`（`owner_id`、`mat_id`、`step_id`、`voxel_count`、`tri_count`、`bytes`、`bbox`）、`unavailable_reasons`、`budgets`、`cache_bytes`；准备失败为 `available:false`、空 groups 和明确 error，不发布部分网格 |
+| `/api/structure/display/mesh` | GET | 必填 query `revision`、`owner_id>=0`、`mat_id>0` | **binary** `application/octet-stream`，沿用 `TCADGEOM` v1 编码，坐标 µm；revision 不符 409 `revision_mismatch`，不存在分组 404 `unknown_display_group`，预算失败 413，准备失败 503；JSON error |
+| `/api/structure/display/slice` | GET | 必填 query `revision`、`axis=X/Y/Z`、合法 `index` | JSON；`result` 含 `revision`、`axis`、`index`、`index_max`、`shape`、`material:{dtype:"u16",data_b64}` 和 `owner:{dtype:"u32",data_b64}`（little-endian，同行序和方向）；严格拒绝非法轴/越界索引 400，revision 不符 409 |
 | `/api/render/gbuffer` | POST | render 设置 JSON | **binary**（支持 gzip），JSON error |
 | `/api/material_colors` | POST | `{action, mode?, …}` | JSON |
 | `/api/mask/preview` | GET | query `file`（已上传掩膜文件名） | **binary** `image/*`（`.npy` → `image/png`，其他支持格式保留源 MIME），JSON error |
@@ -154,7 +157,23 @@ identity 时生成新值，同配方重复 identity 保留首个并为后续步�
 材料 grid 仍是 canonical；旧 snapshot 来源未知，不回放补算。来源沿用 snapshot 压缩、
 溢出与删除生命周期，失败工艺事务一并回滚。128³ owner 数组约 8 MiB，首次分配前
 限制 256 MiB 和 65,536 个登记身份；reset 释放。未跟踪来源的旧工艺几何变更使来源
-失效为未知，纯缓存清理保留来源。本基础不新增步骤眼睛 API 或渲染过滤。
+失效为未知，纯缓存清理保留来源。
+
+只读展示端点由 `tests/test_structure_display_http.py::StructureDisplayHTTPTests` 覆盖。
+展示缓存独立于按材料聚合的 canonical `GeometryScene`，按当前 model revision 缓存
+`(owner_id, mat_id)` 的剩余非空体素，复用既有网格提取器的加法精确体素边界模式与
+二进制编码器；保留内部共享边界、不平滑、不抽稀、不恢复删除体素。体素中心为
+`i*voxel`，边界为 `[i-.5,i+.5]*voxel`，与 ADR-029 的裁剪坐标一致。
+owner 0 网格始终可见但 step_id 为 null；初始化、无剩余实体、来源未知或准备失败
+提供明确眼睛不可用原因。步骤眼睛仅为后续客户端本地显隐，本任务不增加 UI。
+三个端点均不执行/回放/重建工艺，不改 grid、配方 enabled、历史、snapshot、revision
+或保存文件。切片材料/来源成对读取，空气 owner 为 0，方向与既有 `/api/slice` 一致。
+每 revision 最多 256 分组、1,000,000 三角形、128 MiB 二进制缓存；累计扫描最多
+128 Mi 个体素访问，packed-key 工作空间预检为每体素 40 字节、上限 256 MiB，
+切片原始材料+owner 上限 32 MiB。三角形数在几何分配前按实际边界面累计，编码前
+按每三角形最多 84 字节及每组 24 字节头预检剩余缓存预算。超预算拒绝整次准备，
+不截断、不静默跳过小组；失败缓存到 revision 改变，重复读取不重新提取。此预算
+可能保守拒绝可焊接缩小的网格，首次准备仍有 CPU/内存成本。
 
 Mask Asset 加法契约（ADR-026）：`mask_asset_id` 与正整数 `mask_asset_revision` 绑定不可变
 revision；schema、资源预算、SHA-256 与栅格预检全部成功后才原子发布。保存/导入与步骤
