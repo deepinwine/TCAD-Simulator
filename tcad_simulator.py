@@ -58243,20 +58243,16 @@ def _webui_worker_main(
         validate_source_bound_identities(blob.get("steps_full") or blob.get("steps"), blob.get("model_state"))
         try:
             stored_id = blob.get("recipe_id")
-            if isinstance(stored_id, str) and stored_id.strip():
-                current_recipe_id = stored_id.strip()
             stored_name = blob.get("recipe_name")
-            if isinstance(stored_name, str) and stored_name.strip():
-                current_recipe_name = stored_name.strip()[:80]
-
             state = blob.get("model_state")
             stored_steps = blob.get("steps_full") or blob.get("steps")
+            migration_warnings = []
             if isinstance(stored_steps, list) and stored_steps:
                 # History snapshots can contain legacy parameters; migrate in-memory before rebuilding.
                 try:
                     stored_steps, mig_warn = _recipe_migrate_resist_develop_time(stored_steps, from_version=_recipe_json_version(blob))
                     if mig_warn:
-                        pending_warnings.extend([str(w) for w in mig_warn if str(w).strip()][:8])
+                        migration_warnings = [str(w) for w in mig_warn if str(w).strip()][:8]
                 except Exception:
                     pass
                 rebuilt: List[ProcessStep] = []
@@ -58287,6 +58283,13 @@ def _webui_worker_main(
 
             elif isinstance(state, dict):
                 model.restore_state(state)
+            # Publish recipe metadata only after detached source/grid validation and
+            # restore succeed; failed autosaves must keep the current session binding.
+            if isinstance(stored_id, str) and stored_id.strip():
+                current_recipe_id = stored_id.strip()
+            if isinstance(stored_name, str) and stored_name.strip():
+                current_recipe_name = stored_name.strip()[:80]
+            pending_warnings.extend(migration_warnings)
             if not current_recipe_id:
                 current_recipe_id = secrets.token_hex(8)
                 blob["recipe_id"] = current_recipe_id

@@ -252,6 +252,51 @@ class DisplayStepIdentityRuntimeTests(unittest.TestCase):
                 after_pointer.pop('last_active_ts', None)
                 self.assertEqual(pointer, after_pointer)
 
+    def test_damaged_autosave_rejection_preserves_session(self):
+        self.request('POST', '/api/recipe/import', {'recipe': {'name': '自动保存来源', 'steps_full': [
+            {'name': 'Structure Wafer', 'params': {'thickness_nm': 20}},
+        ]}})
+        self.request('POST', '/api/run/all', {})
+        saved = self.request('POST', '/api/recipe/save', {'name': '自动保存来源'})['result']
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(e for e in saved['recipes'] if e['id'] == saved['id'])
+        target = tcad._webui_pickle_load(session.storage_dir / 'history' / entry['file'])
+        self.request('POST', '/api/recipe/new', {'name': '自动保存拒绝后保持'})
+        for damage in ('missing_map', 'foreign_identity', 'dtype', 'shape', 'payload'):
+            with self.subTest(damage=damage):
+                broken = copy.deepcopy(target)
+                state = broken['model_state']
+                if damage == 'missing_map':
+                    state['display_step_ids'] = {}
+                elif damage == 'foreign_identity':
+                    state['display_step_ids'] = {owner: tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+                                                for owner in state['display_step_ids']}
+                elif damage == 'dtype':
+                    state['display_owners'] = np.zeros((12, 12, 32), dtype=np.int32)
+                elif damage == 'shape':
+                    state['display_owners'] = np.zeros((12, 12, 31), dtype=np.uint32)
+                else:
+                    state['display_owners']['data'] = b'broken'
+                tcad._webui_pickle_dump(session.storage_dir / 'autosave.pkl.gz', broken)
+                before = self.request('GET', '/api/init')['result']
+                timeline = self.request('POST', '/api/timeline/get', {})['result']
+                persisted = (session.storage_dir / 'session_state.json').read_bytes()
+                status, _, raw = self._request(self.manager.url, self.cookie, 'POST', '/api/load_autosave', {})
+                self.assertEqual(status, 200)
+                rejected = json.loads(raw)
+                self.assertTrue(not rejected['ok'] or not rejected['result']['loaded'])
+                after = self.request('GET', '/api/init')['result']
+                for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+                self.assertEqual(persisted, (session.storage_dir / 'session_state.json').read_bytes())
+        tcad._webui_pickle_dump(session.storage_dir / 'autosave.pkl.gz', target)
+        restored = self.request('POST', '/api/load_autosave', {})['result']
+        self.assertTrue(restored['loaded'])
+        current = self.request('GET', '/api/init')['result']['current_recipe']
+        self.assertEqual(saved['id'], current['id'])
+        self.assertEqual('自动保存来源', current['name'])
+
     def test_identity_persists_through_duplicate_move_parameter_and_type_edits(self):
         steps = self.request('POST', '/api/recipe/add', {'name': 'Structure Deposit', 'params': {'thickness_nm': 10}})['result']
         index = len(steps) - 1
