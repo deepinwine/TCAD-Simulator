@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -175,6 +176,19 @@ class DisplayProvenanceTests(unittest.TestCase):
         self.assertIs(owners, source.owners)
         self.assertEqual(identities, source.step_ids)
 
+    def test_owner_payload_metadata_rejected_before_array_allocation(self):
+        self.step('Structure Wafer', thickness_nm=10)
+        state = self.model.snapshot_state()
+        state['grid_compression'] = 'dense'
+        state['grid'] = self.model.grid.copy()
+        for shape, dtype in (((4, 4, 21), 'uint32'), ((4, 4, 20), 'float64'), ((4, 4, 100000000), 'uint32')):
+            with self.subTest(shape=shape, dtype=dtype):
+                state['display_owners'] = {'codec': 'zlib', 'shape': shape, 'dtype': dtype, 'data': b'broken'}
+                with patch('numpy.empty', side_effect=AssertionError('must validate owner metadata first')) as allocation:
+                    with self.assertRaisesRegex(ValueError, 'display owner snapshot'):
+                        self.model.restore_state(state)
+                    allocation.assert_not_called()
+
     def test_identity_roundtrip_old_blobs_and_collisions(self):
         from structure_cad.display_provenance import normalize_step_identities
         original = tcad.StructureDepositStep(self.db)
@@ -296,6 +310,51 @@ class DisplayStepIdentityRuntimeTests(unittest.TestCase):
         current = self.request('GET', '/api/init')['result']['current_recipe']
         self.assertEqual(saved['id'], current['id'])
         self.assertEqual('自动保存来源', current['name'])
+
+    def test_unsupported_source_step_rejected_before_recipe_rebuild_publication(self):
+        self.request('POST', '/api/recipe/import', {'recipe': {'name': '完整来源', 'steps_full': [
+            {'name': 'Structure Wafer', 'params': {'thickness_nm': 20}},
+            {'name': 'Structure Deposit', 'params': {'thickness_nm': 10}},
+        ]}})
+        self.request('POST', '/api/run/all', {})
+        saved = self.request('POST', '/api/recipe/save', {'name': '完整来源'})['result']
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(e for e in saved['recipes'] if e['id'] == saved['id'])
+        main = session.storage_dir / 'history' / entry['file']
+        target = tcad._webui_pickle_load(main)
+        target['steps_full'][1]['name'] = 'Unsupported Source Step'
+        self.request('POST', '/api/recipe/new', {'name': '保持完整会话'})
+        targets = [main] + [p for p in (session.storage_dir / 'history').glob('*autosave*')
+                            if tcad._webui_pickle_load(p).get('recipe_id') == saved['id']]
+        for endpoint, all_skipped in [(endpoint, all_skipped)
+                                     for endpoint in ('/api/recipe/load', '/api/load_autosave')
+                                     for all_skipped in (False, True)]:
+            with self.subTest(endpoint=endpoint, all_skipped=all_skipped):
+                fixture = copy.deepcopy(target)
+                if all_skipped:
+                    fixture['steps_full'][0]['name'] = 'Unsupported Wafer Step'
+                for path in targets:
+                    tcad._webui_pickle_dump(path, fixture)
+                tcad._webui_pickle_dump(session.storage_dir / 'autosave.pkl.gz', fixture)
+                original_files = {path: path.read_bytes() for path in targets}
+                before = self.request('GET', '/api/init')['result']
+                timeline = self.request('POST', '/api/timeline/get', {})['result']
+                persisted = json.loads((session.storage_dir / 'session_state.json').read_text())
+                body = {'id': saved['id']} if endpoint == '/api/recipe/load' else {}
+                status, _, raw = self._request(self.manager.url, self.cookie, 'POST', endpoint, body)
+                self.assertEqual(status, 200)
+                result = json.loads(raw)
+                self.assertTrue(not result['ok'] or result['result'].get('loaded') is False, result)
+                after = self.request('GET', '/api/init')['result']
+                for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+                after_persisted = json.loads((session.storage_dir / 'session_state.json').read_text())
+                if endpoint == '/api/recipe/load':
+                    persisted.pop('last_active_ts', None)
+                    after_persisted.pop('last_active_ts', None)
+                self.assertEqual(persisted, after_persisted)
+                self.assertEqual(original_files, {path: path.read_bytes() for path in targets})
 
     def test_identity_persists_through_duplicate_move_parameter_and_type_edits(self):
         steps = self.request('POST', '/api/recipe/add', {'name': 'Structure Deposit', 'params': {'thickness_nm': 10}})['result']

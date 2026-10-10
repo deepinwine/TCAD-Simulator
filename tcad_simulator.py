@@ -9119,7 +9119,25 @@ class ProcessModel:
                 "shape": tuple(int(v) for v in state.get("grid_shape", self.grid_shape)),
                 "payload": state.get("grid_payload"),
             })
-        display_owners = _unpack_field(state.get("display_owners"))
+        owner_payload = state.get("display_owners")
+        if owner_payload is not None:
+            # Owner metadata is a strict contract: reject wrong/oversized arrays
+            # before the shared field unpacker allocates or reads a spill payload.
+            try:
+                if isinstance(owner_payload, np.ndarray):
+                    owner_shape, owner_dtype = owner_payload.shape, owner_payload.dtype
+                elif isinstance(owner_payload, dict) and str(owner_payload.get("codec", "")).lower() == "zlib":
+                    owner_shape = tuple(int(v) for v in owner_payload.get("shape", ()))
+                    owner_dtype = np.dtype(str(owner_payload.get("dtype", "float32")))
+                else:
+                    raise ValueError()
+                owner_bytes = int(np.prod(owner_shape, dtype=object)) * np.dtype(np.uint32).itemsize
+                if (owner_shape != restored_grid.shape or owner_dtype != np.uint32
+                        or owner_bytes > self.display_provenance.max_bytes):
+                    raise ValueError()
+            except (ValueError, TypeError, OverflowError):
+                raise ValueError("Invalid Structure display owner snapshot") from None
+        display_owners = _unpack_field(owner_payload)
         if state.get("display_owners") is not None and display_owners is None:
             raise ValueError("Invalid Structure display owner snapshot")
         from structure_cad.display_provenance import DisplayProvenance
@@ -58263,6 +58281,7 @@ def _webui_worker_main(
                     if rebuilt_step is not None:
                         rebuilt.append(rebuilt_step)
                 normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
+                validate_source_bound_identities([{"step_id": step.step_id} for step in rebuilt], state)
                 if isinstance(state, dict):
                     model.restore_state(state)
                 if rebuilt:
@@ -58416,6 +58435,7 @@ def _webui_worker_main(
                     if rebuilt_step is not None:
                         rebuilt.append(rebuilt_step)
                 normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
+                validate_source_bound_identities([{"step_id": step.step_id} for step in rebuilt], state)
                 if isinstance(state, dict):
                     model.restore_state(state)
                 if rebuilt:
