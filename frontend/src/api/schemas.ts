@@ -747,9 +747,13 @@ export function parsePreviewManifestEnvelope(payload: unknown): PreviewManifestV
 export function parseDisplayManifestEnvelope(payload: unknown): import('./types').DisplayManifestView {
   const result = requireOkResult(payload);
   const owners = requireRecord(result.owner_step_ids, 'result.owner_step_ids');
+  const registryIdentities = new Set<string>();
   const ownerStepIds = Object.fromEntries(Object.entries(owners).map(([owner, id]) => {
     if (!/^[1-9]\d*$/.test(owner) || Number(owner) > 0xffffffff) throw new ApiContractError('result.owner_step_ids', 'positive uint32 keys');
-    return [owner, requireString(id, `result.owner_step_ids.${owner}`)];
+    const stepId = requireStepIdentity(id, `result.owner_step_ids.${owner}`);
+    if (registryIdentities.has(stepId)) throw new ApiContractError('result.owner_step_ids', 'unique step identity per owner');
+    registryIdentities.add(stepId);
+    return [owner, stepId];
   }));
   const groups = requireArray(result.groups, 'result.groups');
   if (groups.length > 256) throw new ApiContractError('result.groups', 'at most 256 groups');
@@ -758,16 +762,24 @@ export function parseDisplayManifestEnvelope(payload: unknown): import('./types'
     const path = `result.groups[${index}]`; const source = requireRecord(value, path);
     const ownerId = requireInteger(source.owner_id, `${path}.owner_id`, 0);
     const materialId = requireInteger(source.mat_id, `${path}.mat_id`, 1);
-    const stepId = source.step_id === null ? null : requireString(source.step_id, `${path}.step_id`);
+    const stepId = source.step_id === null ? null : requireStepIdentity(source.step_id, `${path}.step_id`);
     if (ownerId > 0xffffffff || materialId > 65535 || (ownerId === 0 ? stepId !== null : ownerStepIds[String(ownerId)] !== stepId)) throw new ApiContractError(path, 'consistent owner identity');
     const key = `${ownerId}:${materialId}`; if (seen.has(key)) throw new ApiContractError(path, 'unique owner/material group'); seen.add(key);
     return {ownerId, materialId, stepId, voxelCount:requireInteger(source.voxel_count,`${path}.voxel_count`,1), triangleCount:requireInteger(source.tri_count,`${path}.tri_count`,0), bytes:requireInteger(source.bytes,`${path}.bytes`,0), boundingBox:parseBoundingBox(source.bbox,`${path}.bbox`)};
   });
   const domain = requireRecord(result.domain, 'result.domain');
+  const entityIdentities = new Set<string>();
   return {revision:requireInteger(result.revision,'result.revision',0), available:requireBoolean(result.available,'result.available'), bounds:parseBoundingBox(domain.bounds_um,'result.domain.bounds_um'), ownerStepIds, groups:parsed,
     stepEntities:requireArray(result.step_entities,'result.step_entities').map((value,index) => {
       const path=`result.step_entities[${index}]`; const source=requireRecord(value,path);
-      return {stepId:requireString(source.step_id,`${path}.step_id`), ownerId:source.owner_id === null ? null : requireInteger(source.owner_id,`${path}.owner_id`,1),voxelCount:requireInteger(source.voxel_count,`${path}.voxel_count`,0),hideable:requireBoolean(source.hideable,`${path}.hideable`),unavailableReason:source.unavailable_reason === null ? null : requireString(source.unavailable_reason,`${path}.unavailable_reason`)};
+      const stepId = requireStepIdentity(source.step_id, `${path}.step_id`);
+      const ownerId = source.owner_id === null ? null : requireInteger(source.owner_id, `${path}.owner_id`, 1);
+      if (ownerId !== null && (ownerId > 0xffffffff || ownerStepIds[String(ownerId)] !== stepId)) {
+        throw new ApiContractError(`${path}.owner_id`, 'uint32 owner bound to the same registry step identity');
+      }
+      if (entityIdentities.has(stepId)) throw new ApiContractError(`${path}.step_id`, 'unique entity step identity');
+      entityIdentities.add(stepId);
+      return {stepId, ownerId,voxelCount:requireInteger(source.voxel_count,`${path}.voxel_count`,0),hideable:requireBoolean(source.hideable,`${path}.hideable`),unavailableReason:source.unavailable_reason === null ? null : requireString(source.unavailable_reason,`${path}.unavailable_reason`)};
     }), unavailableReasons:parseStringArray(result.unavailable_reasons,'result.unavailable_reasons')};
 }
 

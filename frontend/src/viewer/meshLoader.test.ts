@@ -98,6 +98,37 @@ function fakeDependencies(options: FakeOptions = {}) {
 }
 
 describe('createMeshLoader', () => {
+  it.each(['triangles', 'bytes'])('rejects cumulative display %s budget before any group download', async budget => {
+    const deps = fakeDependencies({manifestProvider: () => manifest(3, [mesh(1)])});
+    const groups = [1, 2].map(ownerId => ({ownerId, materialId: 1, stepId: `s-${ownerId}`, voxelCount: 1,
+      triangleCount: budget === 'triangles' ? 500001 : 12,
+      bytes: budget === 'bytes' ? 64 * 1024 * 1024 + 1 : 8, boundingBox: mesh(1).boundingBox}));
+    const fetchDisplayMesh = vi.fn(async () => new ArrayBuffer(8));
+    const loader = createMeshLoader({...deps, fetchDisplayManifest: async () => ({revision: 3, available: true,
+      ownerStepIds: {'1':'s-1','2':'s-2'}, groups, stepEntities: [], unavailableReasons: [], bounds: mesh(1).boundingBox}),
+      fetchDisplayMesh, parseDisplayMesh: deps.parseStl});
+    const result = await loader.load(1);
+    expect(fetchDisplayMesh).not.toHaveBeenCalled();
+    expect(result.display?.available).toBe(false);
+    expect(result.displayError).toContain('display_budget_exceeded');
+    expect(result.meshes).toHaveLength(1);
+    loader.dispose();
+  });
+  it('rejects mismatched binary length and disposes every prepared display geometry', async () => {
+    const deps = fakeDependencies({manifestProvider: () => manifest(3, [mesh(1)])});
+    const geometry = new BufferGeometry(); const disposed = vi.spyOn(geometry, 'dispose');
+    const parseDisplayMesh = vi.fn(() => geometry);
+    const fetchDisplayMesh = vi.fn(async () => new ArrayBuffer(8)).mockResolvedValueOnce(new ArrayBuffer(8)).mockResolvedValueOnce(new ArrayBuffer(9));
+    const groups = [1,2].map(ownerId => ({ownerId, materialId:1,stepId:`s-${ownerId}`,voxelCount:1,triangleCount:12,bytes:8,boundingBox:mesh(1).boundingBox}));
+    const loader = createMeshLoader({...deps, concurrency:1, fetchDisplayManifest:async()=>({revision:3,available:true,ownerStepIds:{'1':'s-1','2':'s-2'},groups,stepEntities:[],unavailableReasons:[],bounds:mesh(1).boundingBox}),fetchDisplayMesh,parseDisplayMesh});
+    const result = await loader.load(1);
+    expect(result.display?.available).toBe(false);
+    expect(result.displayError).toContain('byte length');
+    expect(parseDisplayMesh).toHaveBeenCalledTimes(1);
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(result.meshes).toHaveLength(1);
+    loader.dispose(); expect(disposed).toHaveBeenCalledTimes(1);
+  });
   it('loads all owner/material groups atomically and caches their revision', async () => {
     const deps = fakeDependencies({manifestProvider: () => manifest(3, [mesh(1)])});
     const groups = [1, 2, 0].map(ownerId => ({ownerId, materialId: 1, stepId: ownerId ? `step-${ownerId}` : null, voxelCount: 1, triangleCount: 12, bytes: 8, boundingBox: mesh(1).boundingBox}));

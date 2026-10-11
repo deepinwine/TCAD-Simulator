@@ -55,6 +55,9 @@ export interface MeshLoader {
 
 const STL_MODE = 'solid' as const;
 const DEFAULT_CONCURRENCY = 4;
+// Match the backend StructureDisplayCache's fixed per-revision budgets.
+const DISPLAY_TRIANGLE_BUDGET = 1_000_000;
+const DISPLAY_BYTE_BUDGET = 128 * 1024 * 1024;
 
 function staleResult(): MeshLoadResult {
   return {revision: -1, meshes: [], visuals: [], warnings: [], stale: true, cached: false};
@@ -165,12 +168,20 @@ export function createMeshLoader(deps: MeshLoaderDependencies): MeshLoader {
         if (currentGeneration !== generation || controller.signal.aborted) return staleResult();
         if (display.revision !== manifest.revision) throw new Error('Display model revision changed; reload geometry');
         if (!display.available) throw new Error(display.unavailableReasons.join(', ') || 'Display unavailable');
+        const totals = display.groups.reduce((sum, entry) => ({
+          triangles: sum.triangles + entry.triangleCount, bytes: sum.bytes + entry.bytes,
+        }), {triangles: 0, bytes: 0});
+        if (!Number.isSafeInteger(totals.triangles) || !Number.isSafeInteger(totals.bytes)
+          || totals.triangles > DISPLAY_TRIANGLE_BUDGET || totals.bytes > DISPLAY_BYTE_BUDGET) {
+          throw new Error('display_budget_exceeded');
+        }
         const visuals = new Map(manifest.meshes.map(entry => [entry.materialId,entry]));
         const loaded = await mapWithConcurrency(display.groups, deps.concurrency ?? DEFAULT_CONCURRENCY, async entry => {
           const formal = visuals.get(entry.materialId);
           if (!formal) throw new Error(`Unknown display material: ${entry.materialId}`);
           const bytes = await deps.fetchDisplayMesh!({revision:display!.revision,ownerId:entry.ownerId,materialId:entry.materialId},controller.signal);
           if (currentGeneration !== generation || controller.signal.aborted) throw new Error('Display load aborted');
+          if (bytes.byteLength !== entry.bytes) throw new Error('Display mesh byte length does not match manifest');
           const geometry = deps.parseDisplayMesh!(bytes); created.push(geometry);
           return {ownerId:entry.ownerId,stepId:entry.stepId,mesh:{...formal,triangleCount:entry.triangleCount,boundingBox:entry.boundingBox},geometry,material:toMaterialConfig(formal.visual)};
         });
