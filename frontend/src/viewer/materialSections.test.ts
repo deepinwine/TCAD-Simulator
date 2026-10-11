@@ -4,6 +4,39 @@ import {Box3, Group, Vector3, Vector2, PerspectiveCamera} from 'three';
 import {clipStateAllOff} from './clipping';
 import {pickAtNormalizedCoords} from './picking';
 
+it('failed slices never retry IO on local eye/material changes, but explicit updates recover', async () => {
+  const failure = new Error('slice offline');
+  const fetcher = vi.fn(async (request: {axis: 'x' | 'y' | 'z'; index: number}) => ({
+    revision: 4, axis: request.axis, index: request.index, indexMax: 1,
+    shape: [1, 1] as const, data: new Uint16Array([2]), owners: new Uint32Array([1]),
+  }));
+  fetcher.mockRejectedValueOnce(failure);
+  const manager = sections.createMaterialSections(new Group(), fetcher);
+  const input = {
+    model: {gridShape: [1, 1, 2] as const, voxelSizeNm: 100}, revision: 4,
+    bounds: new Box3(new Vector3(-.05, -.05, -.05), new Vector3(.05, .05, .15)),
+    clip: {...clipStateAllOff(), z: {enabled: true, position: .5}},
+    materials: new Map([[2, {color: [1, 0, 0] as const, visible: true, opacity: 1}]]),
+    sourceMode: true, ownerStepIds: {'1': 'a'}, hiddenStepIds: new Set<string>(),
+  };
+  await expect(manager.update(input)).rejects.toBe(failure);
+  const errors: unknown[] = [];
+  for (const hiddenStepIds of [new Set(['a']), new Set<string>(), new Set(['a'])]) {
+    await manager.update({...input, hiddenStepIds, localOnly: true}).catch(error => {errors.push(error);});
+  }
+  await manager.update({...input, materials: new Map([[2, {color: [1, 0, 0] as const, visible: false, opacity: .4}]]), localOnly: true}).catch(error => {errors.push(error);});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(errors).toEqual([failure, failure, failure, failure]);
+  expect(manager.pickCandidates()).toEqual([]);
+  await manager.update(input);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(manager.pickCandidates()).toHaveLength(1);
+  await manager.update({...input, hiddenStepIds: new Set(['a']), localOnly: true});
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(manager.pickCandidates()[0].resolveHit!({uv: new Vector2(.5, .5)} as import('three').Intersection)).toBeNull();
+  manager.dispose();
+});
+
 it('eye changes while a paired slice is pending reuse the request and apply latest visibility',async()=>{
   let finish!: (value:import('../api/types').DisplaySliceView)=>void;
   const pending=new Promise<import('../api/types').DisplaySliceView>(resolve=>{finish=resolve;});

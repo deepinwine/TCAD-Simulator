@@ -77,6 +77,7 @@ export function createMaterialSections(
   let cacheKey = '';
   let pendingGeneration: number | null = null;
   let latestStyle: SectionInput | null = null;
+  let lastFailure: unknown | null = null;
   const cache = new Map<ClipAxis, MaterialSliceView & {owners?: Uint32Array; revision?: number}>();
   const clear = () => {
     candidates = [];
@@ -108,6 +109,7 @@ export function createMaterialSections(
       if (key !== cacheKey) {
         cache.clear();
         cacheKey = key;
+        lastFailure = null;
       }
       const placements = (['x', 'y', 'z'] as const)
         // Normalized endpoints coincide with the existing mesh boundary even
@@ -115,6 +117,12 @@ export function createMaterialSections(
         .filter(axis => input.clip[axis].enabled && input.clip[axis].position > 0 && input.clip[axis].position < 1)
         .map(axis => sectionPlacement(input.model!, input.bounds, axis, input.clip[axis].position))
         .filter(p => p.inside);
+      // Local styling may only consume already prepared slices. A failed or
+      // never requested slice needs an explicit clipping/load update to retry.
+      if (input.localOnly && placements.some(p => cache.get(p.axis)?.index !== p.index)) {
+        if (lastFailure !== null) throw lastFailure;
+        return [] as number[];
+      }
       try {
         pendingGeneration = current;
         if (placements.some(p => p.shape.some(n => n > Math.min(4096, textureLimit()))
@@ -177,12 +185,14 @@ export function createMaterialSections(
           }});
         });
         group.updateMatrixWorld(true);
+        lastFailure = null;
         return [...unknown];
       } catch (error) {
         if (disposed || current !== generation || signal.aborted) return [];
         controller?.abort();
         cache.clear();
         clear();
+        lastFailure = error;
         throw error;
       } finally {
         if (pendingGeneration === current) pendingGeneration = null;
@@ -194,6 +204,7 @@ export function createMaterialSections(
       generation++;
       controller?.abort();
       cache.clear();
+      lastFailure = null;
       clear();
     },
   };
