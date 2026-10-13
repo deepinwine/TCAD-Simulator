@@ -20706,14 +20706,15 @@ def _headless_step_signature(step_blob: Any) -> str:
         params = {}
     token["params"] = params if isinstance(params, dict) else {}
 
-    # Exposure depends on the mask payload/file, not only params strings.
+    # Both ExposureStep consumers depend on mask payload/file, not only params strings.
     try:
-        if token["name"] == "Mask Exposure":
+        if token["name"] in {"Mask Exposure", "Structure Pattern"}:
             cm = step_blob.get("custom_mask", None)
             if cm is not None:
                 try:
-                    arr = np.asarray(cm).astype(np.uint8, copy=False)
+                    arr = np.array(cm, dtype=bool)
                     h = hashlib.blake2s(arr.tobytes(order="C"), digest_size=16).hexdigest()
+                    token["custom_mask_shape"] = list(arr.shape)
                     token["custom_mask_hash"] = h
                 except Exception:
                     pass
@@ -20726,6 +20727,12 @@ def _headless_step_signature(step_blob: Any) -> str:
                         "size": int(st.st_size),
                         "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
                     }
+                    # Content can change while size/mtime remain unchanged.
+                    h = hashlib.blake2s(digest_size=16)
+                    with open(mf, "rb") as mask_stream:
+                        for chunk in iter(lambda: mask_stream.read(1024 * 1024), b""):
+                            h.update(chunk)
+                    token["mask_file_hash"] = h.hexdigest()
                 except Exception:
                     token["mask_file_stat"] = None
     except Exception:
