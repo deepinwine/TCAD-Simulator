@@ -100,6 +100,157 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
         manager.start()
         return manager
 
+    def _save_empty_recipe(self, session):
+        self.assertTrue(session.rpc("recipe_new", {"name": "Empty saved recipe"}, timeout_s=30.0)["ok"])
+        self.assertTrue(session.rpc("set_step", {
+            "index": 0, "params": {"material": "Germanium"}, "no_autosave": True,
+        }, timeout_s=30.0)["ok"])
+        self.assertTrue(session.rpc("run_step", {"index": 0}, timeout_s=30.0)["ok"])
+        self.assertTrue(session.rpc("recipe_remove", {"index": 0}, timeout_s=30.0)["ok"])
+        saved = session.rpc("recipe_save", {"name": "Empty saved recipe"}, timeout_s=30.0)
+        self.assertTrue(saved["ok"])
+        current = session.rpc("init", {}, timeout_s=30.0)["result"]
+        self.assertEqual(current["recipe"], [])
+        entry = next(item for item in saved["result"]["recipes"] if item["id"] == saved["result"]["id"])
+        path = session.storage_dir / "history" / entry["file"]
+        blob = tcad._webui_pickle_load(path)
+        self.assertEqual(blob["steps_full"], [])
+        return current, path, blob
+
+    def test_history_load_restores_saved_empty_recipe_and_its_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                saved, _path, _blob = self._save_empty_recipe(session)
+                self.assertTrue(session.rpc("recipe_new", {"name": "Other recipe"}, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("recipe_add", {
+                    "name": "Structure Deposit", "params": {"thickness_nm": 10},
+                }, timeout_s=30.0)["ok"])
+                self.assertNotEqual(saved["model"], session.rpc("init", {}, timeout_s=30.0)["result"]["model"])
+                loaded = session.rpc("history_load", {"id": saved["current_recipe"]["id"]}, timeout_s=30.0)
+                self.assertTrue(loaded["ok"], loaded)
+                self.assertTrue(loaded["result"]["loaded"])
+                self.assertEqual(loaded["result"]["recipe"], [])
+                current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(current["recipe"], [])
+                self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                self.assertEqual(current["model"], saved["model"])
+            finally:
+                manager.stop()
+
+    def test_autosave_load_empty_full_steps_overrides_stale_legacy_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                saved, _path, blob = self._save_empty_recipe(session)
+                self.assertTrue(session.rpc("recipe_new", {"name": "Other autosave"}, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("recipe_save", {"name": "Other autosave"}, timeout_s=30.0)["ok"])
+                blob["steps"] = [{"name": "Structure Deposit", "params": {"thickness_nm": 10}}]
+                tcad._webui_pickle_dump(session.storage_dir / "autosave.pkl.gz", blob)
+                loaded = session.rpc("load_autosave", {}, timeout_s=30.0)
+                self.assertTrue(loaded["ok"], loaded)
+                self.assertTrue(loaded["result"]["loaded"])
+                current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(current["recipe"], [])
+                self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                self.assertEqual(current["model"], saved["model"])
+            finally:
+                manager.stop()
+
+    def test_worker_restart_preserves_saved_empty_recipe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                saved, _path, _blob = self._save_empty_recipe(session)
+                session_id, secret = session.session_id, session.secret
+                manager.stop()
+                manager = self._start_manager(temp_dir)
+                resumed, _cookie = manager.create_session(session_id=session_id, secret=secret)
+                self.assertIsNotNone(resumed)
+                current = resumed.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(current["recipe"], [])
+                self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                self.assertEqual(current["model"], saved["model"])
+            finally:
+                manager.stop()
+
+    def test_history_and_autosave_load_legacy_steps_when_full_is_missing_or_null(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                saved, path, blob = self._save_empty_recipe(session)
+                blob["steps"] = [{"name": "Structure Deposit", "instance_name": "Legacy deposit", "params": {"thickness_nm": 15}}]
+                for command in ("history_load", "load_autosave"):
+                    for full in ("missing", "null"):
+                        with self.subTest(command=command, full=full):
+                            self.assertTrue(session.rpc("recipe_new", {"name": "Legacy switch"}, timeout_s=30.0)["ok"])
+                            fixture = dict(blob)
+                            fixture.pop("steps_full")
+                            if full == "null":
+                                fixture["steps_full"] = None
+                            # Legacy snapshots have no display ownership; missing identities migrate normally.
+                            self.assertIsNone(fixture["model_state"].get("display_owners"))
+                            tcad._webui_pickle_dump(path, fixture)
+                            tcad._webui_pickle_dump(path.parent / (saved["current_recipe"]["id"] + ".autosave.pkl.gz"), fixture)
+                            tcad._webui_pickle_dump(session.storage_dir / "autosave.pkl.gz", fixture)
+                            payload = {"id": saved["current_recipe"]["id"]} if command == "history_load" else {}
+                            loaded = session.rpc(command, payload, timeout_s=30.0)
+                            self.assertTrue(loaded["ok"], loaded)
+                            self.assertTrue(loaded["result"]["loaded"])
+                            current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                            self.assertEqual([step["name"] for step in current["recipe"]], ["Structure Deposit"])
+                            self.assertEqual(current["recipe"][0]["instance_name"], "Legacy deposit")
+                            self.assertEqual(current["recipe"][0]["params"]["thickness_nm"], 15)
+                            self.assertTrue(current["recipe"][0]["step_id"])
+                            self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                            self.assertEqual(current["model"], saved["model"])
+            finally:
+                manager.stop()
+
+    def test_invalid_history_and_autosave_steps_do_not_publish_candidate_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                saved, path, blob = self._save_empty_recipe(session)
+                self.assertTrue(session.rpc("recipe_new", {"name": "Keep current binding"}, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("recipe_add", {
+                    "name": "Structure Deposit", "params": {"thickness_nm": 10},
+                }, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("run_all", {}, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("recipe_save", {"name": "Keep current binding"}, timeout_s=30.0)["ok"])
+                self.assertTrue(session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]["owner_step_ids"])
+                candidates = ({}, "invalid", ["invalid"], [{"name": "Unknown step"}],
+                              [{"name": "Structure Deposit"}, {"name": "Unknown step"}])
+                for command in ("history_load", "load_autosave"):
+                    for candidate in candidates:
+                        with self.subTest(command=command, candidate=candidate):
+                            fixture = dict(blob, steps_full=candidate, steps=[{"name": "Structure Deposit"}])
+                            tcad._webui_pickle_dump(path, fixture)
+                            tcad._webui_pickle_dump(path.parent / (saved["current_recipe"]["id"] + ".autosave.pkl.gz"), fixture)
+                            tcad._webui_pickle_dump(session.storage_dir / "autosave.pkl.gz", fixture)
+                            before = session.rpc("init", {}, timeout_s=30.0)["result"]
+                            display = session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]
+                            pointer = json.loads((session.storage_dir / "session_state.json").read_text())
+                            payload = {"id": saved["current_recipe"]["id"]} if command == "history_load" else {}
+                            rejected = session.rpc(command, payload, timeout_s=30.0)
+                            self.assertTrue(not rejected["ok"] or not rejected["result"]["loaded"], rejected)
+                            after = session.rpc("init", {}, timeout_s=30.0)["result"]
+                            for key in ("recipe", "model", "current_recipe", "ui_state", "log"):
+                                self.assertEqual(before[key], after[key], key)
+                            self.assertEqual(display, session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"])
+                            after_pointer = json.loads((session.storage_dir / "session_state.json").read_text())
+                            if command == "history_load":
+                                pointer.pop("last_active_ts", None)
+                                after_pointer.pop("last_active_ts", None)
+                            self.assertEqual(pointer, after_pointer)
+            finally:
+                manager.stop()
+
     def test_set_step_response_reports_dirty_statuses(self):
         manager = None
         with tempfile.TemporaryDirectory() as temp_dir:

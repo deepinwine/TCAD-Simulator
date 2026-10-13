@@ -58318,14 +58318,19 @@ def _webui_worker_main(
         if not isinstance(blob, dict):
             return False
         from structure_cad.display_provenance import normalize_step_identities, validate_source_bound_identities
-        validate_source_bound_identities(blob.get("steps_full") or blob.get("steps"), blob.get("model_state"))
+        # Empty full steps are authoritative; only an absent/null optional field falls back.
+        stored_steps = blob.get("steps_full")
+        if stored_steps is None:
+            stored_steps = blob.get("steps")
+        validate_source_bound_identities(stored_steps, blob.get("model_state"))
+        if not isinstance(stored_steps, list):
+            return False
         try:
             stored_id = blob.get("recipe_id")
             stored_name = blob.get("recipe_name")
             state = blob.get("model_state")
-            stored_steps = blob.get("steps_full") or blob.get("steps")
             migration_warnings = []
-            if isinstance(stored_steps, list) and stored_steps:
+            if isinstance(stored_steps, list):
                 # History snapshots can contain legacy parameters; migrate in-memory before rebuilding.
                 try:
                     stored_steps, mig_warn = _recipe_migrate_resist_develop_time(stored_steps, from_version=_recipe_json_version(blob))
@@ -58336,32 +58341,29 @@ def _webui_worker_main(
                 rebuilt: List[ProcessStep] = []
                 for step_blob in stored_steps:
                     if not isinstance(step_blob, dict):
-                        continue
+                        return False
                     rebuilt_step = _webui_deserialize_step(step_blob, material_db)
-                    if rebuilt_step is not None:
-                        rebuilt.append(rebuilt_step)
+                    if rebuilt_step is None:
+                        return False
+                    rebuilt.append(rebuilt_step)
                 normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
                 validate_source_bound_identities([{"step_id": step.step_id} for step in rebuilt], state)
                 if isinstance(state, dict):
                     model.restore_state(state)
-                if rebuilt:
-                    blob["steps_full"] = [_webui_serialize_step(step) for step in rebuilt]
-                    steps = rebuilt
-                    try:
-                        for st in steps:
-                            msgs = _normalize_step_material_params(st, material_db, admin_cfg)
-                            if msgs:
-                                pending_warnings.extend(msgs)
-                                for m in msgs[:12]:
-                                    try:
-                                        model._log(m)
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-
-            elif isinstance(state, dict):
-                model.restore_state(state)
+                blob["steps_full"] = [_webui_serialize_step(step) for step in rebuilt]
+                steps = rebuilt
+                try:
+                    for st in steps:
+                        msgs = _normalize_step_material_params(st, material_db, admin_cfg)
+                        if msgs:
+                            pending_warnings.extend(msgs)
+                            for m in msgs[:12]:
+                                try:
+                                    model._log(m)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
             # Publish recipe metadata only after detached source/grid validation and
             # restore succeed; failed autosaves must keep the current session binding.
             if isinstance(stored_id, str) and stored_id.strip():
@@ -58464,14 +58466,18 @@ def _webui_worker_main(
         if not isinstance(blob, dict):
             return False
         from structure_cad.display_provenance import normalize_step_identities, validate_source_bound_identities
-        validate_source_bound_identities(blob.get("steps_full") or blob.get("steps"), blob.get("model_state"))
+        stored_steps = blob.get("steps_full")
+        if stored_steps is None:
+            stored_steps = blob.get("steps")
+        validate_source_bound_identities(stored_steps, blob.get("model_state"))
+        if not isinstance(stored_steps, list):
+            return False
         blob["recipe_id"] = str(entry.get("id", "")).strip()
         if not isinstance(blob.get("recipe_name"), str) or not str(blob.get("recipe_name")).strip():
             blob["recipe_name"] = entry.get("name", "Untitled")
         try:
             state = blob.get("model_state")
-            stored_steps = blob.get("steps_full") or blob.get("steps")
-            if isinstance(stored_steps, list) and stored_steps:
+            if isinstance(stored_steps, list):
                 # History snapshots can contain legacy parameters; migrate in-memory before rebuilding.
                 try:
                     stored_steps, mig_warn = _recipe_migrate_resist_develop_time(stored_steps, from_version=_recipe_json_version(blob))
@@ -58490,34 +58496,32 @@ def _webui_worker_main(
                 rebuilt: List[ProcessStep] = []
                 for step_blob in stored_steps:
                     if not isinstance(step_blob, dict):
-                        continue
+                        return False
                     rebuilt_step = _webui_deserialize_step(step_blob, material_db)
-                    if rebuilt_step is not None:
-                        rebuilt.append(rebuilt_step)
+                    if rebuilt_step is None:
+                        return False
+                    rebuilt.append(rebuilt_step)
                 normalize_step_identities(rebuilt, preserve_ids=isinstance(state, dict) and state.get("display_owners") is not None)
                 validate_source_bound_identities([{"step_id": step.step_id} for step in rebuilt], state)
                 if isinstance(state, dict):
                     model.restore_state(state)
-                if rebuilt:
-                    normalized_blobs = [_webui_serialize_step(step) for step in rebuilt]
-                    if blob.get("steps_full") != normalized_blobs:
-                        blob["steps_full"] = normalized_blobs
-                        _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
-                    steps = rebuilt
-                    try:
-                        for st in steps:
-                            msgs = _normalize_step_material_params(st, material_db, admin_cfg)
-                            if msgs:
-                                pending_warnings.extend(msgs)
-                                for m in msgs[:12]:
-                                    try:
-                                        model._log(m)
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-            elif isinstance(state, dict):
-                model.restore_state(state)
+                normalized_blobs = [_webui_serialize_step(step) for step in rebuilt]
+                if blob.get("steps_full") != normalized_blobs:
+                    blob["steps_full"] = normalized_blobs
+                    _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
+                steps = rebuilt
+                try:
+                    for st in steps:
+                        msgs = _normalize_step_material_params(st, material_db, admin_cfg)
+                        if msgs:
+                            pending_warnings.extend(msgs)
+                            for m in msgs[:12]:
+                                try:
+                                    model._log(m)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
             current_recipe_id = str(entry.get("id", "")).strip()
             current_recipe_name = str(blob.get("recipe_name") or entry.get("name") or "Untitled").strip()[:80] or "Untitled"
             try:
