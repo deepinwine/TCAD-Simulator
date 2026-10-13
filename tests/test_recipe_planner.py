@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 
 class EtchSchemaTests(unittest.TestCase):
@@ -165,7 +166,8 @@ class ValidatorTests(unittest.TestCase):
             self.assertFalse(result["ok"])  # Initial substrate does not supply an etch rate/time.
             self.assertTrue(any("depth_nm" in error for error in result["errors"]))
 
-    def test_mode_recommendations(self):
+    @patch("recipe_planner.validator.get_accurate_support", return_value={"Etch": True, "CMP": False})
+    def test_mode_recommendations(self, _accurate_support):
         draft = parse_natural_language(
             "在Si上沉积100 nm SiO2，刻蚀50 nm，CMP"
         )
@@ -178,6 +180,14 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(etch_rec["recommended_mode"], "accurate")
         cmp_rec = next(r for r in recs if r["step"] == "CMP")
         self.assertEqual(cmp_rec["recommended_mode"], "fast")
+
+    @patch("process_backend.viennaps_backend.engine_available", return_value=False)
+    def test_mode_recommendations_empty_without_accurate_backend(self, _engine_available):
+        draft = parse_natural_language(
+            "在Si上沉积100 nm SiO2，刻蚀50 nm，CMP"
+        )
+        result = self.v.validate(draft)
+        self.assertEqual(result["mode_recommendations"], [])
 
     def test_parameter_out_of_range(self):
         from recipe_planner.parser import PlannedStep, RecipeDraft

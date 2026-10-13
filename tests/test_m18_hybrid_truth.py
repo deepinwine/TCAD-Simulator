@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("TCAD_SKIP_QT", "1")
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -92,7 +93,8 @@ class FastAccurateFastTests(unittest.TestCase):
         scene_after_resist = backend.canonical_scene
 
         # ACCURATE: Etch（或显式 fallback）
-        outcome = backend.execute_step(steps["Etch"])
+        with patch("process_backend.hybrid._viennaps_ready", return_value=True):
+            outcome = backend.execute_step(steps["Etch"])
         modes = [e["mode"] for e in backend.routing_log]
         # 应该有 ACCURATE 或 fallback 记录
         has_accurate = ACCURATE in modes
@@ -121,6 +123,23 @@ class FastAccurateFastTests(unittest.TestCase):
             self.assertIsNotNone(scene_after_cmp)
 
         backend.shutdown()
+
+    def test_unavailable_accurate_engine_uses_fast_without_requesting_backend(self):
+        backend = HybridBackend(grid=32)
+        self.addCleanup(backend.shutdown)
+        steps = _load_steps(backend)
+        backend.execute_step(steps["Initialize Wafer"])
+        backend.execute_step(steps["Spin Resist"])
+        backend._selector.set_mode("Etch", ACCURATE)
+
+        with patch("process_backend.hybrid._viennaps_ready", return_value=False), \
+                patch.object(backend, "_get_accurate", side_effect=AssertionError("Accurate engine must not be requested")) as get_accurate:
+            backend.execute_step(steps["Etch"])
+            get_accurate.assert_not_called()
+
+        self.assertEqual(backend.routing_log[-1], {"step": "Etch", "mode": FAST})
+        self.assertIsNotNone(backend.canonical_scene)
+        self.assertGreater(backend.canonical_scene.total_triangles, 0)
 
     def test_no_stale_state_after_switch(self):
         """切换后 canonical scene 不丢失。"""

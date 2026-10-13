@@ -20,13 +20,14 @@ jobs:
       - name: Install minimal deps
         run: |
           python -m pip install --upgrade pip
-          pip install numpy matplotlib
+          pip install numpy matplotlib scipy cryptography
       - name: Compile check
         run: |
           python -m py_compile tcad_simulator.py tools/*.py \
             process_api/*.py process_backend/*.py \
             geometry_scene/*.py layout/*.py \
-            calibration/*.py recipe_planner/*.py
+            calibration/*.py recipe_planner/*.py \
+            structure_cad/*.py tcad_studio.py
       - name: Core backend tests
         env:
           TCAD_SKIP_QT: '1'
@@ -36,6 +37,8 @@ jobs:
             tests.test_process_cad_foundation \
             tests.test_process_cad_primitives \
             tests.test_process_cad_demos \
+            tests.test_webui_viewer_contract \
+            tests.test_webui_cad_shell \
             tests.test_process_backend \
             tests.test_hybrid_backend \
             tests.test_geometry_scene \
@@ -47,7 +50,15 @@ jobs:
             tests.test_recipe_reliability \
             tests.test_process_api_facade \
             tests.test_m34_demos \
-            tests.test_dram_reliability
+            tests.test_dram_reliability \
+            tests.test_ci_contract \
+            tests.test_structure_cad \
+            tests.test_structure_cad_http \
+            tests.test_structure_display_geometry \
+            tests.test_structure_display_provenance \
+            tests.test_structure_display_http \
+            tests.test_structure_editor_http \
+            tests.test_tcad_studio_launcher
       - name: Layout tests (optional gdstk)
         env:
           TCAD_SKIP_QT: '1'
