@@ -58374,37 +58374,44 @@ def _webui_worker_main(
             if not current_recipe_id:
                 current_recipe_id = secrets.token_hex(8)
                 blob["recipe_id"] = current_recipe_id
-            # Ensure this last-active snapshot is persisted under the per-recipe file.
-            stamp = str(blob.get("timestamp") or _webui_timestamp())
-            note = str(blob.get("note") or "").strip()[:200]
-            entry = _find_recipe_entry(current_recipe_id)
-            if entry is None:
-                entry = _create_recipe_entry(current_recipe_name, note, entry_id=current_recipe_id, autosave=False, stamp=stamp)
-            entry["timestamp"] = stamp
-            entry["name"] = str(current_recipe_name).strip()[:80] or "Untitled"
-            entry["note"] = note
-            blob["recipe_name"] = entry["name"]
-            blob["recipe_id"] = current_recipe_id
-            main_path = paths["history_dir"] / str(entry.get("file", f"{current_recipe_id}.pkl.gz"))
-            autosave_path = _recipe_autosave_path(current_recipe_id)
-            if bool(blob.get("autosave", False)):
-                entry["autosave"] = True
-                _webui_pickle_dump(autosave_path, blob)
-                if not main_path.exists():
-                    try:
+            # Compatibility writeback follows a successful restore. Its I/O failure
+            # must not report a failed load after publishing the model and recipe.
+            writeback_failed = False
+            try:
+                stamp = str(blob.get("timestamp") or _webui_timestamp())
+                note = str(blob.get("note") or "").strip()[:200]
+                entry = _find_recipe_entry(current_recipe_id)
+                if entry is None:
+                    entry = _create_recipe_entry(current_recipe_name, note, entry_id=current_recipe_id, autosave=False, stamp=stamp)
+                entry["timestamp"] = stamp
+                entry["name"] = str(current_recipe_name).strip()[:80] or "Untitled"
+                entry["note"] = note
+                blob["recipe_name"] = entry["name"]
+                blob["recipe_id"] = current_recipe_id
+                main_path = paths["history_dir"] / str(entry.get("file", f"{current_recipe_id}.pkl.gz"))
+                autosave_path = _recipe_autosave_path(current_recipe_id)
+                if bool(blob.get("autosave", False)):
+                    entry["autosave"] = True
+                    _webui_pickle_dump(autosave_path, blob)
+                    if not main_path.exists():
                         _webui_pickle_dump(main_path, blob)
+                else:
+                    entry["autosave"] = False
+                    _webui_pickle_dump(main_path, blob)
+                    try:
+                        autosave_path.unlink(missing_ok=True)  # type: ignore[arg-type]
                     except Exception:
                         pass
-            else:
-                entry["autosave"] = False
-                _webui_pickle_dump(main_path, blob)
+            except Exception:
+                writeback_failed = True
+            # Attempt resume pointers independently even if the history write failed.
+            for writeback in (lambda: _webui_pickle_dump(paths["autosave"], blob), _write_history_index, _write_session_state):
                 try:
-                    autosave_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+                    writeback()
                 except Exception:
-                    pass
-            _webui_pickle_dump(paths["autosave"], blob)
-            _write_history_index()
-            _write_session_state()
+                    writeback_failed = True
+            if writeback_failed:
+                pending_warnings.append("Auto-save restored, but compatibility snapshot writeback failed.")
             model_revision += 1
             preview_ready.clear()
             _reset_step_runtime_statuses()

@@ -213,6 +213,55 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
             finally:
                 manager.stop()
 
+    def test_empty_autosave_restore_survives_history_writeback_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                saved, path, blob = self._save_empty_recipe(session)
+                blob["steps_full"] = None
+                original_dump = tcad._webui_pickle_dump
+                for is_autosave in (False, True):
+                    with self.subTest(is_autosave=is_autosave):
+                        self.assertTrue(session.rpc("recipe_new", {"name": "Before autosave restore"}, timeout_s=30.0)["ok"])
+                        self.assertTrue(session.rpc("recipe_add", {
+                            "name": "Structure Deposit", "params": {"thickness_nm": 10},
+                        }, timeout_s=30.0)["ok"])
+                        self.assertTrue(session.rpc("run_all", {}, timeout_s=30.0)["ok"])
+                        revision = session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]["revision"]
+                        blob["autosave"] = is_autosave
+                        tcad._webui_pickle_dump(session.storage_dir / "autosave.pkl.gz", blob)
+                        target = path.parent / (saved["current_recipe"]["id"] + ".autosave.pkl.gz") if is_autosave else path
+                        failed_paths = []
+
+                        def fail_history_writeback(destination, candidate):
+                            if destination == target:
+                                failed_paths.append(destination)
+                                raise OSError("autosave history writeback failed")
+                            return original_dump(destination, candidate)
+
+                        with patch.object(tcad, "_webui_pickle_dump", side_effect=fail_history_writeback):
+                            loaded = session.rpc("load_autosave", {}, timeout_s=30.0)
+                        self.assertTrue(failed_paths)
+                        self.assertTrue(loaded["ok"], loaded)
+                        self.assertTrue(loaded["result"]["loaded"], loaded)
+                        current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                        self.assertEqual(current["recipe"], [])
+                        self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                        self.assertEqual(current["model"], saved["model"])
+                        self.assertTrue(any("writeback failed" in warning for warning in current.get("warnings", [])))
+                        display = session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]
+                        self.assertGreater(display["revision"], revision)
+                        self.assertEqual(display["owner_step_ids"], {})
+                        self.assertEqual(session.rpc("timeline_get", {}, timeout_s=30.0)["result"]["items"], [])
+                        self.assertFalse(session.rpc("undo", {}, timeout_s=30.0)["result"]["undone"])
+                        self.assertFalse(session.rpc("redo", {}, timeout_s=30.0)["result"]["redone"])
+                        pointer = json.loads((session.storage_dir / "session_state.json").read_text())
+                        self.assertEqual(pointer["last_active_recipe_id"], saved["current_recipe"]["id"])
+            finally:
+                manager.stop()
+
     def test_history_and_autosave_load_legacy_steps_when_full_is_missing_or_null(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = self._start_manager(temp_dir)
