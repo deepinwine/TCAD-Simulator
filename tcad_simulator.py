@@ -20722,19 +20722,14 @@ def _headless_step_signature(step_blob: Any) -> str:
             if mf:
                 token["mask_file"] = mf
                 try:
-                    st = os.stat(mf)
-                    token["mask_file_stat"] = {
-                        "size": int(st.st_size),
-                        "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
-                    }
-                    # Content can change while size/mtime remain unchanged.
+                    # Content identity detects edits without invalidating on a mere touch.
                     h = hashlib.blake2s(digest_size=16)
                     with open(mf, "rb") as mask_stream:
                         for chunk in iter(lambda: mask_stream.read(1024 * 1024), b""):
                             h.update(chunk)
                     token["mask_file_hash"] = h.hexdigest()
                 except Exception:
-                    token["mask_file_stat"] = None
+                    token["mask_file_hash"] = None
     except Exception:
         pass
 
