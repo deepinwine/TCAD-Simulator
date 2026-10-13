@@ -58,7 +58,8 @@ self.assertEqual(response['result']['recipe'], [])
 
 ## Task 3 / BLOCK-003：CI 依赖闭环
 
-文件：`.github/workflows/ci.yml`、新增 `tests/test_ci_contract.py`。
+文件：`.github/workflows/ci.yml`、新增 `tests/test_ci_contract.py`、
+`tests/test_recipe_planner.py`、`tests/test_m18_hybrid_truth.py`。
 
 - [ ] 静态回归检查实际 pip install 步骤含 scipy／cryptography、核心 suite 包含本轮测试与
   Structure／显示／编辑模块；修改前断言失败，不匹配注释中的文字。
@@ -71,6 +72,9 @@ self.assertEqual(response['result']['recipe'], [])
 - [ ] 干净环境已暴露 `ValidatorTests.test_mode_recommendations` 对真实 ViennaPS
   安装的隐式依赖。保留全部已有推荐断言，以显式能力 fixture 测试推荐分支，
   并追加 backend 不可用时空推荐的测试；不为了 CI 强制安装可选求解器。
+- [ ] `FastAccurateFastTests.test_continuous_flow` 同样隐式依赖引擎可用性：
+  只在该测试的刻蚀路由请求阶段显式声明 Accurate 可用，保留原 Accurate／
+  fallback 与 canonical 断言；另测引擎不可用时真实 Fast 路由，不改运行时代码。
 - [ ] 回归 no-gdstk 路径及 diff check。
 - [ ] `fix(CI): 补齐结构模块依赖与回归覆盖`，两阶段审查后 Task 4。
 
