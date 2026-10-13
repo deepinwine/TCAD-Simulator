@@ -63,6 +63,20 @@ class DisplayProvenance:
                 return owner
         return 0
 
+    def forget_step(self, step_id):
+        """Retire one recipe identity without changing canonical material voxels."""
+        owner = self.owner_for(step_id)
+        if not owner:
+            return False
+        if self.owners is not None:
+            if not self.owners.flags.writeable:
+                raise ValueError('Structure display provenance requires writable owners')
+            # Allocate the selection before changing either owners or the registry.
+            selection = self.owners == owner
+            self.owners[selection] = 0
+        del self.step_ids[owner]
+        return True
+
     def prepare(self, shape, step_id, additions):
         """Validate and allocate before any canonical geometry write."""
         if self.owners is not None and (self.owners.shape != shape or not self.owners.flags.writeable):

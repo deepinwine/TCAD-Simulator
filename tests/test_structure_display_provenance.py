@@ -127,6 +127,39 @@ class DisplayProvenanceTests(unittest.TestCase):
         self.assertFalse(source.owners[:, :, :2].any())
         self.assertTrue(np.all(source.owners[:, :, 2] == source.owner_for(step.step_id)))
 
+    def test_forgetting_a_step_preserves_grid_other_owners_and_unknown_voxels(self):
+        self.model.build_substrate('Silicon', 10, emit_log=False)
+        removed = self.step('Structure Deposit', material='Silicon', thickness_nm=5)
+        retained = self.step('Structure Deposit', material='Silicon', thickness_nm=5)
+        source = self.model.display_provenance
+        grid, owners = self.model.grid.copy(), source.owners.copy()
+        removed_owner, retained_owner = source.owner_for(removed.step_id), source.owner_for(retained.step_id)
+        self.assertTrue(source.forget_step(removed.step_id))
+        expected = owners.copy()
+        expected[owners == removed_owner] = 0
+        np.testing.assert_array_equal(grid, self.model.grid)
+        np.testing.assert_array_equal(expected, source.owners)
+        self.assertEqual(source.step_ids, {retained_owner: retained.step_id})
+        self.assertFalse(source.forget_step(removed.step_id))
+
+    def test_forgetting_readonly_source_fails_before_source_changes(self):
+        step = self.step('Structure Wafer', thickness_nm=10)
+        source = self.model.display_provenance
+        owners, identities = source.owners.copy(), dict(source.step_ids)
+        source.owners.flags.writeable = False
+        with self.assertRaisesRegex(ValueError, 'writable'):
+            source.forget_step(step.step_id)
+        np.testing.assert_array_equal(owners, source.owners)
+        self.assertEqual(identities, source.step_ids)
+
+    def test_forgetting_an_old_unknown_source_keeps_it_unknown(self):
+        source = self.model.display_provenance
+        grid = self.model.grid.copy()
+        self.assertFalse(source.forget_step(tcad.StructureDepositStep(self.db).step_id))
+        self.assertIsNone(source.owners)
+        self.assertEqual({}, source.step_ids)
+        np.testing.assert_array_equal(grid, self.model.grid)
+
     def test_cache_only_invalidation_keeps_source(self):
         self.step('Structure Wafer', thickness_nm=10)
         source = self.model.display_provenance.owners

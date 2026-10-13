@@ -59125,6 +59125,10 @@ def _webui_worker_main(
     # Direct run_step checkpoints are valid for timeline viewing, but they are not
     # necessarily a recipe-prefix state and therefore must not seed incremental reuse.
     step_cache_step_sources: Dict[int, str] = {}
+    # Cached model-only checkpoints may predate a recipe deletion. Retire only
+    # identities explicitly removed in this cache lifecycle; recipe-aware undo
+    # restores its own identities. Caches are session-local and never persisted.
+    step_cache_removed_step_ids: Set[str] = set()
     # May be adjusted by `_update_cache_policy()` based on domain size.
     step_cache_max_steps: int = int(step_cache_max_steps)
 
@@ -59138,12 +59142,25 @@ def _webui_worker_main(
         step_cache_ctx_sig = ""
         step_cache_step_sigs = {}
         step_cache_step_sources = {}
+        step_cache_removed_step_ids.clear()
         try:
             for v in list(step_cache_step_states.values()):
                 _snap_drop(v)
         except Exception:
             pass
         step_cache_step_states = {}
+
+    def _restore_recipe_bound_step_snapshot(snapshot: Dict[str, Any], **kwargs: Any) -> None:
+        """Restore a cache checkpoint, then retire known deletions and validate binding."""
+        from structure_cad.display_provenance import validate_source_bound_identities
+        model.restore_state(snapshot, **kwargs)
+        for identity in step_cache_removed_step_ids:
+            model.display_provenance.forget_step(identity)
+        validate_source_bound_identities(
+            [{"step_id": step.step_id} for step in steps],
+            {"display_owners": model.display_provenance.owners,
+             "display_step_ids": model.display_provenance.step_ids},
+        )
 
     def _json_sanitize_for_sig(v: Any) -> Any:
         if v is None:
@@ -59511,7 +59528,14 @@ def _webui_worker_main(
                 snap_ref = step_cache_step_states.get(int(restore_idx))
                 snap0 = _snap_load(snap_ref)
                 if isinstance(snap0, dict):
-                    model.restore_state(snap0, emit_log=True, log_prefix="[cache] ", progress_label=label)
+                    restored = _run_model_transaction(
+                        model,
+                        lambda: _restore_recipe_bound_step_snapshot(
+                            snap0, emit_log=True, log_prefix="[cache] ", progress_label=label
+                        ),
+                    )
+                    if not restored.get("ok"):
+                        raise ValueError(restored.get("error", "Cached snapshot restore failed"))
                     last_step_snap = snap_ref
                 else:
                     restore_idx = -1
@@ -72173,7 +72197,13 @@ def _webui_worker_main(
                 idx = int(payload.get("index", -1))
                 if not (0 <= idx < len(steps)):
                     raise ValueError("Invalid step index")
+                removed_step_id = steps[idx].step_id
+                retired_ids = step_cache_removed_step_ids | {removed_step_id}
+                model.display_provenance.forget_step(removed_step_id)
                 del steps[idx]
+                step_cache_removed_step_ids = retired_ids
+                model_revision += 1
+                preview_ready.clear()
                 _invalidate_step_runtime_statuses(idx)
                 try:
                     _agent_shift_step_meta_remove(int(idx))
@@ -72304,7 +72334,7 @@ def _webui_worker_main(
                     continue
                 restored = _run_model_transaction(
                     model,
-                    lambda: model.restore_state(snap, emit_log=True, log_prefix="[timeline] "),
+                    lambda: _restore_recipe_bound_step_snapshot(snap, emit_log=True, log_prefix="[timeline] "),
                 )
                 if not restored.get("ok"):
                     conn.send({
