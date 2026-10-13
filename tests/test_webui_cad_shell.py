@@ -209,7 +209,67 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
                 self.assertEqual(current["recipe"], [])
                 self.assertEqual(current["current_recipe"], saved["current_recipe"])
                 self.assertEqual(current["model"], saved["model"])
+                self.assertTrue(any("normalized snapshot writeback failed" in warning
+                                    for warning in current.get("warnings", [])))
                 self.assertEqual(original_files, {target: target.read_bytes() for target in original_files})
+            finally:
+                manager.stop()
+
+    def test_empty_history_restore_finishes_when_either_resume_pointer_write_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                saved, _path, _blob = self._save_empty_recipe(session)
+                target_id = saved["current_recipe"]["id"]
+                session_pointer = session.storage_dir / "session_state.json"
+                global_pointer = session.storage_dir / "autosave.pkl.gz"
+                original_replace = Path.replace
+                for failure in ("session", "global"):
+                    with self.subTest(failure=failure):
+                        previous = session.rpc("recipe_new", {"name": "Before pointer failure"}, timeout_s=30.0)["result"]
+                        self.assertTrue(session.rpc("recipe_add", {
+                            "name": "Structure Deposit", "params": {"thickness_nm": 10},
+                        }, timeout_s=30.0)["ok"])
+                        self.assertTrue(session.rpc("run_all", {}, timeout_s=30.0)["ok"])
+                        display = session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]
+                        self.assertTrue(display["owner_step_ids"])
+                        destination_to_fail = session_pointer if failure == "session" else global_pointer
+                        failed_paths = []
+
+                        def fail_target_pointer(candidate_path, destination):
+                            if destination == destination_to_fail:
+                                candidate = (json.loads(candidate_path.read_text()) if failure == "session"
+                                             else tcad._webui_pickle_load(candidate_path))
+                                candidate_id = candidate.get("last_active_recipe_id") if failure == "session" else candidate.get("recipe_id")
+                                if candidate_id == target_id:
+                                    failed_paths.append(destination)
+                                    raise OSError("resume pointer write failed")
+                            return original_replace(candidate_path, destination)
+
+                        with patch.object(Path, "replace", new=fail_target_pointer):
+                            loaded = session.rpc("history_load", {"id": target_id}, timeout_s=30.0)
+                        self.assertTrue(failed_paths)
+                        self.assertTrue(loaded["ok"], loaded)
+                        self.assertTrue(loaded["result"]["loaded"])
+                        current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                        self.assertEqual(current["recipe"], [])
+                        self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                        self.assertEqual(current["model"], saved["model"])
+                        self.assertTrue(any("resume pointer writeback failed" in warning
+                                            for warning in current.get("warnings", [])))
+                        restored_display = session.rpc("structure_display_manifest", {}, timeout_s=30.0)["result"]
+                        self.assertGreater(restored_display["revision"], display["revision"])
+                        self.assertEqual(restored_display["owner_step_ids"], {})
+                        self.assertEqual(session.rpc("timeline_get", {}, timeout_s=30.0)["result"]["items"], [])
+                        self.assertFalse(session.rpc("undo", {}, timeout_s=30.0)["result"]["undone"])
+                        self.assertFalse(session.rpc("redo", {}, timeout_s=30.0)["result"]["redone"])
+                        persisted_session = json.loads(session_pointer.read_text())["last_active_recipe_id"]
+                        persisted_global = tcad._webui_pickle_load(global_pointer)["recipe_id"]
+                        old_id = previous["current_recipe"]["id"]
+                        self.assertEqual(persisted_session, old_id if failure == "session" else target_id)
+                        self.assertEqual(persisted_global, target_id if failure == "session" else old_id)
             finally:
                 manager.stop()
 

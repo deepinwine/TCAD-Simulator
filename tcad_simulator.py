@@ -58520,7 +58520,7 @@ def _webui_worker_main(
                     try:
                         _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
                     except Exception:
-                        pass
+                        pending_warnings.append("Recipe restored, but normalized snapshot writeback failed.")
                 steps = rebuilt
                 try:
                     for st in steps:
@@ -58567,13 +58567,17 @@ def _webui_worker_main(
                     current_ui_state.pop("dock_layout", None)
             except Exception:
                 pass
-            _write_session_state()
-            # Update "last active" pointer for restart-resume.
-            try:
-                blob["autosave"] = bool(loaded_autosave)
-                _webui_pickle_dump(paths["autosave"], blob)
-            except Exception:
-                pass
+            # Both resume pointers are best-effort after successful publication;
+            # one write failure must not skip the other pointer or cache cleanup.
+            blob["autosave"] = bool(loaded_autosave)
+            writeback_failed = False
+            for writeback in (_write_session_state, lambda: _webui_pickle_dump(paths["autosave"], blob)):
+                try:
+                    writeback()
+                except Exception:
+                    writeback_failed = True
+            if writeback_failed:
+                pending_warnings.append("Recipe restored, but resume pointer writeback failed.")
             # Sync displayed autosave flag with actual backup existence.
             try:
                 entry["autosave"] = _recipe_autosave_path(current_recipe_id).exists()
