@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import tcad_simulator as tcad
 
@@ -174,6 +175,41 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
                 self.assertEqual(current["recipe"], [])
                 self.assertEqual(current["current_recipe"], saved["current_recipe"])
                 self.assertEqual(current["model"], saved["model"])
+            finally:
+                manager.stop()
+
+    def test_legacy_empty_history_load_survives_normalized_snapshot_write_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                saved, path, blob = self._save_empty_recipe(session)
+                self.assertTrue(session.rpc("recipe_new", {"name": "Before legacy restore"}, timeout_s=30.0)["ok"])
+                blob.pop("steps_full")
+                autosave_path = path.parent / (saved["current_recipe"]["id"] + ".autosave.pkl.gz")
+                for target in (path, autosave_path):
+                    tcad._webui_pickle_dump(target, blob)
+                original_files = {target: target.read_bytes() for target in (path, autosave_path)}
+                original_dump = tcad._webui_pickle_dump
+                failed_paths = []
+
+                def fail_normalized_write(target, candidate):
+                    if target in original_files and candidate.get("steps_full") == []:
+                        failed_paths.append(target)
+                        raise OSError("normalized snapshot write failed")
+                    return original_dump(target, candidate)
+
+                with patch.object(tcad, "_webui_pickle_dump", side_effect=fail_normalized_write):
+                    loaded = session.rpc("history_load", {"id": saved["current_recipe"]["id"]}, timeout_s=30.0)
+                self.assertTrue(failed_paths)
+                self.assertTrue(loaded["ok"], loaded)
+                self.assertTrue(loaded["result"]["loaded"])
+                current = session.rpc("init", {}, timeout_s=30.0)["result"]
+                self.assertEqual(current["recipe"], [])
+                self.assertEqual(current["current_recipe"], saved["current_recipe"])
+                self.assertEqual(current["model"], saved["model"])
+                self.assertEqual(original_files, {target: target.read_bytes() for target in original_files})
             finally:
                 manager.stop()
 

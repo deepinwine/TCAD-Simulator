@@ -58508,7 +58508,12 @@ def _webui_worker_main(
                 normalized_blobs = [_webui_serialize_step(step) for step in rebuilt]
                 if blob.get("steps_full") != normalized_blobs:
                     blob["steps_full"] = normalized_blobs
-                    _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
+                    # Normalization is a best-effort migration; a write failure must
+                    # not leave the restored model bound to the previous recipe.
+                    try:
+                        _webui_pickle_dump(autosave_path if loaded_autosave else main_path, blob)
+                    except Exception:
+                        pass
                 steps = rebuilt
                 try:
                     for st in steps:
