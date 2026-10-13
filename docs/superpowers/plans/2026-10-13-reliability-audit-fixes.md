@@ -65,6 +65,9 @@ self.assertEqual(response['result']['recipe'], [])
 - [ ] 最小 CI 配置修复，不强制安装 gdstk、ViennaPS、Qt，不吞测试失败。
 - [ ] 临时 venv 安装 CI 同一依赖集，运行代表性 facade/schema 与 Structure
   测试；记录 Python 版本及退出码，不能只用开发环境确认。
+- [ ] 干净环境已暴露 `ValidatorTests.test_mode_recommendations` 对真实 ViennaPS
+  安装的隐式依赖。保留全部已有推荐断言，以显式能力 fixture 测试推荐分支，
+  并追加 backend 不可用时空推荐的测试；不为了 CI 强制安装可选求解器。
 - [ ] 回归 no-gdstk 路径及 diff check。
 - [ ] `fix(CI): 补齐结构模块依赖与回归覆盖`，两阶段审查后 Task 4。
 
