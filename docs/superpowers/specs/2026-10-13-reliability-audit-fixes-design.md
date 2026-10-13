@@ -32,7 +32,8 @@
 
 ## 3. CI 依赖与覆盖
 
-当前 Structure 参数 schema 和几何使用 SciPy；CI 的核心环境必须安装它。
+当前 Structure 参数 schema 和几何使用 SciPy；Library／Admin 配置依赖
+cryptography。CI 的核心环境必须同时满足这些既有运行时依赖。
 保留 gdstk 与 ViennaPS 的可选依赖边界，不强制 Qt。
 CI 覆盖本次新增测试与 Structure、显示来源、HTTP 编辑路径。
 从最小独立环境验证依赖配置，不能用开发机已安装库掩盖缺失。
