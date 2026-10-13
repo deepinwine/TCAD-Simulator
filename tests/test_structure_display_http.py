@@ -2,6 +2,7 @@
 import base64
 import copy
 import json
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -45,6 +46,15 @@ class StructureDisplayHTTPTests(unittest.TestCase):
             material[index] = np.frombuffer(base64.b64decode(section['material']['data_b64']), '<u2').reshape(section['shape']).T
             owners[index] = np.frombuffer(base64.b64decode(section['owner']['data_b64']), '<u4').reshape(section['shape']).T
         return manifest, material, owners
+
+    def worker_history(self):
+        process = next(iter(self.manager.sessions.values())).process
+        frame = sys._current_frames()[process._thread.ident]
+        while frame:
+            if frame.f_code.co_name == '_webui_worker_main':
+                return frame.f_locals['undo_stack'], frame.f_locals['redo_stack']
+            frame = frame.f_back
+        self.fail('Worker history frame unavailable')
 
     def test_removed_built_step_saves_and_loads_as_unknown_without_changing_grid(self):
         self.request('POST', '/api/recipe/import', {'recipe': {'name': '删除来源', 'steps_full': [
@@ -223,6 +233,98 @@ class StructureDisplayHTTPTests(unittest.TestCase):
         self.assertEqual(manifest, actual_manifest)
         np.testing.assert_array_equal(grid, actual_grid)
         np.testing.assert_array_equal(owners, actual_owners)
+
+    def test_incremental_corrupt_source_rejects_without_replay_or_state_changes(self):
+        self.fixture()
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        before = self.request('GET', '/api/init')['result']
+        timeline = self.request('POST', '/api/timeline/get', {})['result']
+        manifest, grid, owners = self.display_voxels()
+        undo, redo = self.worker_history()
+        # Seed a valid redo entry to exercise failure preservation even though
+        # normal undo clears the session's incremental cache.
+        redo.append(copy.deepcopy(undo[-1]))
+        history_entries = tuple(map(id, undo)), tuple(map(id, redo))
+        original_load = tcad._tcad_snapshot_load_maybe
+        foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+
+        def damaged_snapshot(ref):
+            snapshot = copy.deepcopy(original_load(ref))
+            snapshot['display_step_ids'][1] = foreign_id
+            return snapshot
+
+        with patch.object(tcad, '_tcad_snapshot_load_maybe', side_effect=damaged_snapshot), \
+             patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+            rejected = self.request('POST', '/api/run/to', {'index': 1}, ok=False)
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(rejected['code'], 'restore_failed')
+        self.assertIn('identity mapping', rejected['error'])
+        self.assertTrue(rejected['rolled_back'])
+        undo, redo = self.worker_history()
+        self.assertEqual(history_entries, (tuple(map(id, undo)), tuple(map(id, redo))))
+        after = self.request('GET', '/api/init')['result']
+        for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+            self.assertEqual(before[key], after[key], key)
+        self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+        actual_manifest, actual_grid, actual_owners = self.display_voxels()
+        self.assertEqual(manifest, actual_manifest)
+        np.testing.assert_array_equal(grid, actual_grid)
+        np.testing.assert_array_equal(owners, actual_owners)
+
+    def test_incremental_restore_failure_preserves_direct_suffix_and_previous_undo(self):
+        self.fixture()
+        original = self.request('GET', '/api/init')['result']['recipe']
+        _, previous_grid, previous_owners = self.display_voxels()
+        self.request('POST', '/api/run/step', {'index': 1})
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        before = self.request('GET', '/api/init')['result']
+        timeline = self.request('POST', '/api/timeline/get', {})['result']
+        self.assertTrue(timeline['items'][1]['snapshot_valid'])
+        manifest, grid, owners = self.display_voxels()
+        original_load = tcad._tcad_snapshot_load_maybe
+        foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+
+        def damaged_snapshot(ref):
+            snapshot = copy.deepcopy(original_load(ref))
+            snapshot['display_step_ids'][1] = foreign_id
+            return snapshot
+
+        with patch.object(tcad, '_tcad_snapshot_load_maybe', side_effect=damaged_snapshot), \
+             patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+            rejected = self.request('POST', '/api/run/to', {'index': 0}, ok=False)
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(rejected['code'], 'restore_failed')
+        self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+        after = self.request('GET', '/api/init')['result']
+        for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+            self.assertEqual(before[key], after[key], key)
+        actual_manifest, actual_grid, actual_owners = self.display_voxels()
+        self.assertEqual(manifest, actual_manifest)
+        np.testing.assert_array_equal(grid, actual_grid)
+        np.testing.assert_array_equal(owners, actual_owners)
+        undone = self.request('POST', '/api/undo', {})['result']
+        self.assertTrue(undone['undone'])
+        self.assertEqual([step['step_id'] for step in original], [step['step_id'] for step in undone['recipe']])
+        _, undo_grid, undo_owners = self.display_voxels()
+        np.testing.assert_array_equal(previous_grid, undo_grid)
+        np.testing.assert_array_equal(previous_owners, undo_owners)
+        self.assertTrue(self.request('POST', '/api/redo', {})['result']['redone'])
+
+    def test_incremental_missing_snapshot_still_rebuilds_from_start(self):
+        self.fixture()
+        original_load = tcad._tcad_snapshot_load_maybe
+
+        def missing_snapshot(ref):
+            snapshot = original_load(ref)
+            return None if isinstance(snapshot, dict) and 'grid_shape' in snapshot else snapshot
+
+        with patch.object(tcad, '_tcad_snapshot_load_maybe', side_effect=missing_snapshot), \
+             patch.object(tcad.StructureWaferStep, 'execute', autospec=True,
+                          side_effect=tcad.StructureWaferStep.execute) as execute:
+            rebuilt = self.request('POST', '/api/run/to', {'index': 1})
+        self.assertTrue(rebuilt['ok'])
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(self.request('GET', '/api/init')['result']['recipe'][1]['runtime_status'], 'done')
 
     def test_readonly_endpoints_no_execution_revision_or_saved_state_changes(self):
         self.fixture()

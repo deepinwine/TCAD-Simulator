@@ -59446,18 +59446,6 @@ def _webui_worker_main(
             bb_steps_sig = h.hexdigest()
         except Exception:
             bb_steps_sig = ""
-        try:
-            WaferContextManager.begin_run(
-                current_ui_state,
-                run_id=str(bb_run_id),
-                recipe_id=str(current_recipe_id),
-                recipe_name=str(current_recipe_name),
-                ctx_sig=str(ctx_sig),
-                steps_sig=str(bb_steps_sig),
-                upto_step_index=int(upto_i),
-            )
-        except Exception:
-            pass
 
         def _finalize_incremental_failure(step_index: int, failure: Dict[str, Any]) -> Dict[str, Any]:
             _finalize_active_agent_run(
@@ -59496,16 +59484,6 @@ def _webui_worker_main(
                 break
             reuse_last_step = int(i)
 
-        # Drop any stale suffix cache entries once a mismatch is detected.
-        if reuse_last_step + 1 < len(step_sigs_all):
-            for k in list(step_cache_step_sigs.keys()):
-                if int(k) > int(reuse_last_step):
-                    step_cache_step_sigs.pop(int(k), None)
-                    step_cache_step_sources.pop(int(k), None)
-            for k in list(step_cache_step_states.keys()):
-                if int(k) > int(reuse_last_step):
-                    _snap_drop(step_cache_step_states.pop(int(k), None))
-
         # Restore from the cached prefix as far as possible (but never beyond `upto_i`).
         restore_idx = int(min(int(upto_i), int(reuse_last_step)))
         reuse_n = 0  # number of FULL loop stations reused (for UI)
@@ -59519,7 +59497,7 @@ def _webui_worker_main(
             reuse_n = 0
 
         # Match existing semantics: allow undo back to the pre-run state.
-        _push_undo()
+        undo_token = _push_undo(defer_trim=True)
 
         last_step_snap: Any = None
         if restore_idx >= 0:
@@ -59535,14 +59513,42 @@ def _webui_worker_main(
                         ),
                     )
                     if not restored.get("ok"):
-                        raise ValueError(restored.get("error", "Cached snapshot restore failed"))
+                        _abort_undo(undo_token)
+                        return {**restored, "code": "restore_failed", "log": model.history[-250:]}
                     last_step_snap = snap_ref
                 else:
                     restore_idx = -1
-            except Exception:
-                restore_idx = -1
+            except Exception as exc:
+                _abort_undo(undo_token)
+                return {"ok": False, "code": "restore_failed", "error": str(exc),
+                        "error_type": type(exc).__name__, "rolled_back": False,
+                        "log": model.history[-250:]}
         if restore_idx < 0:
             model.reset_state()
+
+        # Publish cache/history changes only after a usable restore or normal cache miss.
+        # A rejected source-bound snapshot must not invalidate timeline checkpoints.
+        if reuse_last_step + 1 < len(step_sigs_all):
+            for k in list(step_cache_step_sigs.keys()):
+                if int(k) > int(reuse_last_step):
+                    step_cache_step_sigs.pop(int(k), None)
+                    step_cache_step_sources.pop(int(k), None)
+            for k in list(step_cache_step_states.keys()):
+                if int(k) > int(reuse_last_step):
+                    _snap_drop(step_cache_step_states.pop(int(k), None))
+        _commit_undo(undo_token)
+        try:
+            WaferContextManager.begin_run(
+                current_ui_state,
+                run_id=str(bb_run_id),
+                recipe_id=str(current_recipe_id),
+                recipe_name=str(current_recipe_name),
+                ctx_sig=str(ctx_sig),
+                steps_sig=str(bb_steps_sig),
+                upto_step_index=int(upto_i),
+            )
+        except Exception:
+            pass
 
         for completed_index in range(0, int(restore_idx) + 1):
             _set_step_runtime_status(completed_index, "done")
