@@ -310,6 +310,56 @@ class StructureDisplayHTTPTests(unittest.TestCase):
         np.testing.assert_array_equal(previous_owners, undo_owners)
         self.assertTrue(self.request('POST', '/api/redo', {})['result']['redone'])
 
+    def test_incremental_rollback_failure_keeps_recovery_undo_and_refreshes_revision(self):
+        self.fixture()
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        before = self.request('GET', '/api/init')['result']
+        manifest, grid, owners = self.display_voxels()
+        undo, _ = self.worker_history()
+        history_entries = tuple(map(id, undo))
+        original_load = tcad._tcad_snapshot_load_maybe
+        original_restore = tcad.ProcessModel.restore_state
+        foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+        restore_calls = 0
+
+        def damaged_snapshot(ref):
+            snapshot = copy.deepcopy(original_load(ref))
+            snapshot['display_step_ids'][1] = foreign_id
+            return snapshot
+
+        def failed_rollback(model, snapshot, **kwargs):
+            nonlocal restore_calls
+            restore_calls += 1
+            if restore_calls == 2:
+                raise MemoryError('injected rollback restore failure')
+            return original_restore(model, snapshot, **kwargs)
+
+        with patch.object(tcad, '_tcad_snapshot_load_maybe', side_effect=damaged_snapshot), \
+             patch.object(tcad.ProcessModel, 'restore_state', autospec=True, side_effect=failed_rollback), \
+             patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+            rejected = self.request('POST', '/api/run/to', {'index': 1}, ok=False)
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(restore_calls, 2)
+        self.assertEqual(rejected['code'], 'restore_failed')
+        self.assertIn('identity mapping', rejected['error'])
+        self.assertFalse(rejected['rolled_back'])
+        self.assertIn('injected rollback restore failure', rejected['rollback_error'])
+        undo, _ = self.worker_history()
+        self.assertEqual(len(history_entries) + 1, len(undo))
+        self.assertEqual(history_entries, tuple(map(id, undo[:-1])))
+        actual_manifest, partial_grid, _ = self.display_voxels()
+        self.assertGreater(actual_manifest['revision'], manifest['revision'])
+        self.assertEqual(rejected['model_revision'], actual_manifest['revision'])
+        self.assertFalse(np.array_equal(grid, partial_grid))
+        self.assertEqual(foreign_id, actual_manifest['owner_step_ids']['1'])
+        undone = self.request('POST', '/api/undo', {})['result']
+        self.assertTrue(undone['undone'])
+        self.assertEqual(before['recipe'], undone['recipe'])
+        recovered, undo_grid, undo_owners = self.display_voxels()
+        np.testing.assert_array_equal(grid, undo_grid)
+        np.testing.assert_array_equal(owners, undo_owners)
+        self.assertEqual(manifest['owner_step_ids'], recovered['owner_step_ids'])
+
     def test_incremental_missing_snapshot_still_rebuilds_from_start(self):
         self.fixture()
         original_load = tcad._tcad_snapshot_load_maybe

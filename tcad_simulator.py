@@ -59513,8 +59513,16 @@ def _webui_worker_main(
                         ),
                     )
                     if not restored.get("ok"):
-                        _abort_undo(undo_token)
-                        return {**restored, "code": "restore_failed", "log": model.history[-250:]}
+                        if restored.get("rolled_back") or restored.get("snapshot_error"):
+                            _abort_undo(undo_token)
+                        else:
+                            # A failed rollback can leave the cached model partially
+                            # published. Keep its recovery undo and refresh presentation.
+                            _commit_undo(undo_token)
+                            model_revision += 1
+                            preview_ready.clear()
+                        return {**restored, "code": "restore_failed", "log": model.history[-250:],
+                                "model_revision": int(model_revision)}
                     last_step_snap = snap_ref
                 else:
                     restore_idx = -1
