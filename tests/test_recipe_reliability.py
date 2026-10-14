@@ -1,7 +1,9 @@
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -137,6 +139,75 @@ class HeadlessMaskCacheTests(unittest.TestCase):
                     np.testing.assert_array_equal(reused, fresh)
                     self.assertNotEqual(tcad._headless_step_signature(exposure_blob), exposure_sig)
                     self.assertIs(ctx.snapshots[0], snapshots[0])
+
+    def test_unconsumed_mask_files_are_not_opened(self):
+        cases = (
+            {'enabled': False, 'params': {'mask_mode': 'Custom'}},
+            {'params': {'mask_mode': 'Procedural'}},
+            {'params': {'mask_mode': 'Asset'}},
+            {'params': {'mask_mode': 'Custom'}, 'custom_mask': [[True]]},
+            {'params': {'mask_mode': 'Custom'}, 'custom_mask': None},
+            {'params': {'mask_mode': 'Custom', 'mask_file': '/unused/params.npy'}, 'mask_file': ''},
+        )
+        for name in ('Mask Exposure', 'Structure Pattern'):
+            for case in cases:
+                blob = {'name': name, 'mask_file': '/unused/mask.npy', **case}
+                with self.subTest(name=name, case=case), \
+                        patch('builtins.open', side_effect=AssertionError('unconsumed file')) as opened, \
+                        patch.object(tcad.os, 'open', side_effect=AssertionError('unconsumed file')) as fd_opened:
+                    tcad._headless_step_signature(blob)
+                    opened.assert_not_called()
+                    fd_opened.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo') and Path('/dev/zero').exists(), 'POSIX special files')
+    def test_special_mask_files_are_not_opened(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fifo = Path(folder) / 'mask.fifo'
+            os.mkfifo(fifo)
+            for name in ('Mask Exposure', 'Structure Pattern'):
+                for path in (fifo, Path('/dev/zero')):
+                    with self.subTest(name=name, path=path), \
+                            patch('builtins.open', side_effect=AssertionError('special file')) as opened, \
+                            patch.object(tcad.os, 'open', side_effect=AssertionError('special file')) as fd_opened:
+                        tcad._headless_step_signature({
+                            'name': name, 'params': {'mask_mode': 'Custom', 'mask_file': str(path)},
+                        })
+                        opened.assert_not_called()
+                        fd_opened.assert_not_called()
+
+    def test_opened_nonregular_mask_is_not_read_and_descriptor_is_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'mask.npy'
+            np.save(path, np.ones((4, 4), dtype=bool))
+            with patch.object(tcad.os, 'fstat', return_value=SimpleNamespace(st_mode=stat.S_IFIFO, st_size=0)), \
+                    patch.object(tcad.os, 'read', side_effect=AssertionError('nonregular read')) as read, \
+                    patch.object(tcad.os, 'close', wraps=os.close) as close:
+                tcad._headless_step_signature({
+                    'name': 'Structure Pattern', 'params': {'mask_mode': 'Custom', 'mask_file': str(path)},
+                })
+                read.assert_not_called()
+                self.assertEqual(close.call_count, 1)
+
+    def test_regular_mask_hash_is_bounded_by_opened_file_size(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'mask.npy'
+            path.touch()
+            blob = {'name': 'Structure Pattern', 'params': {'mask_mode': 'Custom', 'mask_file': str(path)}}
+            empty_sig = tcad._headless_step_signature(blob)
+            np.save(path, np.ones((4, 4), dtype=bool))
+            with patch.object(tcad.os, 'fstat', return_value=SimpleNamespace(st_mode=stat.S_IFREG, st_size=0)):
+                self.assertEqual(tcad._headless_step_signature(blob), empty_sig)
+
+    def test_mask_read_failure_closes_descriptor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'mask.npy'
+            np.save(path, np.ones((4, 4), dtype=bool))
+            with patch.object(tcad.os, 'read', side_effect=OSError('read failed')), \
+                    patch.object(tcad.os, 'close', wraps=os.close) as close:
+                tcad._headless_step_signature({
+                    'name': 'Structure Pattern', 'params': {'mask_mode': 'Custom', 'mask_file': str(path)},
+                })
+                self.assertEqual(close.call_count, 1)
 
 
 class RecipeReliabilityTests(unittest.TestCase):

@@ -20708,26 +20708,43 @@ def _headless_step_signature(step_blob: Any) -> str:
 
     # Both ExposureStep consumers depend on mask payload/file, not only params strings.
     try:
-        if token["name"] in {"Mask Exposure", "Structure Pattern"}:
-            cm = step_blob.get("custom_mask", None)
-            if cm is not None:
+        if token["enabled"] and token["name"] in {"Mask Exposure", "Structure Pattern"}:
+            has_custom_mask = False
+            if "custom_mask" in step_blob:
                 try:
-                    arr = np.array(cm, dtype=bool)
+                    arr = np.array(step_blob["custom_mask"], dtype=bool)
+                    has_custom_mask = True
                     h = hashlib.blake2s(arr.tobytes(order="C"), digest_size=16).hexdigest()
                     token["custom_mask_shape"] = list(arr.shape)
                     token["custom_mask_hash"] = h
                 except Exception:
                     pass
-            mf = str(step_blob.get("mask_file", "") or token["params"].get("mask_file", "") or "").strip()
-            if mf:
+            mf = step_blob.get("mask_file", token["params"].get("mask_file", ""))
+            mode = token["params"].get("mask_mode", "Procedural")
+            if not has_custom_mask and mode in {"Custom", "Designer", "Image"} and mf:
+                mf = str(mf)
                 token["mask_file"] = mf
+                token["mask_file_hash"] = "unhashable"
                 try:
-                    # Content identity detects edits without invalidating on a mere touch.
-                    h = hashlib.blake2s(digest_size=16)
-                    with open(mf, "rb") as mask_stream:
-                        for chunk in iter(lambda: mask_stream.read(1024 * 1024), b""):
-                            h.update(chunk)
-                    token["mask_file_hash"] = h.hexdigest()
+                    if stat.S_ISREG(os.stat(mf).st_mode):
+                        # Nonblocking open and fstat guard a path replaced by a FIFO.
+                        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+                        fd = os.open(mf, flags)
+                        try:
+                            opened_stat = os.fstat(fd)
+                            if stat.S_ISREG(opened_stat.st_mode):
+                                # Hash only the observed size, never follow endless appends.
+                                remaining = int(opened_stat.st_size)
+                                h = hashlib.blake2s(digest_size=16)
+                                while remaining > 0:
+                                    chunk = os.read(fd, min(remaining, 1024 * 1024))
+                                    if not chunk:
+                                        break
+                                    h.update(chunk)
+                                    remaining -= len(chunk)
+                                token["mask_file_hash"] = h.hexdigest()
+                        finally:
+                            os.close(fd)
                 except Exception:
                     token["mask_file_hash"] = None
     except Exception:
