@@ -114,6 +114,8 @@ expect(next.recipe.find(s => s.index === next.selectedStepIndex)?.stepId)
 ```
 
 - [ ] 验证对象被删除与旧服务无 stepId 的选择回退，保留 initialization gate。
+- [ ] 保留中间删除的既有邻居行为：`init,A,B,C` 选 B 后删除 B，应沿用原索引
+  选择 C，不能跳到 A；末尾删除无同索引对象时再走原首步兜底。
 - [ ] 最小按 identity 选择，不修改工艺 geometry、单位或 Viewer 生命周期。
 - [ ] 串行 Vitest、typecheck 与 build，不能增加测试 timeout 掩盖失败。
 - [ ] `fix(步骤选择): 移动后跟随持久化身份`，两阶段审查后 Task 6。
