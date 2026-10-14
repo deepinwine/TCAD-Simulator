@@ -131,7 +131,8 @@ expect(next.recipe.find(s => s.index === next.selectedStepIndex)?.stepId)
 
 ## Task 7 / BLOCK-007：启动器退出保存
 
-文件：`tcad_studio.py`、`tests/test_tcad_studio_launcher.py`。
+文件：`tcad_studio.py`、`tests/test_tcad_studio_launcher.py`；为部分启动失败的
+安全清理，最小修改 `tcad_simulator.py` 中的 `WebUIServerManager`，不改 Admin manager。
 
 - [ ] 以隔离 fake manager 验证 Ctrl+C、运行时异常均调用 stop 一次：
 
@@ -142,8 +143,22 @@ manager.stop.assert_called_once_with()
 - [ ] 实际临时 worker shutdown 保存最近编辑，再同目录重启核对值；不使用
   用户 `.tcad-studio`。保持 Ctrl+C 返回 0，异常传播，浏览器设置不变。
 - [ ] 最小 finally 清理，不新增保存端点或线程模型。
+- [ ] 真实 manager 已创建 HTTPServer、Thread.start 抛 RuntimeError／KeyboardInterrupt
+  时，清理不能等待尚未运行的 serve_forever；保持关闭资源、会话清理、异常
+  传播和 Ctrl+C 返回 0。先失败再通过，测试有确定性释放措施，不能永久挂起。
 - [ ] launcher 与 history 回归、编译、diff check。
 - [ ] `fix(启动器): 退出时关闭服务并刷新保存`，两阶段审查。
+
+## 补充回归校正（七项修复闭环后）
+
+文件：`tests/test_mask_asset_transaction.py`，仅测试变更。
+
+- [ ] 保留杀进程场景，将严格原始字节断言移到真实 recover 返回后、首次
+  loader 读取前；断言恢复 hook 被执行及其先于加载，事务产物已清理。
+- [ ] 加载后仍核对原配方、step identity、规范化参数、完整 model_state；
+  不因兼容性规范化合法写回而要求 pickle 字节一直不变。
+- [ ] 原基线已确认此测试失败；先验证错误断言位置，再专项 GREEN、独立
+  规格与质量审查，重跑全部掩膜补充套件。
 
 ## 最终验收与交接
 
