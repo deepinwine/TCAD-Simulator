@@ -35,6 +35,10 @@ self.assertTrue(loaded['ok'], loaded)
 - [ ] 运行上述两模块，确认新测试因 source-bound mapping 失败。
 - [ ] 最小实现来源解绑／降级，保留正式 grid、材料场及已登记其他 owner；
   检查失败原子性，不在 loader 中无条件放宽 identity 校验。
+- [ ] 最终审查故障回归：timeline 恢复非法来源、随后 rollback restore 也失败时，
+  返回 `rolled_back:false` 和 rollback error；保留本次恢复前 Undo，递增 revision、
+  失效展示缓存，故障解除后 Undo 逐体素恢复原 grid／来源。回滚成功则仍保持
+  revision／历史不变，不新增时间线执行或回放。
 - [ ] 重跑来源、显示 HTTP、Structure editor；编译与 diff check。
 - [ ] `fix(来源绑定): 修复删除步骤后的配方保存加载`，两阶段审查后 Task 2。
 
