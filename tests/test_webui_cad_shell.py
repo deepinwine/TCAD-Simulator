@@ -101,6 +101,258 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
         manager.start()
         return manager
 
+    def _delete_rpc(self, session, command, payload=None):
+        response = session.rpc(command, payload or {}, timeout_s=30.0)
+        self.assertTrue(response["ok"], response)
+        return response["result"]
+
+    def _delete_grid(self, session):
+        manifest = self._delete_rpc(session, "structure_display_manifest")
+        slices = [self._delete_rpc(session, "structure_display_slice", {
+            "revision": manifest["revision"], "axis": "Z", "index": index,
+        })["material"]["data_b64"] for index in range(manifest["domain"]["grid_shape"][2])]
+        return manifest, slices
+
+    def _delete_fixture(self, session):
+        initial = self._delete_rpc(session, "init")
+        default_grid = self._delete_grid(session)[1]
+        self.assertEqual(len(initial["recipe"]), 10)
+        self._delete_rpc(session, "set_step", {
+            "index": 0, "params": {"material": "Germanium", "thickness_nm": 20},
+        })
+        self._delete_rpc(session, "run_step", {"index": 0})
+        self._delete_rpc(session, "recipe_add", {
+            "name": "Structure Deposit", "params": {"material": "Silicon Dioxide", "thickness_nm": 5},
+        })
+        self._delete_rpc(session, "run_step", {"index": 10})
+        self._delete_rpc(session, "recipe_save", {"name": "CUSTOM_DELETE_ME"})
+        customized = self._delete_rpc(session, "init")
+        manifest, grid = self._delete_grid(session)
+        self.assertNotEqual(default_grid, grid)
+        self.assertTrue(manifest["owner_step_ids"])
+        self.assertEqual(len(customized["recipes"]), 1)
+        return initial, default_grid, customized, manifest
+
+    def _assert_deleted_pointers(self, session, deleted_id):
+        entries = json.loads((session.storage_dir / "history" / "index.json").read_text())
+        self.assertNotIn(deleted_id, [entry["id"] for entry in entries])
+        pointer = json.loads((session.storage_dir / "session_state.json").read_text())
+        for key in ("current_recipe_id", "last_active_recipe_id"):
+            self.assertNotEqual(pointer.get(key), deleted_id)
+        global_path = session.storage_dir / "autosave.pkl.gz"
+        if global_path.exists():
+            self.assertNotEqual(tcad._webui_pickle_load(global_path)["recipe_id"], deleted_id)
+        for suffix in (".pkl.gz", ".autosave.pkl.gz"):
+            self.assertFalse((session.storage_dir / "history" / (deleted_id + suffix)).exists())
+
+    def _assert_fresh_after_delete(self, session, initial, default_grid, customized):
+        current = self._delete_rpc(session, "init")
+        old_id = customized["current_recipe"]["id"]
+        self.assertNotEqual(current["current_recipe"]["id"], old_id)
+        self.assertEqual(current["current_recipe"]["name"], "Untitled")
+        self.assertEqual([(step["name"], step["params"]) for step in current["recipe"]],
+                         [(step["name"], step["params"]) for step in initial["recipe"]])
+        self.assertTrue(set(step["step_id"] for step in current["recipe"]).isdisjoint(
+            step["step_id"] for step in customized["recipe"]))
+        self.assertEqual(current["model"], initial["model"])
+        manifest, grid = self._delete_grid(session)
+        self.assertEqual(grid, default_grid)
+        self.assertEqual(manifest["owner_step_ids"], {})
+        self.assertFalse(self._delete_rpc(session, "undo")["undone"])
+        self.assertFalse(self._delete_rpc(session, "redo")["redone"])
+        self.assertFalse(any(item["snapshot_valid"] for item in self._delete_rpc(session, "timeline_get")["items"]))
+        self._assert_deleted_pointers(session, old_id)
+        return current, manifest
+
+    def _check_current_delete_lifecycle(self, lifecycle):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                initial, default_grid, customized, old_manifest = self._delete_fixture(session)
+                old_id = customized["current_recipe"]["id"]
+                deleted = self._delete_rpc(session, "recipe_delete", {"id": old_id})
+                if lifecycle == "save":
+                    self._delete_rpc(session, "recipe_save")
+                else:
+                    session_id, secret = session.session_id, session.secret
+                    if lifecycle == "eof":
+                        session.conn.close()
+                        session.process.join(timeout=10.0)
+                        self.assertFalse(session.process.is_alive())
+                    manager.stop()
+                    manager = self._start_manager(temp_dir)
+                    session, _cookie = manager.create_session(session_id=session_id, secret=secret)
+                current, manifest = self._assert_fresh_after_delete(session, initial, default_grid, customized)
+                self.assertTrue(deleted["switched"])
+                self.assertEqual(current["current_recipe"], deleted["current_recipe"])
+                if lifecycle == "save":
+                    self.assertGreater(manifest["revision"], old_manifest["revision"])
+            finally:
+                manager.stop()
+
+    def test_delete_current_recipe_then_save_does_not_revive_custom_steps(self):
+        self._check_current_delete_lifecycle("save")
+
+    def test_delete_current_recipe_normal_restart_keeps_fresh_default(self):
+        self._check_current_delete_lifecycle("stop")
+
+    def test_delete_current_recipe_eof_restart_does_not_revive_deleted_id(self):
+        self._check_current_delete_lifecycle("eof")
+
+    def test_delete_noncurrent_recipe_preserves_active_model_grid_and_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            try:
+                session, _cookie = manager.create_session()
+                _initial, _grid, customized, _manifest = self._delete_fixture(session)
+                old_id = customized["current_recipe"]["id"]
+                self._delete_rpc(session, "recipe_new", {"name": "Keep active"})
+                self._delete_rpc(session, "set_step", {"index": 0, "params": {"thickness_nm": 10}})
+                self._delete_rpc(session, "run_step", {"index": 0})
+                self._delete_rpc(session, "recipe_save")
+                before = self._delete_rpc(session, "init")
+                display = self._delete_grid(session)
+                pointers = {name: (session.storage_dir / name).read_bytes()
+                            for name in ("autosave.pkl.gz", "session_state.json")}
+                deleted = self._delete_rpc(session, "recipe_delete", {"id": old_id})
+                after = self._delete_rpc(session, "init")
+                self.assertFalse(deleted["switched"])
+                for key in ("current_recipe", "recipe", "model", "ui_state", "log"):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(display, self._delete_grid(session))
+                self.assertEqual(pointers, {name: (session.storage_dir / name).read_bytes() for name in pointers})
+                self._assert_deleted_pointers(session, old_id)
+            finally:
+                manager.stop()
+
+    def _check_delete_candidates(self, corrupt_latest=False, corrupt_all=False):
+        import copy
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                initial, default_grid, customized, _manifest = self._delete_fixture(session)
+                old_id = customized["current_recipe"]["id"]
+                damaged = tcad._webui_pickle_load(session.storage_dir / "history" / (old_id + ".pkl.gz"))
+                damaged["steps_full"][1]["step_id"] = damaged["steps_full"][0]["step_id"]
+                candidates = []
+                for name, stamp in (("Older valid", "2030-01-01"), ("Newest valid", "2040-01-01")):
+                    with patch.object(tcad, "_webui_timestamp", return_value=stamp):
+                        self._delete_rpc(session, "recipe_new", {"name": name})
+                        saved = self._delete_rpc(session, "recipe_save")
+                    candidates.append(saved["id"])
+                expected = self._delete_rpc(session, "init")
+                with patch.object(tcad, "_webui_timestamp", return_value="2050-01-01"):
+                    self._delete_rpc(session, "history_load", {"id": old_id})
+                for index, candidate_id in enumerate(candidates):
+                    if corrupt_all or (corrupt_latest and index == 1):
+                        blob = copy.deepcopy(damaged)
+                        blob["recipe_id"] = candidate_id
+                        blob["recipe_name"] = "INVALID_SOURCE_ID"
+                        for suffix in (".pkl.gz", ".autosave.pkl.gz"):
+                            tcad._webui_pickle_dump(session.storage_dir / "history" / (candidate_id + suffix), blob)
+                deleted = self._delete_rpc(session, "recipe_delete", {"id": old_id})
+                self.assertTrue(deleted["switched"])
+                if corrupt_all:
+                    self._assert_fresh_after_delete(session, initial, default_grid, customized)
+                else:
+                    target = candidates[0] if corrupt_latest else candidates[1]
+                    current = self._delete_rpc(session, "init")
+                    self.assertEqual(current["current_recipe"]["id"], target)
+                    self.assertEqual(current["current_recipe"]["name"], "Older valid" if corrupt_latest else "Newest valid")
+                    self.assertEqual(current["model"], expected["model"])
+                    self.assertEqual(len(current["recipe"]), 1)
+                    self.assertFalse(self._delete_rpc(session, "undo")["undone"])
+                    self.assertFalse(self._delete_rpc(session, "redo")["redone"])
+                    self.assertFalse(any(item["snapshot_valid"] for item in self._delete_rpc(session, "timeline_get")["items"]))
+                    self.assertEqual(self._delete_rpc(session, "structure_display_manifest")["owner_step_ids"], {})
+                    self._assert_deleted_pointers(session, old_id)
+            finally:
+                manager.stop()
+
+    def test_delete_current_recipe_selects_newest_loadable_entry(self):
+        self._check_delete_candidates()
+
+    def test_delete_current_recipe_skips_newest_invalid_source_to_older_valid_entry(self):
+        self._check_delete_candidates(corrupt_latest=True)
+
+    def test_delete_current_recipe_with_all_invalid_sources_creates_fresh_default(self):
+        self._check_delete_candidates(corrupt_all=True)
+
+    def test_delete_current_recipe_global_write_failure_cannot_leave_deleted_resume(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                initial, default_grid, customized, _manifest = self._delete_fixture(session)
+                old_id = customized["current_recipe"]["id"]
+                global_path = session.storage_dir / "autosave.pkl.gz"
+                original_dump = tcad._webui_pickle_dump
+
+                def fail_global_write(target, blob):
+                    if target == global_path:
+                        raise OSError("global resume write failed")
+                    return original_dump(target, blob)
+
+                with patch.object(tcad, "_webui_pickle_dump", side_effect=fail_global_write):
+                    self._delete_rpc(session, "recipe_delete", {"id": old_id})
+                    self._assert_fresh_after_delete(session, initial, default_grid, customized)
+                    self._assert_deleted_pointers(session, old_id)
+                session_id, secret = session.session_id, session.secret
+                session.conn.close()
+                session.process.join(timeout=10.0)
+                self.assertFalse(session.process.is_alive())
+                manager.stop()
+                manager = self._start_manager(temp_dir)
+                resumed, _cookie = manager.create_session(session_id=session_id, secret=secret)
+                self._assert_fresh_after_delete(resumed, initial, default_grid, customized)
+            finally:
+                manager.stop()
+
+    def test_delete_current_recipe_refuses_when_old_resume_cleanup_fails(self):
+        for failure in ("global", "session"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp_dir:
+                manager = self._start_manager(temp_dir)
+                manager._force_inprocess_worker = True
+                try:
+                    session, _cookie = manager.create_session()
+                    _initial, _grid, customized, _manifest = self._delete_fixture(session)
+                    old_id = customized["current_recipe"]["id"]
+                    display = self._delete_grid(session)
+                    files = {target: target.read_bytes() for target in (session.storage_dir / "history").iterdir()}
+                    global_path = session.storage_dir / "autosave.pkl.gz"
+                    session_path = session.storage_dir / "session_state.json"
+                    original_unlink, original_replace = Path.unlink, Path.replace
+
+                    def fail_cleanup(target, *args, **kwargs):
+                        if target == global_path:
+                            raise OSError("old global resume cleanup failed")
+                        return original_unlink(target, *args, **kwargs)
+
+                    def fail_session_clear(target, destination):
+                        if destination == session_path:
+                            raise OSError("old session resume cleanup failed")
+                        return original_replace(target, destination)
+
+                    operation = "unlink" if failure == "global" else "replace"
+                    replacement = fail_cleanup if failure == "global" else fail_session_clear
+                    with patch.object(Path, operation, new=replacement):
+                        rejected = session.rpc("recipe_delete", {"id": old_id}, timeout_s=30.0)
+                    self.assertFalse(rejected["ok"], rejected)
+                    self.assertIn("resume cleanup failed", rejected["error"])
+                    after = self._delete_rpc(session, "init")
+                    for key in ("current_recipe", "recipe", "model", "ui_state", "log"):
+                        self.assertEqual(customized[key], after[key], key)
+                    self.assertEqual(display, self._delete_grid(session))
+                    self.assertEqual(files, {target: target.read_bytes() for target in files})
+                    self.assertEqual(json.loads(session_path.read_text())["current_recipe_id"], old_id)
+                finally:
+                    manager.stop()
+
     def _save_empty_recipe(self, session):
         self.assertTrue(session.rpc("recipe_new", {"name": "Empty saved recipe"}, timeout_s=30.0)["ok"])
         self.assertTrue(session.rpc("set_step", {

@@ -58609,6 +58609,61 @@ def _webui_worker_main(
         except Exception:
             return False
 
+    def _initialize_default_recipe(*, reset_model: bool = False) -> None:
+        nonlocal steps, model, model_revision, current_recipe_name, current_recipe_id, current_ui_state
+        # Share the startup ten-step Untitled semantics. A deleted recipe must
+        # also lose its substrate/material state, which configure_domain retains.
+        fresh_steps = _webui_default_recipe(material_db)
+        try:
+            for st in fresh_steps:
+                _webui_apply_admin_step_defaults(st, admin_cfg)
+        except Exception:
+            pass
+        fresh_model = model
+        if reset_model:
+            fresh_model = ProcessModel(
+                material_db, grid_shape=default_domain_shape,
+                voxel_size_nm=default_domain_voxel_nm, max_workers=default_domain_threads,
+            )
+            fresh_model.surface_reaction_rate_table = model.surface_reaction_rate_table
+            fresh_model.anneal_diffusivity_table = model.anneal_diffusivity_table
+        try:
+            for st in fresh_steps:
+                msgs = _normalize_step_material_params(st, material_db, admin_cfg)
+                if msgs:
+                    pending_warnings.extend(msgs)
+                    for message in msgs[:12]:
+                        try:
+                            fresh_model._log(message)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        if not reset_model:
+            _set_threads_quiet(default_domain_threads)
+            try:
+                fresh_model.configure_domain(default_domain_shape, default_domain_voxel_nm)
+            except Exception:
+                try:
+                    fresh_model.configure_domain(safe_shape, safe_voxel_nm)
+                except Exception:
+                    fresh_model.reset_state()
+        if reset_model:
+            old_model = model
+            model = fresh_model
+            old_model.set_log_sink(None)
+            model.set_log_sink(paths.get("live_log"))
+            old_model.parallel.shutdown()
+            model_revision += 1
+            preview_ready.clear()
+        steps = fresh_steps
+        current_recipe_name = "Untitled"
+        current_recipe_id = ""
+        current_ui_state = {}
+        _reset_step_runtime_statuses()
+        if not ephemeral:
+            _manual_save("init")
+
     # One-time migration: ensure legacy autosave flags map to per-recipe autosave files.
     _migrate_legacy_autosave_flags()
     _sync_autosave_flags(write_index=True)
@@ -58699,38 +58754,7 @@ def _webui_worker_main(
             if best_id:
                 loaded = _load_recipe_entry(best_id)
     if not loaded or not current_recipe_id:
-        current_recipe_name = "Untitled"
-        steps = _webui_default_recipe(material_db)
-        try:
-            for st in steps:
-                _webui_apply_admin_step_defaults(st, admin_cfg)
-        except Exception:
-            pass
-        _reset_step_runtime_statuses()
-        try:
-            for st in steps:
-                msgs = _normalize_step_material_params(st, material_db, admin_cfg)
-                if msgs:
-                    pending_warnings.extend(msgs)
-                    for m in msgs[:12]:
-                        try:
-                            model._log(m)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        _set_threads_quiet(default_domain_threads)
-        try:
-            model.configure_domain(default_domain_shape, default_domain_voxel_nm)
-        except Exception:
-            try:
-                model.configure_domain(safe_shape, safe_voxel_nm)
-            except Exception:
-                model.reset_state()
-        current_recipe_id = ""
-        current_ui_state = {}
-        if not ephemeral:
-            _manual_save("init")
+        _initialize_default_recipe()
 
     # -----------------------------------------------------------------------
     # Large-grid memory controls
@@ -72892,6 +72916,35 @@ def _webui_worker_main(
                 entry_id = str(payload.get("id", "")).strip()
                 if not entry_id:
                     raise ValueError("Missing recipe id")
+                if _find_recipe_entry(entry_id) is None:
+                    raise ValueError("Recipe not found")
+                deleting_current = entry_id == current_recipe_id
+                # Retire old resume data before deleting the entry. New snapshot
+                # writeback is best-effort and cannot be our only protection from
+                # resurrecting the deleted ID on an EOF/restart.
+                global_points_to_deleted = deleting_current
+                if not global_points_to_deleted and paths["autosave"].exists():
+                    try:
+                        global_blob = _webui_pickle_load(paths["autosave"])
+                        global_points_to_deleted = isinstance(global_blob, dict) and global_blob.get("recipe_id") == entry_id
+                    except Exception:
+                        pass
+                if global_points_to_deleted:
+                    paths["autosave"].unlink(missing_ok=True)
+                session_state = _read_session_state()
+                if deleting_current or entry_id in (session_state.get("current_recipe_id"), session_state.get("last_active_recipe_id")):
+                    previous_id = current_recipe_id
+                    if deleting_current:
+                        current_recipe_id = ""
+                    try:
+                        _write_session_state()
+                    except Exception:
+                        current_recipe_id = previous_id
+                        raise
+                if deleting_current:
+                    autosave_pending = False
+                    autosave_note = ""
+                    autosave_requested_ts = 0.0
                 removed = False
                 kept: List[Dict[str, Any]] = []
                 for entry in history_index:
@@ -72912,29 +72965,25 @@ def _webui_worker_main(
                 history_index = kept
                 _write_history_index()
                 switched = False
-                if entry_id == current_recipe_id:
-                    if history_index:
-                        best = max(history_index, key=lambda e: str(e.get("timestamp", "")))
-                        best_id = str(best.get("id", "")).strip()
-                        if best_id and _load_recipe_entry(best_id):
-                            switched = True
-                    if not current_recipe_id:
-                        current_recipe_name = "Untitled"
-                        steps = _webui_default_recipe(material_db)
-                        _reset_step_runtime_statuses()
-                        _set_threads_quiet(default_domain_threads)
+                if deleting_current:
+                    for candidate in sorted(history_index, key=lambda entry: str(entry.get("timestamp", "")), reverse=True):
+                        candidate_id = str(candidate.get("id", "")).strip()
                         try:
-                            model.configure_domain(default_domain_shape, default_domain_voxel_nm)
+                            switched = bool(candidate_id and _load_recipe_entry(candidate_id))
                         except Exception:
-                            try:
-                                model.configure_domain(safe_shape, safe_voxel_nm)
-                            except Exception:
-                                model.reset_state()
-                        current_recipe_id = ""
-                        _manual_save("init")
+                            # Source-bound validation deliberately throws outside
+                            # the loader's restore try; reject this candidate only.
+                            switched = False
+                        if switched:
+                            break
+                    if not switched:
+                        _initialize_default_recipe(reset_model=True)
                         switched = True
                 if switched:
                     _clear_all_history()
+                    _invalidate_loop_cache()
+                    timeline_current_index = -1
+                    _update_cache_policy()
                 conn.send(
                     {
                         "ok": True,
