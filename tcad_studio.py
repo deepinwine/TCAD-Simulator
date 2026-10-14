@@ -43,20 +43,28 @@ def main() -> int:
         host="127.0.0.1",
         port=port,
     )
-    manager.start()
-    url = f"http://127.0.0.1:{port}/studio/"
-    print(f"TCAD Studio 已启动：{url}")
-    print("按 Ctrl+C 退出。")
-
-    if not args.no_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-
+    browser_timer = None
     try:
+        manager.start()
+        url = f"http://127.0.0.1:{manager.port}/studio/"
+        print(f"TCAD Studio 已启动：{url}")
+        print("按 Ctrl+C 退出。")
+
+        if not args.no_browser:
+            browser_timer = threading.Timer(1.0, lambda: webbrowser.open(url))
+            browser_timer.start()
+
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         print("\n正在关闭…")
         return 0
+    finally:
+        try:
+            if browser_timer is not None:
+                browser_timer.cancel()
+        finally:
+            manager.stop()
 
 
 if __name__ == "__main__":
