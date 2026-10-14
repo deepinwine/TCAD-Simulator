@@ -212,6 +212,9 @@ class StructureDisplayHTTPTests(unittest.TestCase):
         before = self.request('GET', '/api/init')['result']
         timeline = self.request('POST', '/api/timeline/get', {})['result']
         manifest, grid, owners = self.display_voxels()
+        undo, redo = self.worker_history()
+        redo.append(copy.deepcopy(undo[-1]))
+        history_entries = tuple(map(id, undo)), tuple(map(id, redo))
         original_load = tcad._tcad_snapshot_load_maybe
         foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
 
@@ -225,6 +228,9 @@ class StructureDisplayHTTPTests(unittest.TestCase):
         self.assertEqual(rejected['code'], 'restore_failed')
         self.assertIn('identity mapping', rejected['error'])
         self.assertTrue(rejected['rolled_back'])
+        undo, redo = self.worker_history()
+        self.assertEqual(history_entries, (tuple(map(id, undo)), tuple(map(id, redo))))
+        self.assertEqual(rejected['model_revision'], manifest['revision'])
         after = self.request('GET', '/api/init')['result']
         for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
             self.assertEqual(before[key], after[key], key)
@@ -233,6 +239,110 @@ class StructureDisplayHTTPTests(unittest.TestCase):
         self.assertEqual(manifest, actual_manifest)
         np.testing.assert_array_equal(grid, actual_grid)
         np.testing.assert_array_equal(owners, actual_owners)
+
+    def test_timeline_success_preserves_existing_undo_and_redo_entries(self):
+        self.fixture()
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        before = self.manifest()
+        undo, redo = self.worker_history()
+        redo.append(copy.deepcopy(undo[-1]))
+        history_entries = tuple(map(id, undo)), tuple(map(id, redo))
+        with patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+            restored = self.request('POST', '/api/timeline/restore', {'index': 1})['result']
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(restored['timeline']['current'], 1)
+        self.assertGreater(self.manifest()['revision'], before['revision'])
+        undo, redo = self.worker_history()
+        self.assertEqual(history_entries, (tuple(map(id, undo)), tuple(map(id, redo))))
+
+    def test_timeline_snapshot_failures_preserve_state_and_history(self):
+        self.fixture()
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        for compression in ('dense-zlib', 'dense'):
+            with self.subTest(compression=compression):
+                before = self.request('GET', '/api/init')['result']
+                timeline = self.request('POST', '/api/timeline/get', {})['result']
+                manifest, grid, owners = self.display_voxels()
+                undo, redo = self.worker_history()
+                redo.append(copy.deepcopy(undo[-1]))
+                history_entries = tuple(map(id, undo)), tuple(map(id, redo))
+                original_snapshot = tcad.ProcessModel.snapshot_state
+
+                def failed_snapshot(model, compression='dense', **kwargs):
+                    if compression == failed_compression:
+                        raise MemoryError('injected timeline snapshot failure')
+                    return original_snapshot(model, compression=compression, **kwargs)
+
+                failed_compression = compression
+                with patch.object(tcad.ProcessModel, 'snapshot_state', autospec=True, side_effect=failed_snapshot), \
+                     patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+                    rejected = self.request('POST', '/api/timeline/restore', {'index': 1}, ok=False)
+                self.assertEqual(execute.call_count, 0)
+                self.assertIn('injected timeline snapshot failure', rejected['error'])
+                if compression == 'dense':
+                    self.assertEqual(rejected['code'], 'restore_failed')
+                    self.assertFalse(rejected['rolled_back'])
+                    self.assertEqual(rejected['model_revision'], manifest['revision'])
+                undo, redo = self.worker_history()
+                self.assertEqual(history_entries, (tuple(map(id, undo)), tuple(map(id, redo))))
+                after = self.request('GET', '/api/init')['result']
+                for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+                actual_manifest, actual_grid, actual_owners = self.display_voxels()
+                self.assertEqual(manifest, actual_manifest)
+                np.testing.assert_array_equal(grid, actual_grid)
+                np.testing.assert_array_equal(owners, actual_owners)
+
+    def test_timeline_rollback_failure_keeps_recovery_undo_and_refreshes_revision(self):
+        self.fixture()
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        before = self.request('GET', '/api/init')['result']
+        manifest, grid, owners = self.display_voxels()
+        undo, _ = self.worker_history()
+        history_entries = tuple(map(id, undo))
+        original_load = tcad._tcad_snapshot_load_maybe
+        original_restore = tcad.ProcessModel.restore_state
+        foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+        restore_calls = 0
+
+        def damaged_snapshot(ref):
+            snapshot = copy.deepcopy(original_load(ref))
+            snapshot['display_step_ids'][1] = foreign_id
+            return snapshot
+
+        def failed_rollback(model, snapshot, **kwargs):
+            nonlocal restore_calls
+            restore_calls += 1
+            if restore_calls == 2:
+                raise MemoryError('injected timeline rollback failure')
+            return original_restore(model, snapshot, **kwargs)
+
+        with patch.object(tcad, '_tcad_snapshot_load_maybe', side_effect=damaged_snapshot), \
+             patch.object(tcad.ProcessModel, 'restore_state', autospec=True, side_effect=failed_rollback), \
+             patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Forbidden replay')) as execute:
+            rejected = self.request('POST', '/api/timeline/restore', {'index': 1}, ok=False)
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(restore_calls, 2)
+        self.assertEqual(rejected['code'], 'restore_failed')
+        self.assertIn('identity mapping', rejected['error'])
+        self.assertFalse(rejected['rolled_back'])
+        self.assertIn('injected timeline rollback failure', rejected['rollback_error'])
+        undo, _ = self.worker_history()
+        self.assertEqual(len(history_entries) + 1, len(undo))
+        self.assertEqual(history_entries, tuple(map(id, undo[:-1])))
+        actual_manifest, partial_grid, _ = self.display_voxels()
+        self.assertGreater(actual_manifest['revision'], manifest['revision'])
+        self.assertEqual(rejected['model_revision'], actual_manifest['revision'])
+        self.assertFalse(np.array_equal(grid, partial_grid))
+        self.assertEqual(foreign_id, actual_manifest['owner_step_ids']['1'])
+        undone = self.request('POST', '/api/undo', {})['result']
+        self.assertTrue(undone['undone'])
+        self.assertEqual(before['recipe'], undone['recipe'])
+        recovered, undo_grid, undo_owners = self.display_voxels()
+        np.testing.assert_array_equal(grid, undo_grid)
+        np.testing.assert_array_equal(owners, undo_owners)
+        self.assertEqual(manifest['owner_step_ids'], recovered['owner_step_ids'])
 
     def test_incremental_corrupt_source_rejects_without_replay_or_state_changes(self):
         self.fixture()

@@ -72409,20 +72409,31 @@ def _webui_worker_main(
                         "rid": rid,
                     })
                     continue
+                undo_token = _push_undo(defer_trim=True)
                 restored = _run_model_transaction(
                     model,
                     lambda: _restore_recipe_bound_step_snapshot(snap, emit_log=True, log_prefix="[timeline] "),
                 )
                 if not restored.get("ok"):
+                    if restored.get("rolled_back") or restored.get("snapshot_error"):
+                        _abort_undo(undo_token)
+                    else:
+                        # A failed rollback may leave a partial timeline restore.
+                        # Keep the pre-restore recovery point and refresh display data.
+                        _commit_undo(undo_token)
+                        model_revision += 1
+                        preview_ready.clear()
                     conn.send({
                         "ok": False,
                         "error": f"快照恢复失败：{restored.get('error', 'unknown error')}",
                         "code": "restore_failed",
                         "rolled_back": bool(restored.get("rolled_back", False)),
                         "rollback_error": str(restored.get("rollback_error", "") or ""),
+                        "model_revision": int(model_revision),
                         "rid": rid,
                     })
                     continue
+                _abort_undo(undo_token)
                 timeline_current_index = int(index)
                 model_revision += 1
                 preview_ready.clear()
