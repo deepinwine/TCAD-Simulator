@@ -39,6 +39,9 @@ self.assertTrue(loaded['ok'], loaded)
   返回 `rolled_back:false` 和 rollback error；保留本次恢复前 Undo，递增 revision、
   失效展示缓存，故障解除后 Undo 逐体素恢复原 grid／来源。回滚成功则仍保持
   revision／历史不变，不新增时间线执行或回放。
+- [ ] 来源生命周期补充：同会话连续导入相同参数、生成不同 step identity 的
+  配方，不能复用前一配方的来源快照；使用既有缓存失效入口，构建及再次构建
+  都成功，新来源只属于新配方。损坏快照的严格拒绝仍保留，不回退重放。
 - [ ] 重跑来源、显示 HTTP、Structure editor；编译与 diff check。
 - [ ] `fix(来源绑定): 修复删除步骤后的配方保存加载`，两阶段审查后 Task 2。
 
