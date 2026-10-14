@@ -72919,6 +72919,8 @@ def _webui_worker_main(
                 if _find_recipe_entry(entry_id) is None:
                     raise ValueError("Recipe not found")
                 deleting_current = entry_id == current_recipe_id
+                if deleting_current and video_active:
+                    raise ValueError("视频导出正在进行，请结束或取消导出后重试删除当前配方。")
                 # Retire old resume data before deleting the entry. New snapshot
                 # writeback is best-effort and cannot be our only protection from
                 # resurrecting the deleted ID on an EOF/restart.

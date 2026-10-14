@@ -353,6 +353,119 @@ class CadShellWorkerHistoryTests(unittest.TestCase):
                 finally:
                     manager.stop()
 
+    def _assert_video_delete_preserves_active(self, session, target_id, *, current=True):
+        self.assertTrue(self._delete_rpc(session, "video_begin")["active"])
+        before = self._delete_rpc(session, "init")
+        display = self._delete_grid(session)
+        timeline = self._delete_rpc(session, "timeline_get")
+        paths = [session.storage_dir / "autosave.pkl.gz", session.storage_dir / "session_state.json"]
+        paths.extend((session.storage_dir / "history").iterdir())
+        files = {path: path.read_bytes() for path in paths}
+        response = session.rpc("recipe_delete", {"id": target_id}, timeout_s=30.0)
+        if current:
+            self.assertFalse(response["ok"], response)
+            self.assertIn("视频导出正在进行", response["error"])
+            self.assertIn("结束或取消", response["error"])
+        else:
+            self.assertTrue(response["ok"], response)
+            self.assertTrue(response["result"]["deleted"])
+            self.assertFalse(response["result"]["switched"])
+        after = self._delete_rpc(session, "init")
+        for key in ("current_recipe", "recipe", "model", "ui_state", "log"):
+            self.assertEqual(before[key], after[key], key)
+        self.assertEqual(display, self._delete_grid(session))
+        self.assertEqual(timeline, self._delete_rpc(session, "timeline_get"))
+        if current:
+            self.assertEqual(before["recipes"], after["recipes"])
+            self.assertEqual(files, {path: path.read_bytes() for path in files})
+        else:
+            for path in paths[:2]:
+                self.assertEqual(files[path], path.read_bytes())
+            for path in paths[2:]:
+                if path.name not in {"index.json", target_id + ".pkl.gz", target_id + ".autosave.pkl.gz"}:
+                    self.assertEqual(files[path], path.read_bytes())
+        self.assertTrue(self._delete_rpc(session, "video_begin")["already_active"])
+
+    def test_delete_current_during_video_rejects_until_end_then_fresh_save_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                initial, default_grid, customized, custom_manifest = self._delete_fixture(session)
+                custom_grid = self._delete_grid(session)[1]
+                old_id = customized["current_recipe"]["id"]
+                self._assert_video_delete_preserves_active(session, old_id)
+                self.assertTrue(self._delete_rpc(session, "video_end")["ended"])
+                restored = self._delete_rpc(session, "init")
+                self.assertEqual(restored["current_recipe"], customized["current_recipe"])
+                self.assertEqual(restored["model"], customized["model"])
+                self.assertEqual(self._delete_grid(session), (custom_manifest, custom_grid))
+                self.assertTrue(self._delete_rpc(session, "recipe_delete", {"id": old_id})["switched"])
+                fresh, _manifest = self._assert_fresh_after_delete(session, initial, default_grid, customized)
+                self._delete_rpc(session, "recipe_save")
+                session_id, secret = session.session_id, session.secret
+                manager.stop()
+                manager = self._start_manager(temp_dir)
+                resumed, _cookie = manager.create_session(session_id=session_id, secret=secret)
+                current, _manifest = self._assert_fresh_after_delete(resumed, initial, default_grid, customized)
+                self.assertEqual(current["current_recipe"], fresh["current_recipe"])
+            finally:
+                manager.stop()
+
+    def test_delete_current_during_video_rejects_and_shutdown_restart_restores_legal_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                _initial, _default_grid, customized, custom_manifest = self._delete_fixture(session)
+                custom_grid = self._delete_grid(session)[1]
+                old_id = customized["current_recipe"]["id"]
+                self._assert_video_delete_preserves_active(session, old_id)
+                session_id, secret = session.session_id, session.secret
+                manager.stop()
+                manager = self._start_manager(temp_dir)
+                resumed, _cookie = manager.create_session(session_id=session_id, secret=secret)
+                current = self._delete_rpc(resumed, "init")
+                self.assertEqual(current["current_recipe"], customized["current_recipe"])
+                self.assertEqual(current["model"], customized["model"])
+                self.assertEqual([(step["name"], step["params"], step["step_id"]) for step in current["recipe"]],
+                                 [(step["name"], step["params"], step["step_id"]) for step in customized["recipe"]])
+                manifest, grid = self._delete_grid(resumed)
+                self.assertEqual(grid, custom_grid)
+                self.assertEqual(manifest["owner_step_ids"], custom_manifest["owner_step_ids"])
+                self.assertTrue(set(manifest["owner_step_ids"].values()).issubset(
+                    step["step_id"] for step in current["recipe"]))
+                self.assertIn(old_id, [entry["id"] for entry in current["recipes"]])
+                from structure_cad.display_provenance import validate_source_bound_identities
+                blob = tcad._webui_pickle_load(resumed.storage_dir / "autosave.pkl.gz")
+                validate_source_bound_identities(blob["steps_full"], blob["model_state"])
+            finally:
+                manager.stop()
+
+    def test_delete_noncurrent_during_video_keeps_active_and_end_restores_current(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._start_manager(temp_dir)
+            manager._force_inprocess_worker = True
+            try:
+                session, _cookie = manager.create_session()
+                _initial, _default_grid, customized, custom_manifest = self._delete_fixture(session)
+                custom_grid = self._delete_grid(session)[1]
+                other = self._delete_rpc(session, "recipe_new", {"name": "Delete noncurrent during video"})
+                self._delete_rpc(session, "recipe_save")
+                self._delete_rpc(session, "history_load", {"id": customized["current_recipe"]["id"]})
+                custom_manifest = self._delete_grid(session)[0]
+                self._assert_video_delete_preserves_active(session, other["current_recipe"]["id"], current=False)
+                self.assertTrue(self._delete_rpc(session, "video_end")["ended"])
+                restored = self._delete_rpc(session, "init")
+                self.assertEqual(restored["current_recipe"], customized["current_recipe"])
+                self.assertEqual(restored["model"], customized["model"])
+                self.assertEqual(self._delete_grid(session), (custom_manifest, custom_grid))
+                self._assert_deleted_pointers(session, other["current_recipe"]["id"])
+            finally:
+                manager.stop()
+
     def _save_empty_recipe(self, session):
         self.assertTrue(session.rpc("recipe_new", {"name": "Empty saved recipe"}, timeout_s=30.0)["ok"])
         self.assertTrue(session.rpc("set_step", {
