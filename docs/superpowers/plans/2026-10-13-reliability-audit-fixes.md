@@ -121,6 +121,9 @@ expect(next.recipe.find(s => s.index === next.selectedStepIndex)?.stepId)
 - [ ] 真实临时 worker 删除唯一当前配方：旧 ID 不再绑定；后续 save、正常
   shutdown 重启与连接断开后重启均不含旧 ID 或旧自定义步骤。
 - [ ] 验证删除非当前条目保持当前 grid/recipe；当前删除且还有其他条目时切换。
+- [ ] 视频会话活跃时，在恢复指针及历史文件变更前拒绝删除当前配方；验证
+  拒绝后的 `video_end`／shutdown 恢复合法，结束后正常删除仍成功，非当前
+  条目仍可删除。不得自动取消视频或移除严格来源校验。
 - [ ] 先观察 RED，再修解除绑定及全局 autosave/session 指针；无其他条目时
   使用既有全新 Untitled 默认初始化，不把被删配方重新保存。
 - [ ] 重跑 history 类、全部 webui_cad_shell 与 Task 1/2 保存加载回归。
