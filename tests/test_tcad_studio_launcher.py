@@ -1,6 +1,8 @@
 """M12：桌面启动器冒烟测试。"""
 import os
+import socketserver
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -182,11 +184,17 @@ class LauncherShutdownPersistenceTests(unittest.TestCase):
                         patch("tcad_studio.find_free_port", return_value=manager.port), \
                         patch("tcad_simulator.WebUIServerManager", return_value=manager), \
                         patch.object(studio, "time", SimpleNamespace(sleep=edit_then_interrupt)), \
+                        patch.object(manager._httpd, "shutdown", wraps=manager._httpd.shutdown) as shutdown, \
+                        patch.object(manager._httpd, "server_close", wraps=manager._httpd.server_close) as close, \
                         patch("tcad_studio.webbrowser.open") as browser:
                     self.assertEqual(studio.main(), 0)
+                    shutdown.assert_called_once_with()
+                    close.assert_called_once_with()
                     browser.assert_not_called()
                 self.assertFalse(manager.running)
                 self.assertEqual(manager.sessions, {})
+                self.assertIsNone(manager._httpd)
+                self.assertIsNone(manager._thread)
                 blob = tcad._webui_pickle_load(captured["storage"] / "autosave.pkl.gz")
                 # Stored material names are normalized to IDs in the client response.
                 self.assertEqual(blob["steps_full"][1]["params"]["thickness_nm"], 35)
@@ -211,6 +219,77 @@ class LauncherShutdownPersistenceTests(unittest.TestCase):
                 manager.stop()
                 if resumed_manager is not None:
                     resumed_manager.stop()
+
+
+class LauncherPartialStartupTests(unittest.TestCase):
+    def _assert_thread_start_failure_cleans_up(self, error):
+        import tcad_simulator as tcad
+        import tcad_studio as studio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = tcad.WebUIServerManager(
+                host="127.0.0.1", port=0, storage_root=Path(temp_dir) / ".tcad-studio",
+                enable_ai_agent=False,
+                default_domain={"grid_shape": [12, 12, 16], "voxel_size_nm": 5.0, "threads": 1},
+            )
+            # Real stdlib shutdown blocks forever if serve_forever never ran.
+            server = socketserver.BaseServer(("127.0.0.1", 0), None)
+            server.shutdown = Mock(wraps=server.shutdown)
+            server.server_close = Mock(wraps=server.server_close)
+            session = Mock()
+            manager.sessions["existing"] = session
+            stop = Mock(wraps=manager.stop)
+            sleep = Mock(side_effect=AssertionError("failed startup reached runtime loop"))
+            done = threading.Event()
+            outcome = {}
+
+            def launch():
+                try:
+                    with patch("sys.argv", ["tcad_studio.py", "--no-browser"]), \
+                            patch("tcad_studio.Path.home", return_value=Path(temp_dir)), \
+                            patch("tcad_studio.find_free_port", return_value=0), \
+                            patch("tcad_simulator.WebUIServerManager", return_value=manager), \
+                            patch("tcad_simulator._WebUIHTTPServer", return_value=server), \
+                            patch.object(manager, "ensure_static_assets"), \
+                            patch.object(manager, "stop", stop), \
+                            patch.object(studio, "time", SimpleNamespace(sleep=sleep)), \
+                            patch.object(threading.Thread, "start", side_effect=error):
+                        outcome["result"] = studio.main()
+                except BaseException as caught:
+                    outcome["error"] = caught
+                finally:
+                    done.set()
+
+            runner = threading.Thread(target=launch, daemon=True)
+            runner.start()
+            try:
+                completed = done.wait(timeout=1.0)
+            finally:
+                # Release the original bug's shutdown wait before reporting RED.
+                server._BaseServer__is_shut_down.set()
+                runner.join(timeout=2.0)
+            self.assertFalse(runner.is_alive(), "partial-start cleanup test leaked its runner")
+            self.assertTrue(completed, "stop blocked on a server whose service thread never started")
+            stop.assert_called_once_with()
+            server.shutdown.assert_not_called()
+            server.server_close.assert_called_once_with()
+            session.rpc.assert_called_once_with("shutdown", {}, timeout_s=5.0)
+            session.conn.close.assert_called_once_with()
+            session.process.terminate.assert_called_once_with()
+            self.assertEqual(manager.sessions, {})
+            self.assertIsNone(manager._httpd)
+            self.assertIsNone(manager._thread)
+            sleep.assert_not_called()
+            if isinstance(error, KeyboardInterrupt):
+                self.assertEqual(outcome, {"result": 0})
+            else:
+                self.assertIs(outcome.get("error"), error)
+
+    def test_service_thread_start_error_closes_server_and_propagates(self):
+        self._assert_thread_start_failure_cleans_up(RuntimeError("thread start failed"))
+
+    def test_service_thread_start_ctrl_c_closes_server_and_returns_zero(self):
+        self._assert_thread_start_failure_cleans_up(KeyboardInterrupt())
 
 
 if __name__ == "__main__":

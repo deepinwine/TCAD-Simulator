@@ -77104,7 +77104,9 @@ class WebUIServerManager:
         self._stop_event.set()
         if self._httpd is not None:
             try:
-                self._httpd.shutdown()
+                # BaseServer.shutdown waits forever if serve_forever never started.
+                if self.running:
+                    self._httpd.shutdown()
             except Exception:
                 pass
             try:
