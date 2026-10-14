@@ -402,6 +402,61 @@ describe('AppStateProvider 掩膜上传', () => {
 });
 
 describe('AppStateProvider 步骤结构编辑', () => {
+  function movableRecipeApi() {
+    let recipe = [
+      step(0, {name: 'Structure Wafer', stepId: 'init'}),
+      step(1, {name: 'Structure Deposit', stepId: 'A'}),
+      step(2, {name: 'Structure Etch', stepId: 'B'}),
+    ];
+    const removedIds: string[] = [];
+    const api = apiStub({
+      init: vi.fn(async () => ({...initView, recipe})),
+      moveStep: vi.fn(async (index, direction) => {
+        const reordered = [...recipe];
+        const target = index + (direction === 'down' ? 1 : -1);
+        [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+        recipe = reordered.map((item, index) => ({...item, index}));
+        return recipe;
+      }),
+      removeStep: vi.fn(async index => {
+        removedIds.push(recipe[index].stepId!);
+        recipe = recipe.filter(item => item.index !== index).map((item, index) => ({...item, index}));
+        return recipe;
+      }),
+    });
+    return {api, removedIds};
+  }
+
+  it('下移后删除请求使用选中持久身份的新索引', async () => {
+    const {api, removedIds} = movableRecipeApi();
+    mount(api); await waitUntilReady();
+    const previewGeneration = captured!.state.previewGeneration;
+    await act(async () => captured!.actions.moveStep('down'));
+    expect(api.moveStep).toHaveBeenCalledWith(1, 'down', expect.any(AbortSignal));
+    expect(captured!.state.recipe.map(item => [item.index, item.stepId])).toEqual([[0, 'init'], [1, 'B'], [2, 'A']]);
+    await act(async () => captured!.actions.removeStep());
+    expect(api.removeStep).toHaveBeenCalledWith(2, expect.any(AbortSignal));
+    expect(removedIds).toEqual(['A']);
+    expect(captured!.state.recipe.map(item => item.stepId)).toEqual(['init', 'B']);
+    expect(captured!.state.selectedStepIndex).toBe(1);
+    expect(captured!.state.previewGeneration).toBe(previewGeneration);
+  });
+
+  it('上移和连续移动始终跟随同一步骤身份', async () => {
+    const {api, removedIds} = movableRecipeApi();
+    mount(api); await waitUntilReady();
+    const previewGeneration = captured!.state.previewGeneration;
+    for (const [direction, expectedIndex] of [['down', 2], ['up', 1], ['down', 2], ['up', 1]] as const) {
+      await act(async () => captured!.actions.moveStep(direction));
+      expect(captured!.state.selectedStepIndex).toBe(expectedIndex);
+      expect(captured!.state.recipe.find(item => item.index === expectedIndex)?.stepId).toBe('A');
+    }
+    expect(vi.mocked(api.moveStep).mock.calls.map(([index, direction]) => [index, direction]))
+      .toEqual([[1, 'down'], [2, 'up'], [1, 'down'], [2, 'up']]);
+    expect(removedIds).toEqual([]);
+    expect(captured!.state.previewGeneration).toBe(previewGeneration);
+  });
+
   it('moveStep 调用端点并以服务端列表替换配方', async () => {
     const moved = [step(0, {instanceName: 'B'}), step(1, {instanceName: 'A'})];
     const api = apiStub({

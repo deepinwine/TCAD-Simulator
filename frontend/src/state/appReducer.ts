@@ -469,16 +469,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         previewGeneration: state.previewGeneration + 1,
       };
     case 'recipe/stepsReplaced': {
-      const selectedExists = action.recipe.some(
-        item => item.index === state.selectedStepIndex,
-      );
+      const selectedId = state.recipe.find(item => item.index === state.selectedStepIndex)?.stepId;
+      const candidates = visibleSteps(action.recipe);
+      const selected = selectedId?.trim()
+        ? candidates.find(item => item.stepId === selectedId)
+        : candidates.find(item => item.index === state.selectedStepIndex);
       return {
         ...state,
         hiddenStepIds: validHiddenSteps(state.hiddenStepIds, action.recipe, state.displayManifest, state.displayReady),
         recipe: action.recipe,
-        selectedStepIndex: selectedExists
-          ? state.selectedStepIndex
-          : visibleSteps(action.recipe)[0]?.index ?? null,
+        selectedStepIndex: selected?.index ?? candidates[0]?.index ?? null,
         drafts: {},
         parameterErrors: {},
         stepErrors: {},

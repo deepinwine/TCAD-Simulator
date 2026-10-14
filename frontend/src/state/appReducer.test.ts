@@ -16,7 +16,10 @@ it('local source visibility uses stable IDs without changing selection, enabled,
   const next = appReducer(state as never, {type:'display/toggled', stepId:'s1'});
   expect(next.hiddenStepIds).toEqual(['s1']);
   expect(next.recipe).toBe(recipe); expect(next.selectedStepIndex).toBe(1); expect(next.previewGeneration).toBe(0);
-  expect(appReducer(next,{type:'recipe/stepsReplaced',recipe:[{...recipe[0],index:5}]}).hiddenStepIds).toEqual(['s1']);
+  const reordered = appReducer(next,{type:'recipe/stepsReplaced',recipe:[{...recipe[0],index:5}]});
+  expect(reordered.hiddenStepIds).toEqual(['s1']);
+  expect(reordered.selectedStepIndex).toBe(5);
+  expect(reordered.previewGeneration).toBe(next.previewGeneration);
   expect(appReducer(next,{type:'recipe/stepsReplaced',recipe:[]}).hiddenStepIds).toEqual([]);
   const loaded = appReducer(next, {type:'recipe/replaced', recipe});
   expect(loaded.hiddenStepIds).toEqual([]);
@@ -67,6 +70,56 @@ const timeline: TimelineView = {
 function readyState() {
   return appReducer(initialAppState, {type: 'bootstrap/succeeded', payload: initView});
 }
+
+describe('stepsReplaced 保持选中步骤身份', () => {
+  const initializer = step(0, {name: 'Structure Wafer', stepId: 'init'});
+  const a = step(1, {name: 'Structure Deposit', stepId: 'A'});
+  const b = step(2, {name: 'Structure Etch', stepId: 'B'});
+  const recipe = [initializer, a, b];
+
+  it.each([1, 2])('重排后选中原索引 %s 的持久身份', selectedStepIndex => {
+    const before = {...readyState(), recipe, selectedStepIndex};
+    const replaced = [initializer, {...b, index: 1}, {...a, index: 2}];
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: replaced});
+    expect(after.selectedStepIndex).toBe(selectedStepIndex === 1 ? 2 : 1);
+    expect(after.recipe.find(item => item.index === after.selectedStepIndex)?.stepId)
+      .toBe(recipe[selectedStepIndex].stepId);
+    expect(after.previewGeneration).toBe(before.previewGeneration);
+  });
+
+  it('插入步骤导致重编号时仍保持原步骤，并保留结构编辑的错误和草稿清理语义', () => {
+    const error = new TcadApiError('旧错误', {status: 400});
+    const before = {...readyState(), recipe, selectedStepIndex: 2,
+      drafts: {'2:dose': {value: 200, sequence: 1, validation: {status: 'valid' as const}}},
+      parameterErrors: {'2:dose': {sequence: 1, error}}, stepErrors: {2: error}, globalError: error};
+    const replaced = [initializer, a, step(2, {stepId: 'A-copy'}), {...b, index: 3}];
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: replaced});
+    expect(after.selectedStepIndex).toBe(3);
+    expect(after.recipe).toBe(replaced);
+    expect(after.drafts).toEqual({});
+    expect(after.parameterErrors).toEqual({});
+    expect(after.stepErrors).toEqual({});
+    expect(after.globalError).toBeNull();
+    expect(after.previewGeneration).toBe(before.previewGeneration);
+  });
+
+  it('选中身份被删除但原索引仍被占用时回落首个普通步骤', () => {
+    const before = {...readyState(), recipe, selectedStepIndex: 2};
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: [initializer, a, step(2, {stepId: 'C'})]});
+    expect(after.selectedStepIndex).toBe(1);
+  });
+
+  it.each([{replaced: [initializer]}, {replaced: []}])('仅初始化步骤或空列表时不伪造选中步骤', ({replaced}) => {
+    const before = {...readyState(), recipe, selectedStepIndex: 1};
+    expect(appReducer(before, {type: 'recipe/stepsReplaced', recipe: replaced}).selectedStepIndex).toBeNull();
+  });
+
+  it.each([undefined, '', '   '])('旧响应的无效 ID %s 保持索引兼容回退', stepId => {
+    const before = {...readyState(), recipe: [initializer, {...a, stepId}, b], selectedStepIndex: 1};
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: [initializer, {...b, index: 1}, {...a, stepId, index: 2}]});
+    expect(after.selectedStepIndex).toBe(1);
+  });
+});
 
 describe('appReducer bootstrap 与本地编辑', () => {
   it('mask asset applied updates authoritative statuses and preview without changing selection, timeline or drafts', () => {
