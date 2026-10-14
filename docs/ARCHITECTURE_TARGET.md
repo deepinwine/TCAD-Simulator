@@ -159,6 +159,27 @@ identity 时生成新值，同配方重复 identity 保留首个并为后续步�
 限制 256 MiB 和 65,536 个登记身份；reset 释放。未跟踪来源的旧工艺几何变更使来源
 失效为未知，纯缓存清理保留来源。
 
+可靠性生命周期（沿用以上协议，不增加执行或保存 API）：
+
+- 删除已构建步骤时，仅将该步骤的剩余材料来源解绑为 owner 0，正式材料 grid
+  和其他有效来源不变；历史恢复须按恢复后的 Recipe 验证来源，损坏快照仍拒绝。
+- `steps_full=[]` 是权威空配方；仅字段缺失或为 `null` 时回退旧 `steps`。
+  成功发布后的兼容性写回失败只产生警告，不能把已完成加载误报为失败。
+- headless 缓存按实际启用的 Mask Exposure／Structure Pattern 输入签名，包含
+  自定义掩膜的布尔内容与形状、实际消费的普通文件内容；不读取设备或 FIFO。
+- React 编辑后的选择按持久化 `stepId` 跟随对象；旧服务无有效 identity 时
+  保留索引回退，不能让移动后编辑或删除作用于交换位置的邻居。
+- 删除当前配方前清理恢复指针；无可载入的其他配方时使用独立的新默认模型与
+  新 identity。视频恢复会话活跃时先拒绝删除当前配方，不能把旧快照写入新配方。
+- 启动器退出调用既有 manager shutdown；服务线程尚未启动时只关闭已创建
+  资源并清理会话，不等待未运行的 `serve_forever()`。保存仍受既有 worker RPC
+  超时与进程终止限制，不保证强制杀进程后的保存。
+
+上述行为由 `StructureDisplayHTTPTests`、`CadShellWorkerHistoryTests`、
+`HeadlessMaskCacheTests`、前端 reducer／provider 测试及
+`tests/test_tcad_studio_launcher.py` 覆盖；CI 核心依赖包含 SciPy 与 cryptography，
+Qt、gdstk、ViennaPS 保持可选。
+
 只读展示端点由 `tests/test_structure_display_http.py::StructureDisplayHTTPTests` 覆盖。
 展示缓存独立于按材料聚合的 canonical `GeometryScene`，按当前 model revision 缓存
 `(owner_id, mat_id)` 的剩余非空体素，复用既有网格提取器的加法精确体素边界模式与
