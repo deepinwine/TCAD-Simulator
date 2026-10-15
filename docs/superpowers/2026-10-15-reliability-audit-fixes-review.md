@@ -3,8 +3,20 @@
 日期：2026-10-15。基准：`main@f33e5c480718a0d58c3b01d377d0942aae290f5c`。
 分支：`codex/reliability-audit-fixes`。
 
-状态：七项实现及专项回归已完成，逐项 SPEC、QUALITY 均已通过；事务测试
-边界校正回归已通过，待独立审查与整批最终判定。本记录不代表已批准合并。
+状态：七项修复、追加边界补修及事务测试校正均已通过独立 SPEC、QUALITY，
+整批最终 Verdict 为 APPROVE。待所有者选择集成方式，本轮未自动合并或推送。
+
+## 最终审查结论
+
+独立最终评审范围：`f33e5c4..de739f5382a6c49f8ab990c94c8ea7131f209c66`。
+无未关闭 BLOCK，无新增 NB，有序修复清单为空。本文最后一次更新仅记录该
+判定，不增加实现变更。
+
+八项边界全部 PASS：固定技术栈与职责、ProcessModel／Recipe 协议、单体权威
+实现与最小改动、canonical 单位与 Structure 范围、来源与失败原子性、M2
+HTTP／二进制契约、Layout／Accurate 可选依赖、React 选择与 Viewer 生命周期。
+最终评审另独立运行事务校正用例，1 PASS／2.987 s，编译及全分支 diff check
+通过；先前追加的 Timeline、配方切换、步骤选择三个 BLOCK 均已分别关闭。
 
 ## 修复与回归
 
