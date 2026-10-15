@@ -103,10 +103,19 @@ describe('stepsReplaced 保持选中步骤身份', () => {
     expect(after.previewGeneration).toBe(before.previewGeneration);
   });
 
-  it('选中身份被删除但原索引仍被占用时回落首个普通步骤', () => {
+  it('删除中间选中身份后沿用原索引选择后继邻居', () => {
+    const c = step(3, {stepId: 'C'});
+    const before = {...readyState(), recipe: [...recipe, c], selectedStepIndex: 2};
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: [initializer, a, {...c, index: 2}]});
+    expect(after.selectedStepIndex).toBe(2);
+    expect(after.recipe.find(item => item.index === after.selectedStepIndex)?.stepId).toBe('C');
+  });
+
+  it('删除末尾选中身份且原索引已不存在时回落首个普通步骤', () => {
     const before = {...readyState(), recipe, selectedStepIndex: 2};
-    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: [initializer, a, step(2, {stepId: 'C'})]});
+    const after = appReducer(before, {type: 'recipe/stepsReplaced', recipe: [initializer, a]});
     expect(after.selectedStepIndex).toBe(1);
+    expect(after.recipe.find(item => item.index === after.selectedStepIndex)?.stepId).toBe('A');
   });
 
   it.each([{replaced: [initializer]}, {replaced: []}])('仅初始化步骤或空列表时不伪造选中步骤', ({replaced}) => {

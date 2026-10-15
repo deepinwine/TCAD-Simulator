@@ -402,15 +402,24 @@ describe('AppStateProvider 掩膜上传', () => {
 });
 
 describe('AppStateProvider 步骤结构编辑', () => {
-  function movableRecipeApi() {
+  function movableRecipeApi(extraSteps: StepView[] = []) {
     let recipe = [
       step(0, {name: 'Structure Wafer', stepId: 'init'}),
       step(1, {name: 'Structure Deposit', stepId: 'A'}),
       step(2, {name: 'Structure Etch', stepId: 'B'}),
+      ...extraSteps,
     ];
     const removedIds: string[] = [];
+    const editedIds: string[] = [];
     const api = apiStub({
       init: vi.fn(async () => ({...initView, recipe})),
+      setStep: vi.fn(async request => {
+        const selected = recipe.find(item => item.index === request.index)!;
+        editedIds.push(selected.stepId!);
+        const updated = {...selected, params: {...selected.params, ...request.params}};
+        recipe = recipe.map(item => item.index === request.index ? updated : item);
+        return {step: updated, statuses: recipe.map(item => item.runtimeStatus), warnings: []};
+      }),
       moveStep: vi.fn(async (index, direction) => {
         const reordered = [...recipe];
         const target = index + (direction === 'down' ? 1 : -1);
@@ -424,8 +433,44 @@ describe('AppStateProvider 步骤结构编辑', () => {
         return recipe;
       }),
     });
-    return {api, removedIds};
+    return {api, removedIds, editedIds};
   }
+
+  it.each(['remove', 'parameter'] as const)('删除中间步骤后选择后继邻居，后续 %s 操作作用于该邻居', async operation => {
+    const {api, removedIds, editedIds} = movableRecipeApi([
+      step(3, {name: 'Structure Deposit', stepId: 'C'}),
+    ]);
+    mount(api); await waitUntilReady();
+    const previewGeneration = captured!.state.previewGeneration;
+    await act(async () => captured!.actions.selectStep(2));
+    await act(async () => captured!.actions.removeStep());
+
+    expect(api.removeStep).toHaveBeenNthCalledWith(1, 2, expect.any(AbortSignal));
+    expect(removedIds).toEqual(['B']);
+    expect(captured!.state.recipe.map(item => [item.index, item.stepId]))
+      .toEqual([[0, 'init'], [1, 'A'], [2, 'C']]);
+    expect(captured!.state.selectedStepIndex).toBe(2);
+    expect(captured!.state.recipe.find(item => item.index === captured!.state.selectedStepIndex)?.stepId)
+      .toBe('C');
+    expect(captured!.state.previewGeneration).toBe(previewGeneration);
+
+    if (operation === 'remove') {
+      await act(async () => captured!.actions.removeStep());
+      expect(api.removeStep).toHaveBeenNthCalledWith(2, 2, expect.any(AbortSignal));
+      expect(removedIds).toEqual(['B', 'C']);
+      expect(captured!.state.recipe.map(item => item.stepId)).toEqual(['init', 'A']);
+      expect(captured!.state.selectedStepIndex).toBe(1);
+    } else {
+      const index = captured!.state.selectedStepIndex!;
+      await act(async () => {captured!.actions.updateDraft(index, 'dose', 456);});
+      await act(async () => captured!.actions.saveParameter(index, 'dose'));
+      expect(api.setStep).toHaveBeenCalledWith({index: 2, params: {dose: 456}}, expect.any(AbortSignal));
+      expect(editedIds).toEqual(['C']);
+      expect(captured!.state.recipe.find(item => item.stepId === 'C')?.params.dose).toBe(456);
+      expect(captured!.state.recipe.find(item => item.stepId === 'A')?.params.dose).toBe(101);
+      expect(captured!.state.drafts).toEqual({});
+    }
+  });
 
   it('下移后删除请求使用选中持久身份的新索引', async () => {
     const {api, removedIds} = movableRecipeApi();

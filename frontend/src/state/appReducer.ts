@@ -471,9 +471,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'recipe/stepsReplaced': {
       const selectedId = state.recipe.find(item => item.index === state.selectedStepIndex)?.stepId;
       const candidates = visibleSteps(action.recipe);
-      const selected = selectedId?.trim()
+      const selected = (selectedId?.trim()
         ? candidates.find(item => item.stepId === selectedId)
-        : candidates.find(item => item.index === state.selectedStepIndex);
+        : undefined)
+        ?? candidates.find(item => item.index === state.selectedStepIndex);
       return {
         ...state,
         hiddenStepIds: validHiddenSteps(state.hiddenStepIds, action.recipe, state.displayManifest, state.displayReady),
