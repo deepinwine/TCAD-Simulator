@@ -72766,6 +72766,7 @@ def _webui_worker_main(
                 loaded = _load_autosave()
                 if loaded:
                     _clear_all_history()
+                    _invalidate_loop_cache()
                 conn.send(
                     {
                         "ok": True,
@@ -72792,6 +72793,7 @@ def _webui_worker_main(
                 if not _load_recipe_entry(entry_id):
                     raise ValueError("History entry not found")
                 _clear_all_history()
+                _invalidate_loop_cache()
                 conn.send(
                     {
                         "ok": True,
@@ -73274,6 +73276,7 @@ def _webui_worker_main(
                 except Exception:
                     pass
                 _clear_all_history()
+                _invalidate_loop_cache()
                 model_revision += 1
                 preview_ready.clear()
                 current_recipe_id = ""

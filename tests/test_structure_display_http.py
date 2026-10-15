@@ -56,6 +56,135 @@ class StructureDisplayHTTPTests(unittest.TestCase):
             frame = frame.f_back
         self.fail('Worker history frame unavailable')
 
+    def cached_run(self):
+        with patch.object(tcad.StructureWaferStep, 'execute', side_effect=AssertionError('Unexpected cache replay')), \
+             patch.object(tcad.StructureDepositStep, 'execute', side_effect=AssertionError('Unexpected cache replay')), \
+             patch.object(tcad.StructureEtchStep, 'execute', side_effect=AssertionError('Unexpected cache replay')):
+            result = self.request('POST', '/api/run/all', {})['result']
+        self.assertGreater(result['cache_reused'], 0)
+        return result
+
+    def recipe_switch_fixture(self):
+        self.fixture()
+        original = self.request('GET', '/api/init')['result']['recipe']
+        saved = self.request('POST', '/api/recipe/save', {'name': '来源配方A'})['result']
+        session = next(iter(self.manager.sessions.values()))
+        entry = next(entry for entry in saved['recipes'] if entry['id'] == saved['id'])
+        blob = tcad._webui_pickle_load(session.storage_dir / 'history' / entry['file'])
+        self.request('POST', '/api/recipe/new', {'name': '来源配方B'})
+        self.fixture()
+        current = self.request('GET', '/api/init')['result']['recipe']
+        self.assertTrue({step['step_id'] for step in original}.isdisjoint(step['step_id'] for step in current))
+        return original, saved, blob, session
+
+    def test_reimport_same_parameters_rebuilds_with_new_identities_and_keeps_own_cache(self):
+        self.fixture()
+        original = self.request('GET', '/api/init')['result']['recipe']
+        _, grid, _ = self.display_voxels()
+        self.fixture()
+        current = self.request('GET', '/api/init')['result']['recipe']
+        identities = {step['step_id'] for step in current}
+        self.assertTrue({step['step_id'] for step in original}.isdisjoint(identities))
+        manifest, actual_grid, owners = self.display_voxels()
+        self.assertEqual({step['step_id'] for step in current[:3]}, set(manifest['owner_step_ids'].values()))
+        np.testing.assert_array_equal(grid, actual_grid)
+        self.cached_run()
+        repeated, repeated_grid, repeated_owners = self.display_voxels()
+        self.assertEqual(manifest['owner_step_ids'], repeated['owner_step_ids'])
+        np.testing.assert_array_equal(grid, repeated_grid)
+        np.testing.assert_array_equal(owners, repeated_owners)
+        saved = self.request('POST', '/api/recipe/save', {'name': '重新导入来源'})['result']
+        self.request('POST', '/api/recipe/new', {'name': '保存切换'})
+        loaded = self.request('POST', '/api/recipe/load', {'id': saved['id']})['result']
+        self.assertEqual(identities, {step['step_id'] for step in loaded['recipe']})
+        restored, restored_grid, restored_owners = self.display_voxels()
+        self.assertEqual(repeated['owner_step_ids'], restored['owner_step_ids'])
+        np.testing.assert_array_equal(grid, restored_grid)
+        np.testing.assert_array_equal(owners, restored_owners)
+
+    def test_named_recipe_switch_drops_previous_recipe_cache(self):
+        original, saved, _, _ = self.recipe_switch_fixture()
+        self.request('POST', '/api/recipe/load', {'id': saved['id']})
+        before, grid, owners = self.display_voxels()
+        self.request('POST', '/api/run/all', {})
+        current = self.request('GET', '/api/init')['result']['recipe']
+        self.assertEqual([step['step_id'] for step in original], [step['step_id'] for step in current])
+        after, actual_grid, actual_owners = self.display_voxels()
+        self.assertEqual(before['owner_step_ids'], after['owner_step_ids'])
+        np.testing.assert_array_equal(grid, actual_grid)
+        np.testing.assert_array_equal(owners, actual_owners)
+        self.cached_run()
+
+    def test_global_autosave_switch_drops_previous_recipe_cache(self):
+        original, saved, blob, session = self.recipe_switch_fixture()
+        tcad._webui_pickle_dump(session.storage_dir / 'autosave.pkl.gz', blob)
+        restored = self.request('POST', '/api/load_autosave', {})['result']
+        self.assertTrue(restored['loaded'])
+        self.assertEqual(saved['id'], restored['recipe_id'])
+        before, grid, owners = self.display_voxels()
+        self.request('POST', '/api/run/all', {})
+        current = self.request('GET', '/api/init')['result']['recipe']
+        self.assertEqual([step['step_id'] for step in original], [step['step_id'] for step in current])
+        after, actual_grid, actual_owners = self.display_voxels()
+        self.assertEqual(before['owner_step_ids'], after['owner_step_ids'])
+        np.testing.assert_array_equal(grid, actual_grid)
+        np.testing.assert_array_equal(owners, actual_owners)
+        self.cached_run()
+
+    def test_recipe_import_resets_retired_step_identity_lifecycle(self):
+        self.fixture()
+        original = self.request('GET', '/api/init')['result']['recipe']
+        _, grid, owners = self.display_voxels()
+        removed_id = original[2]['step_id']
+        self.request('POST', '/api/recipe/remove', {'index': 2})
+        self.request('POST', '/api/recipe/import', {'recipe': {'steps_full': original}})
+        self.request('POST', '/api/run/all', {})
+        after, actual_grid, actual_owners = self.display_voxels()
+        self.assertIn(removed_id, after['owner_step_ids'].values())
+        np.testing.assert_array_equal(grid, actual_grid)
+        np.testing.assert_array_equal(owners, actual_owners)
+        self.cached_run()
+        repeated, _, repeated_owners = self.display_voxels()
+        self.assertIn(removed_id, repeated['owner_step_ids'].values())
+        np.testing.assert_array_equal(owners, repeated_owners)
+
+    def test_rejected_recipe_replacements_preserve_current_valid_cache(self):
+        _, saved, blob, session = self.recipe_switch_fixture()
+        foreign_id = tcad.StructureWaferStep(tcad.MaterialDatabase()).step_id
+        broken = copy.deepcopy(blob)
+        broken['model_state']['display_step_ids'][1] = foreign_id
+        targets = [session.storage_dir / 'history' / entry['file']
+                   for entry in saved['recipes'] if entry['id'] == saved['id']]
+        targets += [path for path in (session.storage_dir / 'history').glob('*autosave*')
+                    if tcad._webui_pickle_load(path).get('recipe_id') == saved['id']]
+        for path in targets:
+            tcad._webui_pickle_dump(path, broken)
+        for endpoint, payload in (
+            ('/api/recipe/import', {'recipe': {'steps_full': [
+                {'name': 'Structure Wafer', 'params': {'thickness_nm': -10}},
+            ]}}),
+            ('/api/recipe/load', {'id': saved['id']}),
+            ('/api/load_autosave', {}),
+        ):
+            with self.subTest(endpoint=endpoint):
+                if endpoint == '/api/load_autosave':
+                    tcad._webui_pickle_dump(session.storage_dir / 'autosave.pkl.gz', broken)
+                before = self.request('GET', '/api/init')['result']
+                timeline = self.request('POST', '/api/timeline/get', {})['result']
+                manifest, grid, owners = self.display_voxels()
+                rejected = self.request('POST', endpoint, payload, ok=False)
+                if endpoint != '/api/recipe/import':
+                    self.assertIn('source-bound', rejected['error'])
+                after = self.request('GET', '/api/init')['result']
+                for key in ('recipe', 'model', 'current_recipe', 'ui_state', 'log'):
+                    self.assertEqual(before[key], after[key], key)
+                self.assertEqual(timeline, self.request('POST', '/api/timeline/get', {})['result'])
+                actual_manifest, actual_grid, actual_owners = self.display_voxels()
+                self.assertEqual(manifest, actual_manifest)
+                np.testing.assert_array_equal(grid, actual_grid)
+                np.testing.assert_array_equal(owners, actual_owners)
+                self.cached_run()
+
     def test_removed_built_step_saves_and_loads_as_unknown_without_changing_grid(self):
         self.request('POST', '/api/recipe/import', {'recipe': {'name': '删除来源', 'steps_full': [
             {'name': 'Structure Wafer', 'params': {'material': 'Silicon', 'thickness_nm': 20}},
