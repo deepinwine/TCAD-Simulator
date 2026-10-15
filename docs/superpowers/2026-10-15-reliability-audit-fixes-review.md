@@ -4,7 +4,8 @@
 分支：`codex/reliability-audit-fixes`。
 
 状态：七项修复、追加边界补修及事务测试校正均已通过独立 SPEC、QUALITY，
-整批最终 Verdict 为 APPROVE。待所有者选择集成方式，本轮未自动合并或推送。
+整批最终 Verdict 为 APPROVE。所有者随后选择本地合并；已快进到 main 并复验，
+尚未推送 GitHub，未重启用户服务。
 
 ## 最终审查结论
 
@@ -76,13 +77,26 @@ ViennaPS、ViennaLS、Numba。实际命令从 `.github/workflows/ci.yml` 的
 facade 与 launcher 回归；不是以本机完整开发依赖替代 CI 配置验证。
 前端本机运行时为 Node 26.0.0、npm 11.12.1。
 
-核心命令复用本轮保留的临时核验脚本：
+核心命令从实际 CI 提取执行，可在仓库根目录使用相同最小环境复跑：
 
 ```bash
-/tmp/tcad-ci-fix-QcpZnp4E.venv/bin/python /tmp/tcad-block003-verify.py
+TCAD_SKIP_QT=1 MPLBACKEND=Agg PYTHONPYCACHEPREFIX=/tmp/tcad-main-merge-ci \
+  /tmp/tcad-ci-fix-QcpZnp4E.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+from tests.test_ci_contract import WORKFLOW, run_script
+
+environment = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ['PATH'])
+workflow = WORKFLOW.read_text(encoding='utf-8')
+for name in ('Compile check', 'Core backend tests'):
+    subprocess.run(['/bin/bash', '-e', '-o', 'pipefail', '-c', run_script(workflow, name)],
+                   env=environment, check=True)
+PY
 ```
 
-该脚本只提取并执行实际 CI 两个 run block，临时脚本不是项目运行依赖。
+上述 `/tmp` venv 是本轮核验环境，不是项目运行依赖。
 补充五模块的实际命令为：
 
 ```bash
@@ -105,9 +119,23 @@ TCAD_SKIP_QT=1 MPLBACKEND=Agg PYTHONPYCACHEPREFIX=/tmp/tcad-root-mask-final \
 保存端点或执行器。来源仍为显示辅助数据，材料 grid 仍是 canonical。
 未合入独立的深度区间刻蚀分支，也未重启用户服务。
 
-本轮不自动合并或推送：main 仍为 `f33e5c4`，修复提交和工作树保留供所有者
-决定集成。所有者如选择 PR，仅推送 `deepinwine` 对应的 backup remote，
-不推送上游 origin。
+所有者选择选项 1 后，main 从 `f33e5c4` 快进至已审查的 `9cf1052`，无冲突；
+没有拉取上游 origin，也没有推送任何 remote。全部修复提交已保留于 main，
+仅清理已合并的临时工作树及功能分支，其他工作树和用户未跟踪文件不变。
+后续推送仍需单独指令，目标为 `deepinwine` 对应的 backup remote，而非上游 origin。
+
+### main 合并后复验
+
+在 `/Users/jiajia/Documents/test/TCAD-Simulator` 执行，代码 HEAD 为 `9cf1052`；
+此后仅追加本条集成记录，没有修改运行时实现。
+
+| 验证 | 结果 |
+| --- | --- |
+| 实际 CI 编译／核心后端 | 编译 exit 0；535 tests，OK，13 skipped，145.677 s |
+| HTTP facade 与掩膜补充五模块 | 47 tests，OK，5.500 s |
+| 前端串行全量 | 35 files，627 tests PASS，19.35 s |
+| typecheck／build | 均 exit 0 |
+| grid128 基准 | 五个示例全部通过，输出 `/tmp/tcad-main-merged-grid128.json` |
 
 ## 已知限制
 
