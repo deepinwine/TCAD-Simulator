@@ -3,7 +3,6 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import json
-import gzip
 import subprocess
 import sys
 
@@ -289,13 +288,16 @@ class MaskApplyTransactionTests(unittest.TestCase):
                         self.assertEqual(path.read_bytes(), data)
 
     def test_killed_process_is_recovered_before_worker_loads_recipe(self):
+        import numpy as np
         import tcad_simulator as tcad
+        from mask_assets.transaction import MaskApplyTransaction
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             setup = WorkerConnection([('save', {}), ('get_recipe', {})])
             tcad._webui_worker_main(setup, str(root), default_domain=DOMAIN)
             old_recipe = setup.responses[-1]['result']
             old_bytes = (root / 'autosave.pkl.gz').read_bytes()
+            old_blob = tcad._webui_pickle_load(root / 'autosave.pkl.gz')
             script = '''
 import sys, time
 from pathlib import Path
@@ -321,11 +323,47 @@ time.sleep(60)
                     process.wait(timeout=10)
                 process.stdout.close()
             restarted = WorkerConnection([('get_recipe', {})])
-            tcad._webui_worker_main(restarted, str(root), default_domain=DOMAIN)
+            startup_events = []
+            original_recover = MaskApplyTransaction.recover
+            original_load = tcad._webui_pickle_load
+            def recover(transaction):
+                result = original_recover(transaction)
+                # Recovery must restore the exact compressed bytes before any
+                # loader can normalize the persisted recipe representation.
+                self.assertEqual(startup_events, [])
+                self.assertEqual((root / 'autosave.pkl.gz').read_bytes(), old_bytes)
+                self.assertFalse((root / 'mask_assets/a/manifest.json').exists())
+                self.assertFalse((root / 'mask_assets/a/revisions/1.json').exists())
+                self.assertFalse(transaction.marker.exists())
+                self.assertFalse(transaction.journal.exists())
+                startup_events.append('recovered')
+                return result
+            def load(path):
+                startup_events.append('load')
+                return original_load(path)
+            with mock.patch.object(MaskApplyTransaction, 'recover', new=recover), mock.patch.object(tcad, '_webui_pickle_load', new=load):
+                tcad._webui_worker_main(restarted, str(root), default_domain=DOMAIN)
+            self.assertEqual(startup_events.count('recovered'), 1)
+            self.assertGreater(startup_events.count('load'), 0)
+            self.assertEqual(startup_events[0], 'recovered')
             self.assertEqual(restarted.responses[0]['result'], old_recipe)
-            self.assertEqual(gzip.decompress((root / 'autosave.pkl.gz').read_bytes()), gzip.decompress(old_bytes))
+            loaded_blob = original_load(root / 'autosave.pkl.gz')
+            # Loading may remove redundant params_raw and canonicalize material
+            # names to IDs, while retaining every step field and model value.
+            self.assertEqual(len(loaded_blob['steps_full']), len(old_blob['steps_full']))
+            for old_step, loaded_step in zip(old_blob['steps_full'], loaded_blob['steps_full']):
+                expected_step = dict(old_step)
+                expected_step['params'] = old_step.get('params_raw') or old_step['params']
+                expected_step.pop('params_raw', None)
+                np.testing.assert_equal(loaded_step, expected_step)
+            np.testing.assert_equal(
+                {key: value for key, value in loaded_blob.items() if key != 'steps_full'},
+                {key: value for key, value in old_blob.items() if key != 'steps_full'},
+            )
             self.assertFalse((root / 'mask_assets/a/manifest.json').exists())
+            self.assertFalse((root / 'mask_assets/a/revisions/1.json').exists())
             self.assertFalse((root / '.mask-apply-pending.json').exists())
+            self.assertFalse((root / '.mask-apply-journal').exists())
 
     def test_success_response_has_durable_recipe_and_survives_restart(self):
         import tcad_simulator as tcad
